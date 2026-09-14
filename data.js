@@ -250,15 +250,15 @@
   };
 
   const stockStrategies = {
-    basic: { name: bi("Basic", "Basique"), multiplier: 1.08, supportHours: 0, cost: 0 },
-    coordinated: { name: bi("Coordinated", "Coordonnée"), multiplier: 1, supportHours: 60, cost: 2000 },
-    optimized: { name: bi("Optimized", "Optimisée"), multiplier: .92, supportHours: 140, cost: 5000 }
+    basic: { name: bi("Basic", "Basique"), multiplier: 1.08, supportHours: 0, cost: 0, stockoutRate: .06 },
+    coordinated: { name: bi("Coordinated", "Coordonnée"), multiplier: 1, supportHours: 60, cost: 2000, stockoutRate: .02 },
+    optimized: { name: bi("Optimized", "Optimisée"), multiplier: .92, supportHours: 140, cost: 5000, stockoutRate: .005 }
   };
 
   const hrStrategies = {
-    reactive: { name: bi("Reactive", "Réactive"), absenteeism: .08, cost: 0, climate: 0 },
-    structured: { name: bi("Structured", "Structurée"), absenteeism: .05, cost: 4000, climate: 2 },
-    supportive: { name: bi("Supportive", "Soutenante"), absenteeism: .03, cost: 10000, climate: 5 }
+    reactive: { name: bi("Reactive", "Réactive"), absenteeism: .08, cost: 0, climate: 0, retention: 0 },
+    structured: { name: bi("Structured", "Structurée"), absenteeism: .05, cost: 4000, climate: 2, retention: 3 },
+    supportive: { name: bi("Supportive", "Soutenante"), absenteeism: .03, cost: 10000, climate: 5, retention: 6 }
   };
 
   const marketingStrategies = {
@@ -288,7 +288,7 @@
 
   const socialActions = {
     communication: { name: bi("Improve communication", "Améliorer la communication"), note: bi("Clear reminders and follow-up raise trust and repeat visits.", "Des rappels et un suivi clairs renforcent la confiance et les visites répétées."), cost: 800, deltas: { clientTrust: 8, communityPressure: -2 } },
-    staffMeeting: { name: bi("Hold a staff meeting", "Organiser une réunion d’équipe"), note: bi("Alignment improves staff climate but uses management time.", "L’alignement améliore le climat mais mobilise du temps de gestion."), cost: 500, deltas: { staffClimate: 8, clientTrust: 1 }, supportHours: 12 },
+    staffMeeting: { name: bi("Hold a staff meeting", "Organiser une réunion d’équipe"), note: bi("Alignment improves staff climate but uses management time.", "L’alignement améliore le climat mais mobilise du temps de gestion."), cost: 500, deltas: { staffClimate: 8, clientTrust: 1 }, supportHours: 12, fatigueRelief: .5 },
     referralOutreach: { name: bi("Referral outreach", "Développer les référents"), note: bi("Local partners send more diagnostic and advanced-care requests.", "Les partenaires locaux envoient davantage de demandes diagnostiques et avancées."), cost: 1200, deltas: { referralSupport: 10 }, advancedDemand: .06 },
     communityAccess: { name: bi("Community access offer", "Offre d’accès communautaire"), note: bi("Easier access raises routine demand and public expectations.", "Un accès facilité augmente la demande courante et les attentes publiques."), cost: 1200, deltas: { clientTrust: 5, communityPressure: 8 }, routineDemand: .07 }
   };
@@ -317,9 +317,9 @@
   };
 
   const scenarios = {
-    balanced: { name: bi("Balanced startup", "Démarrage équilibré"), description: bi("A stable clinic with room to choose its direction.", "Une clinique stable qui peut choisir son orientation."), treasury: 240000, clients: 1200, reputation: 56, marketFocus: "community", staff: baseStaff, services: ["consult"], rooms: { consult: 1 }, equipment: {}, trainings: ["preventive"], location: "residential", social: { clientTrust: 50, staffClimate: 50, referralSupport: 50, communityPressure: 50 }, goals: scenarioGoals.balanced },
-    rescue: { name: bi("Cash-strapped rescue", "Redressement sous contrainte"), description: bi("Low cash, tired staff, and urgent routine demand require careful recovery.", "Trésorerie faible, équipe fatiguée et demande courante pressante exigent un redressement prudent."), treasury: 70000, clients: 900, reputation: 48, marketFocus: "budget", staff: baseStaff.map((person) => ({ ...person, salary: Math.round(person.salary * .95) })), services: ["consult", "vaccination"], rooms: { consult: 1 }, equipment: {}, trainings: ["preventive"], location: "residential", social: { clientTrust: 43, staffClimate: 38, referralSupport: 42, communityPressure: 67 }, goals: scenarioGoals.rescue },
-    growth: { name: bi("Specialist growth clinic", "Clinique spécialisée en croissance"), description: bi("A capable imaging clinic must turn expensive assets into sustainable growth.", "Une clinique d’imagerie doit transformer des actifs coûteux en croissance durable."), treasury: 180000, clients: 1050, reputation: 64, marketFocus: "advanced", staff: [...baseStaff, ...specialistStaff], services: ["consult", "vaccination", "lab", "ultrasound"], rooms: { consult: 2, lab: 1, imaging: 1 }, equipment: { labAnalyzer: { owned: 1, leased: 0 }, ultrasound: { owned: 0, leased: 1 } }, trainings: ["preventive", "lab", "imaging", "ultrasound"], location: "centre", social: { clientTrust: 58, staffClimate: 52, referralSupport: 64, communityPressure: 48 }, goals: scenarioGoals.growth }
+    balanced: { name: bi("Balanced startup", "Démarrage équilibré"), description: bi("A stable clinic with room to choose its direction.", "Une clinique stable qui peut choisir son orientation."), treasury: 160000, clients: 1200, reputation: 56, marketFocus: "community", staff: baseStaff, services: ["consult"], rooms: { consult: 1 }, equipment: {}, trainings: ["preventive"], location: "residential", social: { clientTrust: 50, staffClimate: 50, referralSupport: 50, communityPressure: 50 }, goals: scenarioGoals.balanced },
+    rescue: { name: bi("Cash-strapped rescue", "Redressement sous contrainte"), description: bi("Low cash, tired staff, and urgent routine demand require careful recovery.", "Trésorerie faible, équipe fatiguée et demande courante pressante exigent un redressement prudent."), treasury: 50000, clients: 900, reputation: 48, marketFocus: "budget", staff: baseStaff.map((person) => ({ ...person, salary: Math.round(person.salary * .95) })), services: ["consult", "vaccination"], rooms: { consult: 1 }, equipment: {}, trainings: ["preventive"], location: "residential", social: { clientTrust: 43, staffClimate: 38, referralSupport: 42, communityPressure: 67 }, goals: scenarioGoals.rescue },
+    growth: { name: bi("Specialist growth clinic", "Clinique spécialisée en croissance"), description: bi("A capable imaging clinic must turn expensive assets into sustainable growth.", "Une clinique d’imagerie doit transformer des actifs coûteux en croissance durable."), treasury: 140000, clients: 1050, reputation: 64, marketFocus: "advanced", staff: [...baseStaff, ...specialistStaff], services: ["consult", "vaccination", "lab", "ultrasound"], rooms: { consult: 2, lab: 1, imaging: 1 }, equipment: { labAnalyzer: { owned: 1, leased: 0 }, ultrasound: { owned: 0, leased: 1 } }, trainings: ["preventive", "lab", "imaging", "ultrasound"], location: "centre", social: { clientTrust: 58, staffClimate: 52, referralSupport: 64, communityPressure: 48 }, goals: scenarioGoals.growth }
   };
 
   root.ClinicData = {

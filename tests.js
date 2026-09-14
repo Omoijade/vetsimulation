@@ -103,7 +103,7 @@
 
   test("state migration preserves legacy clinic values", () => {
     const migrated = T.hydrate({ year: 3, treasury: 12345, clients: 777, services: { consult: { active: true, price: 61 } }, equipment: { anesthesia: 1 }, rooms: { consult: 3 } });
-    assert(migrated.schemaVersion === 6, "Schema version was not upgraded");
+    assert(migrated.schemaVersion === 7, "Schema version was not upgraded");
     assert(migrated.year === 3 && migrated.treasury === 12345 && migrated.clients === 777, "Core values were lost");
     assert(migrated.equipment.anesthesia.owned === 1, "Legacy equipment was not migrated");
     assert(migrated.uiPreferences.beginnerGuideDismissed === false, "Legacy clinics need a safe guide preference default");
@@ -375,30 +375,38 @@
     assert(idle.financial.netResult < 0, "Balanced with no actions should lose money");
     assert(idle.operational.staffUse >= .3 && idle.operational.staffUse <= .55, `Balanced idle staff use out of range: ${idle.operational.staffUse}`);
     const plan = planYear("balanced", openServices("vaccination", "preventive"));
-    assert(plan.operational.staffUse >= .6 && plan.operational.staffUse <= .9, `Sensible plan staff use out of range: ${plan.operational.staffUse}`);
+    assert(plan.operational.staffUse >= .5 && plan.operational.staffUse <= .9, `Sensible plan staff use out of range: ${plan.operational.staffUse}`);
     assert(plan.financial.netResult > idle.financial.netResult + 50000, "Opening compatible services should clearly improve the result");
-    assert(plan.operational.staffRows.find((row) => row.id === "support-maya").workload > .6, "Maya's hours should be used once her services open");
+    assert(plan.financial.netResult >= -20000 && plan.financial.netResult <= 20000, `A sensible first year should land near break-even, not a windfall: ${plan.financial.netResult}`);
+    assert(plan.operational.staffRows.find((row) => row.id === "support-maya").workload > .35, "Maya's hours should start being used once her services open");
+    const established = planYear("balanced", [], (clinic) => { clinic.services.vaccination.active = true; clinic.services.preventive.active = true; });
+    assert(established.operational.staffRows.find((row) => row.id === "support-maya").workload > .6 && established.financial.netResult > plan.financial.netResult, "Once services are established, Maya should be well used and results should improve");
   });
 
   test("calibration: Rescue can recover and Growth assets pay off", () => {
     const rescueIdle = planYear("rescue", []);
     const rescuePlan = planYear("rescue", openServices("preventive"));
+    const rescueEstablished = planYear("rescue", [], (clinic) => { clinic.services.preventive.active = true; });
     assert(rescueIdle.financial.netResult < 0, "Rescue with no actions should lose money");
-    assert(rescuePlan.financial.netResult - rescueIdle.financial.netResult > 25000, "A recovery action should improve Rescue by more than €25k");
-    const growth = planYear("growth", openServices("preventive"));
-    assert(growth.financial.netResult >= 0, "A sensible Growth year should not lose money");
+    assert(rescuePlan.financial.netResult - rescueIdle.financial.netResult > 10000, "A recovery action should help Rescue in its first year");
+    assert(rescueEstablished.financial.netResult - rescueIdle.financial.netResult > 20000, "Once established, a recovery action should improve Rescue by more than €20k");
+    const growthOpened = planYear("growth", openServices("preventive"));
+    const growth = planYear("growth", [], (clinic) => { clinic.services.preventive.active = true; });
+    assert(growthOpened.financial.netResult < growth.financial.netResult, "A new service should pay off more once established");
+    assert(growth.financial.netResult >= 0, "An established sensible Growth clinic should not lose money");
     assert(facility(growth, "ultrasound").rate >= .3, "Growth's ultrasound should be meaningfully used");
   });
 
   test("a full shared room cuts every service by the same share and capacity relieves it", () => {
-    const full = planYear("balanced", openServices("vaccination", "preventive"));
+    const openNow = (clinic) => { clinic.services.vaccination.active = true; clinic.services.preventive.active = true; };
+    const full = planYear("balanced", [], openNow);
     const consult = facility(full, "consult");
     assert(consult.full && consult.turnedAway > 0, "The single consult room should fill when core services open");
-    const ratios = full.serviceResults.filter((row) => row.active && row.staffCap > 100 && T.data.services.find((service) => service.id === row.id).roomIds.includes("consult")).map((row) => row.honored / row.staffCap);
+    const ratios = full.serviceResults.filter((row) => row.active && row.staffCap > 100 && T.data.services.find((service) => service.id === row.id).roomIds.includes("consult")).map((row) => (row.honored + row.stockoutLost) / row.staffCap);
     assert(ratios.length > 1 && Math.max(...ratios) - Math.min(...ratios) < .02, `Room time was not shared evenly: ${ratios.join(", ")}`);
-    const relieved = planYear("balanced", [...openServices("vaccination", "preventive"), { kind: "room-add", targetId: "consult" }]);
+    const relieved = planYear("balanced", [{ kind: "room-add", targetId: "consult" }], openNow);
     assert(!facility(relieved, "consult").full && relieved.operational.totalHonored > full.operational.totalHonored, "A second consult room should relieve the bottleneck");
-    const extended = planYear("balanced", [...openServices("vaccination", "preventive"), { kind: "opening-period", targetId: "extended", value: true }]);
+    const extended = planYear("balanced", [{ kind: "opening-period", targetId: "extended", value: true }], openNow);
     assert(extended.operational.totalHonored > full.operational.totalHonored, "Extended opening should add room time and cases");
   });
 
@@ -428,6 +436,102 @@
     const signals = T.getBeginnerSignals(report, clinic);
     assert(signals[0].key === "hoursOnClosedServices" && signals[0].text.includes("Vaccination"), "Maya's wasted hours should be the first signal");
     assert(signals[0].destination.service === "vaccination" && signals[0].secondary.destination.context === "support-maya", "The signal should link to both fixes");
+  });
+
+  test("low staff climate raises absence and high climate lowers it", () => {
+    const row = (climate) => planYear("balanced", [], (clinic) => { clinic.social.staffClimate = climate; }).operational.staffRows.find((item) => item.id === "vet-founder");
+    assert(row(30).expectedAbsenceHours > row(50).expectedAbsenceHours && row(70).expectedAbsenceHours < row(50).expectedAbsenceHours, "Climate does not change absence");
+  });
+
+  test("low climate and low pay cause forecast resignations that HR can prevent", () => {
+    const underpaid = (clinic) => { clinic.social.staffClimate = 42; clinic.staff.find((person) => person.id === "support-maya").salary = 26000; };
+    const risky = planYear("balanced", [], underpaid);
+    assert(risky.resignations.some((item) => item.id === "support-maya" && item.reason === "pay"), "An underpaid person should resign when climate is low");
+    const protectedYear = planYear("balanced", [{ kind: "hr-strategy", targetId: "supportive" }], underpaid);
+    assert(!protectedYear.resignations.length, "A supportive HR strategy should prevent the resignation");
+    const collapse = planYear("balanced", [], (clinic) => { clinic.social.staffClimate = 15; });
+    assert(collapse.resignations.length === 1 && collapse.resignations[0].reason === "climate", "A collapsing climate should cost one person");
+  });
+
+  test("drop-off frees room time when the consult room is full", () => {
+    const setup = (dropoff) => (clinic) => {
+      clinic.services.vaccination.active = true;
+      clinic.services.preventive.active = true;
+      clinic.clients = 1500;
+      const extra = T.clone(T.data.candidates.find((item) => item.id === "support-surgery"));
+      clinic.staff.push({ ...extra, salary: extra.expectedSalary, allocations: [{ serviceId: "vaccination", share: .5 }, { serviceId: "preventive", share: .5 }] });
+      clinic.operations.dropoff = dropoff;
+    };
+    const without = planYear("balanced", [], setup(false));
+    const withDropoff = planYear("balanced", [], setup(true));
+    assert(facility(without, "consult").full, "The consult room should be full in this test clinic");
+    assert(withDropoff.operational.totalHonored > without.operational.totalHonored, "Drop-off should free room time and serve more cases");
+  });
+
+  test("basic stock loses cases to stock-outs that better strategies protect", () => {
+    const open = (clinic) => { clinic.services.vaccination.active = true; };
+    const vaccination = (report) => report.serviceResults.find((row) => row.id === "vaccination");
+    const basic = planYear("balanced", [], open);
+    const optimized = planYear("balanced", [{ kind: "stock-strategy", targetId: "optimized" }], open);
+    assert(vaccination(basic).stockoutLost > 0 && basic.social.trustParts.stockouts < 0, "Basic stock should lose vaccination cases and trust");
+    assert(vaccination(optimized).stockoutLost < vaccination(basic).stockoutLost, "Optimized stock should protect cases");
+  });
+
+  test("letting someone go costs severance and climate, and blocks rehiring", () => {
+    const clinic = T.initialState("balanced", "en");
+    const candidate = T.data.candidates.find((item) => item.id === "vet-generalist");
+    T.applyAction(clinic, { payload: { kind: "hire", targetId: candidate.id, value: candidate.expectedSalary } }, false);
+    const effect = T.applyAction(clinic, { payload: { kind: "fire", targetId: candidate.id } }, true);
+    assert(!clinic.staff.some((person) => person.id === candidate.id), "The person should leave the team");
+    assert(effect.oneTimeCosts === candidate.expectedSalary * .25 && effect.climateShock === -6, "Severance or climate effect is wrong");
+    const rehire = T.applyAction(clinic, { payload: { kind: "hire", targetId: candidate.id, value: candidate.expectedSalary } }, true);
+    assert(rehire.recruitment[0].accepted === false, "A person who was let go cannot be rehired within a year");
+    const report = T.simulateYear(T.clone(clinic), clinic, effect, []);
+    assert(report.social.climateParts.departure === -6 && report.departures.some((item) => item.reason === "fired"), "The departure should lower climate and be reported");
+  });
+
+  test("new services and new hires ramp up in their first year", () => {
+    const demand = (report) => report.serviceResults.find((row) => row.id === "vaccination").demand;
+    const opened = planYear("balanced", openServices("vaccination"));
+    const established = planYear("balanced", [], (clinic) => { clinic.services.vaccination.active = true; });
+    assert(Math.abs(demand(opened) / demand(established) - .6) < .02, "A newly opened service should see about 60% of its demand");
+    const candidate = T.data.candidates.find((item) => item.id === "vet-generalist");
+    const hired = planYear("balanced", [{ kind: "hire", targetId: candidate.id, value: candidate.expectedSalary }]);
+    assert(hired.operational.staffRows.find((row) => row.id === candidate.id).onboardingHours > 0, "A new hire should spend time onboarding");
+  });
+
+  test("changing market focus costs a transition year", () => {
+    const switched = planYear("balanced", [{ kind: "market-focus", targetId: "routine" }]);
+    const settled = planYear("balanced", [], (clinic) => { clinic.marketFocus = "routine"; });
+    assert(switched.operational.totalDemand < settled.operational.totalDemand, "A focus change should lower demand in its first year");
+  });
+
+  test("actual demand varies by class code while forecasts stay stable", () => {
+    const run = (code, actual) => {
+      const clinic = T.initialState("balanced", "en");
+      clinic.setup.classCode = code;
+      return T.simulateYear(T.clone(clinic), clinic, T.emptyEffects(), [], { actual }).operational.totalDemand;
+    };
+    assert(run("A", true) === run("A", true), "The same class code should give the same demand");
+    assert(run("A", true) !== run("B", true), "Different class codes should give different demand");
+    assert(run("A", false) === run("B", false), "Forecasts should not depend on the class code");
+  });
+
+  test("staff meetings halve last year's overtime fatigue", () => {
+    const tired = (clinic) => { clinic.staff[0].lastOvertimeRatio = .2; };
+    const row = (report) => report.operational.staffRows.find((item) => item.id === "vet-founder");
+    const before = row(planYear("balanced", [], tired));
+    const after = row(planYear("balanced", [{ kind: "social-action", targetId: "staffMeeting" }], tired));
+    assert(Math.abs(after.fatigueAbsenceHours - before.fatigueAbsenceHours / 2) < 1, "The staff meeting should halve fatigue absence");
+  });
+
+  test("cash adjustments are recorded without using an action", () => {
+    T.renderState(T.initialState("balanced", "en"));
+    const before = T.getState();
+    T.adjustCash(20000, "grant");
+    const after = T.getState();
+    assert(after.treasury === before.treasury + 20000 && after.cashLog.length === 1 && after.cashLog[0].reason === "grant", "Cash adjustment was not applied and logged");
+    assert(Object.keys(after.pending).length === 0, "A cash adjustment must not become an action");
   });
 
   test("results explain why each number changed", () => {

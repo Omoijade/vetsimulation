@@ -69,6 +69,16 @@ Method sources:
 
 Buying equipment charges the purchase price once and annual maintenance thereafter. Leasing charges only the annual lease amount. These costs are never combined for the same unit.
 
+## Staff, operations, and difficulty
+
+Staff climate drives outcomes: below 50 it raises absence (up to +8 points), above 60 it lowers it, below 30 one person resigns at year end, and below 45 anyone paid under 95% of their benchmark resigns. HR strategies add resignation protection, and a staff meeting halves last year's overtime fatigue. Staff can be let go for three months' severance and a −6 climate shock; a former applicant cannot be rehired for a year. New services see 60% of their demand in their first year, new hires spend a quarter of their first year onboarding, and a market-focus change costs 10% of demand in its first year. The drop-off workflow (with two support staff) cuts room time by 30% for vaccination, preventive care, lab, and pharmacy. Stock strategies set stock-out losses (6% / 2% / 0.5%) in stock-dependent services.
+
+Actual demand varies each year by up to ±8% per service and ±4% overall, seeded by the class code so every team sharing a code gets the same swings; forecasts use expected demand.
+
+## Game setup
+
+Students enter the values their instructor gives them in **Game setup** before Year 1: starting treasury (locked after Year 1), forecast precision (exact, ranges, or costs only), class code, action limit, target year, and bankruptcy threshold. **Adjust cash** applies an announced grant, fine, or shock immediately without using an action. Every setting, change, and cash adjustment appears in the Results page, the printable report, and the JSON export so the instructor can check them.
+
 ## Français
 
 Cette simulation bilingue permet à une équipe de gérer une clinique vétérinaire au fil de tours annuels. Elle fonctionne sans serveur, conserve la progression dans le navigateur et propose quatorze services, trois scénarios, des décisions opérationnelles, humaines, financières et commerciales, ainsi qu’un registre de réflexion par année.

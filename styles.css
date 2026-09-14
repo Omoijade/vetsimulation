@@ -464,6 +464,12 @@ textarea { min-height: 112px; padding: 10px; resize: vertical; line-height: 1.45
 .pace-options p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
 
 .signal-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.setup-note { margin: 10px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.cash-adjuster { display: grid; gap: 8px; margin-top: 14px; padding: 12px; border: 1px dashed var(--line); border-radius: 10px; background: var(--surface-soft); }
+.cash-adjuster h3, .cash-adjuster p { margin: 0; }
+.cash-adjuster p { color: var(--muted); font-size: 13px; }
+.cash-log { display: grid; gap: 4px; margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+.setup-record summary { cursor: pointer; font-weight: 700; }
 .facility-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: 10px; }
 .facility-list article { display: grid; gap: 7px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
 .facility-list article.full { border-color: #edb3bd; background: var(--bad-soft); }
