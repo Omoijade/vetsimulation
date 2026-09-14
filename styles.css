@@ -464,6 +464,29 @@ textarea { min-height: 112px; padding: 10px; resize: vertical; line-height: 1.45
 .pace-options p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
 
 .signal-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.command-metrics .at-limit strong { color: var(--warn); }
+.in-plan { align-self: center; color: var(--good); font-size: 14px; font-weight: 800; }
+.limit-button { border-color: var(--warn); color: var(--warn); }
+.breadcrumb { overflow-wrap: anywhere; }
+.drawer-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.drawer-tabs button { min-height: 40px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 99px; background: #fff; font: inherit; font-weight: 700; cursor: pointer; }
+.drawer-tabs button.active { border-color: var(--primary); color: #fff; background: var(--primary); }
+.service-list { display: grid; gap: 14px; }
+.service-family { display: grid; gap: 6px; }
+.service-family h3 { margin: 0; color: var(--muted); font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+.service-family h3 small { font-weight: 500; text-transform: none; }
+.service-row { display: grid; grid-template-columns: minmax(0, 1.4fr) auto minmax(0, .8fr) minmax(0, .6fr) auto; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.service-row.open { border-color: var(--primary); background: #f5f8ff; }
+.service-row span { color: var(--muted); font-size: 13px; }
+.next-service { justify-self: start; }
+.summary-list article .text-button { justify-self: end; }
+.setup-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border: 1px solid #b8ccec; border-radius: 12px; background: #f5f8ff; }
+.setup-banner > div:first-child { display: grid; gap: 4px; }
+.last-year { margin: 0; color: var(--muted); font-size: 14px; }
+.next-year { display: flex; justify-content: flex-end; }
+.pass-check ul { margin: 0; padding-left: 20px; line-height: 1.6; }
+.pass-check h3 { margin: 12px 0 4px; font-size: 15px; }
+.pass-warnings li { color: var(--bad); }
 .setup-note { margin: 10px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .cash-adjuster { display: grid; gap: 8px; margin-top: 14px; padding: 12px; border: 1px dashed var(--line); border-radius: 10px; background: var(--surface-soft); }
 .cash-adjuster h3, .cash-adjuster p { margin: 0; }
@@ -575,6 +598,8 @@ textarea { min-height: 112px; padding: 10px; resize: vertical; line-height: 1.45
   .settings-details .rules-grid, .mini-hours, .export-choices, .add-allocation { grid-template-columns: 1fr; }
   .allocation-rows article { grid-template-columns: 1fr; }
   .pace-options article { grid-template-columns: 1fr; }
+  .service-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .service-row span { display: none; }
   .stepper { grid-template-columns: 44px 1fr 44px 40px; width: 100%; }
   .hours-table { border: 0; background: transparent; gap: 8px; }
   .hours-table > div { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 10px; border: 1px solid var(--line); border-radius: 9px; font-size: 12px; }

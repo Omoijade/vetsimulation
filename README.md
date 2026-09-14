@@ -75,9 +75,13 @@ Staff climate drives outcomes: below 50 it raises absence (up to +8 points), abo
 
 Actual demand varies each year by up to ±8% per service and ±4% overall, seeded by the class code so every team sharing a code gets the same swings; forecasts use expected demand.
 
+## Navigation
+
+Decision cards add straight to the plan and show the remaining action budget; a planned card shows “✓ In plan · Undo”, and at the limit it offers “Limit reached — remove one”. The services drawer lists all fourteen services on one screen with status chips, expanding the chosen one in place. Each staff member has one drawer with Time, Pay, Training, and Let go tabs. Drawers open in their home work area with a breadcrumb, the address bar follows the current area and drawer so browser Back and refresh keep the student’s place, “Pass year” first shows a checklist of planned actions, unused actions, and outstanding warnings, and Results ends with “Plan Year N →”.
+
 ## Game setup
 
-Students enter the values their instructor gives them in **Game setup** before Year 1: starting treasury (locked after Year 1), forecast precision (exact, ranges, or costs only), class code, action limit, target year, and bankruptcy threshold. **Adjust cash** applies an announced grant, fine, or shock immediately without using an action. Every setting, change, and cash adjustment appears in the Results page, the printable report, and the JSON export so the instructor can check them.
+Game setup opens from the ⚙ button in the header; before Year 1 an Overview banner prompts students to fill it in. Students enter the values their instructor gives them in **Game setup** before Year 1: starting treasury (locked after Year 1), forecast precision (exact, ranges, or costs only), class code, action limit, target year, and bankruptcy threshold. **Adjust cash** applies an announced grant, fine, or shock immediately without using an action. Every setting, change, and cash adjustment appears in the Results page, the printable report, and the JSON export so the instructor can check them.
 
 ## Français
 
