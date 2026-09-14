@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Clinic Simulation Tests</title>
+    <style>
+      body { font: 15px system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #17212b; }
+      #app, #announcer { display: none; }
+      li { margin: 8px 0; padding: 8px 10px; border-radius: 6px; }
+      .pass { background: #e7f6ef; color: #116645; }
+      .fail { background: #fdecef; color: #a7213a; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>Clinic Simulation Model Tests</h1>
+    <p id="summary">Running…</p>
+    <ol id="results"></ol>
+    <main id="app"></main>
+    <div id="announcer"></div>
+    <script src="i18n.js"></script>
+    <script src="data.js"></script>
+    <script src="app.js"></script>
+    <script src="tests.js"></script>
+  </body>
+</html>

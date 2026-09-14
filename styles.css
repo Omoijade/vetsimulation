@@ -438,6 +438,50 @@ textarea { min-height: 112px; padding: 10px; resize: vertical; line-height: 1.45
 .help-glossary dt { font-weight: 800; }
 .help-glossary dd { margin: 0; color: var(--muted); line-height: 1.45; }
 
+.allocation-total.idle { background: var(--warn-soft); }
+.allocation-total.overtime { background: var(--bad-soft); }
+.hours-flow { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.staff-zone { margin: 0; font-size: 12px; font-weight: 700; }
+.staff-zone.good { color: var(--good); }
+.staff-zone.warn { color: var(--warn); }
+.staff-zone.bad { color: var(--bad); }
+.panel-links { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.table-scroll { max-width: 100%; overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+.capability-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.capability-table th, .capability-table td { padding: 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.capability-table thead th { background: var(--surface-soft); white-space: nowrap; }
+.capability-table th small, .capability-table td small { display: block; margin-top: 2px; color: var(--muted); font-weight: 500; }
+.capability-table .text-button { padding: 0; font-size: 12px; text-align: left; }
+.cap-yes { color: var(--good); font-weight: 700; }
+.cap-train, .cap-train .text-button { color: var(--warn); }
+.cap-none { color: var(--muted); }
+.cap-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0; font-size: 12px; }
+.who-can { margin: 0; font-size: 13px; line-height: 1.5; }
+.pace-options { display: grid; gap: 8px; }
+.pace-options h4 { margin: 4px 0 0; font-size: 14px; }
+.pace-options article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+.pace-options article.current { border-color: var(--primary); background: #f5f8ff; }
+.pace-options p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+
+.signal-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.facility-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: 10px; }
+.facility-list article { display: grid; gap: 7px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.facility-list article.full { border-color: #edb3bd; background: var(--bad-soft); }
+.facility-list small { color: var(--muted); font-size: 12px; }
+.facility-list p { margin: 0; font-size: 13px; }
+.facility-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.facility-head > span:last-child { margin-left: auto; color: var(--muted); font-size: 12px; }
+.badge { padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 800; }
+.badge.bad { color: #fff; background: var(--bad); }
+.no-effect, .disabled-note { margin: 0; padding: 9px 11px; border-radius: 9px; color: #5a4300; background: var(--warn-soft); font-size: 13px; line-height: 1.45; }
+.why-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 10px; }
+.why-grid article { display: grid; gap: 6px; align-content: start; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); }
+.why-grid h3 { margin: 0; font-size: 13px; color: var(--muted); }
+.why-grid strong { font-size: 18px; }
+.why-grid ul { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; font-size: 13px; }
+.why-grid li { display: flex; justify-content: space-between; gap: 10px; }
+.why-grid em { font-style: normal; font-weight: 700; white-space: nowrap; }
+
 @media (max-width: 1280px) {
   .workspace { grid-template-columns: minmax(0, 1fr) 340px; }
   .candidate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -524,6 +568,7 @@ textarea { min-height: 112px; padding: 10px; resize: vertical; line-height: 1.45
   .help-glossary div { grid-template-columns: 1fr; gap: 3px; }
   .settings-details .rules-grid, .mini-hours, .export-choices, .add-allocation { grid-template-columns: 1fr; }
   .allocation-rows article { grid-template-columns: 1fr; }
+  .pace-options article { grid-template-columns: 1fr; }
   .stepper { grid-template-columns: 44px 1fr 44px 40px; width: 100%; }
   .hours-table { border: 0; background: transparent; gap: 8px; }
   .hours-table > div { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 10px; border: 1px solid var(--line); border-radius: 9px; font-size: 12px; }
