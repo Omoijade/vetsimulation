@@ -43,7 +43,7 @@ node headless-tests.js
 - Per-year rationale, expectation, observation, surprise, and uncertainty notes.
 - Draft-based simulation settings with one saved action-limit selector, validation that preserves existing planned actions, and stable focus/scroll after saving.
 - Scenario goals, target-year summaries, bankruptcy summaries, analytical JSON export, a detailed localized print/PDF report, and optional continued sandbox play.
-- Optional team and participant names plus verbatim yearly reflections in exports; new reports retain clinic, action, staff-allocation, and service-hour snapshots.
+- An anonymous team code plus verbatim yearly reflections in exports; new reports retain clinic, action, staff-allocation, and service-hour snapshots. Participant names are never collected or stored.
 - A playable operational carbon model covering building energy, heating, anaesthetic gases, waste treatment, and client travel.
 - Energy controls, retrofit, heat pump, solar, low-flow anaesthesia, waste strategies, and a low-carbon access plan, all connected to costs, capacity, staff time, demand, or trust.
 - Carbon totals, per-treated-case intensity, starting-clinic comparison, source breakdown, scenario targets, year-end causes, and versioned methodology in exports.
@@ -75,13 +75,39 @@ Staff climate drives outcomes: below 50 it raises absence (up to +8 points), abo
 
 Actual demand varies each year by up to ±8% per service and ±4% overall, seeded by the class code so every team sharing a code gets the same swings; forecasts use expected demand.
 
+## Modelling assumptions worth stating
+
+These are properties of the model, verified against the code, that a facilitator should be able to answer for.
+
+**Turning clients away costs client trust, but only for services you offer.** Trust moves by `served rate × 3.2 − (1 − served rate) × 5.8`, so the break-even point is about 64% of *open* requests; above that trust rises, below it falls. The penalty per unserved request is roughly 1.8× the reward per served one. The served rate counts only services the clinic has opened, so a clinic that offers one service and refuses the rest of the market is not penalised for the refusal — the Overview and Care pages therefore show how many requests are *not offered* beside the rate.
+
+**Price cuts and price rises behave differently.** Above a segment's willingness price, demand decays exponentially and is scaled by that segment's price sensitivity, so a service can be priced out of its market entirely. Below it, a discount raises demand only weakly and does *not* vary by segment — price sensitivity governs the response to increases, not to discounts.
+
+**Reputation acts with a one-year lag.** It never enters the demand calculation directly. It feeds next year's client growth, which changes the client base, which changes demand the year after. Client trust is the direct channel. The lag is deliberate and is useful material for discussion.
+
+**Access pressure is pent-up demand.** Turning clients away raises it, and high pressure *increases* routine demand the following year rather than reducing it. Referral support works the same way for advanced services. Both are shown on the Results page.
+
+**Two consequences arrive a year later and are not previewed.** Overtime worked this year raises expected absence next year, and a resignation removes that person's hours from the following year. The consequence preview simulates one year only, so neither appears in it.
+
 ## Navigation
 
 Decision cards add straight to the plan and show the remaining action budget; a planned card shows “✓ In plan · Undo”, and at the limit it offers “Limit reached — remove one”. The services drawer lists all fourteen services on one screen with status chips, expanding the chosen one in place. Each staff member has one drawer with Time, Pay, Training, and Let go tabs. Drawers open in their home work area with a breadcrumb, the address bar follows the current area and drawer so browser Back and refresh keep the student’s place, “Pass year” first shows a checklist of planned actions, unused actions, and outstanding warnings, and Results ends with “Plan Year N →”.
 
 ## Game setup
 
-Game setup opens from the ⚙ button in the header; before Year 1 an Overview banner prompts students to fill it in. Students enter the values their instructor gives them in **Game setup** before Year 1: starting treasury (locked after Year 1), forecast precision (exact, ranges, or costs only), class code, action limit, target year, and bankruptcy threshold. **Adjust cash** applies an announced grant, fine, or shock immediately without using an action. Every setting, change, and cash adjustment appears in the Results page, the printable report, and the JSON export so the instructor can check them.
+Game setup opens from the ⚙ button in the header; before Year 1 an Overview banner prompts students to fill it in. Students enter the values their instructor gives them in **Game setup** before Year 1: starting treasury (locked after Year 1), forecast precision (exact, ranges, or costs only), class code, study group, action limit, target year, and bankruptcy threshold. **Adjust cash** applies an announced grant, fine, or shock immediately without using an action. Every setting, change, and cash adjustment appears in the Results page, the printable report, and the JSON export so the instructor can check them.
+
+## Study records
+
+Four fields exist so a completed game can be analysed afterwards without a separate spreadsheet.
+
+**Study group** is a free label set in Game setup alongside the class code. It travels in `setup.studyGroup` and in every setup change entry, so an exported file says which arm of a comparison it belongs to instead of relying on an external list.
+
+**The forecast the team was shown** is frozen onto the year when the year is passed, in `years[].forecastShown`. It holds the precision mode in force, the planned forecast, the no-action comparison beside it, the realised figures, and the gap between shown and realised for net result, cases served, and treasury. Without it the displayed forecast is unrecoverable, because it is otherwise computed live and discarded.
+
+**Decision timing** is stamped on each planned decision: the time it was first queued, the time it was last changed, and a count of revisions. Repeated edits to one target still cost a single action, so the rule is unchanged, but the going back and forth is now visible. A `decisionLog` records each add, revise, and remove with its year and time, which also captures decisions that were planned and then dropped.
+
+**Team code, not names.** The export collects a short anonymous team code only. The team-name and participant-name fields are gone, and any names held in a save from an earlier version are discarded when that save is loaded.
 
 ## Français
 

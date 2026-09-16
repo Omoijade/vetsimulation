@@ -132,10 +132,10 @@
   ];
 
   const segmentBase = {
-    community: { name: bi("Community mix", "Population locale mixte"), size: 1200, growth: .01, priceSensitivity: 1, reputationSensitivity: 1, serviceMix: {}, willingness: {} },
-    routine: { name: bi("Routine-care households", "Foyers de soins courants"), size: 980, growth: .025, priceSensitivity: 1.12, reputationSensitivity: .92, serviceMix: { vaccination: 1.32, preventive: 1.35, emergency: .65, orthopedic: .45, boarding: 1.05 }, willingness: { consult: 52, vaccination: 63, preventive: 82, surgery: 390, ultrasound: 118, dentistry: 185, emergency: 125, orthopedic: 680 } },
-    budget: { name: bi("Price-sensitive families", "Familles sensibles aux prix"), size: 760, growth: .035, priceSensitivity: 1.45, reputationSensitivity: .78, serviceMix: { vaccination: 1.18, preventive: .78, surgery: .48, ultrasound: .35, dentistry: .45, orthopedic: .25, pharmacy: 1.15, retail: 1.2, boarding: .72 }, willingness: { consult: 42, vaccination: 50, preventive: 58, surgery: 260, lab: 66, ultrasound: 96, dentistry: 122, emergency: 105, radiography: 82, hospital: 120, orthopedic: 480, pharmacy: 34, retail: 30, boarding: 39 } },
-    advanced: { name: bi("Advanced-care owners", "Propriétaires orientés soins avancés"), size: 430, growth: -.005, priceSensitivity: .66, reputationSensitivity: 1.32, serviceMix: { consult: .82, vaccination: .72, surgery: 1.48, lab: 1.62, ultrasound: 1.78, radiography: 1.65, hospital: 1.45, orthopedic: 1.8, dentistry: 1.52, boarding: .7 }, willingness: { consult: 70, vaccination: 76, preventive: 110, surgery: 560, lab: 135, ultrasound: 240, dentistry: 300, emergency: 230, radiography: 205, hospital: 310, orthopedic: 1450, pharmacy: 65, retail: 52, boarding: 65 } }
+    community: { name: bi("Community mix", "Population locale mixte"), growth: .01, priceSensitivity: 1, serviceMix: {}, willingness: {} },
+    routine: { name: bi("Routine-care households", "Foyers de soins courants"), growth: .025, priceSensitivity: 1.12, serviceMix: { vaccination: 1.32, preventive: 1.35, emergency: .65, orthopedic: .45, boarding: 1.05 }, willingness: { consult: 52, vaccination: 63, preventive: 82, surgery: 390, ultrasound: 118, dentistry: 185, emergency: 125, orthopedic: 680 } },
+    budget: { name: bi("Price-sensitive families", "Familles sensibles aux prix"), growth: .035, priceSensitivity: 1.45, serviceMix: { vaccination: 1.18, preventive: .78, surgery: .48, ultrasound: .35, dentistry: .45, orthopedic: .25, pharmacy: 1.15, retail: 1.2, boarding: .72 }, willingness: { consult: 42, vaccination: 50, preventive: 58, surgery: 260, lab: 66, ultrasound: 96, dentistry: 122, emergency: 105, radiography: 82, hospital: 120, orthopedic: 480, pharmacy: 34, retail: 30, boarding: 39 } },
+    advanced: { name: bi("Advanced-care owners", "Propriétaires orientés soins avancés"), growth: -.005, priceSensitivity: .66, serviceMix: { consult: .82, vaccination: .72, surgery: 1.48, lab: 1.62, ultrasound: 1.78, radiography: 1.65, hospital: 1.45, orthopedic: 1.8, dentistry: 1.52, boarding: .7 }, willingness: { consult: 70, vaccination: 76, preventive: 110, surgery: 560, lab: 135, ultrasound: 240, dentistry: 300, emergency: 230, radiography: 205, hospital: 310, orthopedic: 1450, pharmacy: 65, retail: 52, boarding: 65 } }
   };
 
   Object.values(segmentBase).forEach((segment) => {
@@ -146,9 +146,9 @@
   });
 
   const locations = {
-    residential: { name: bi("Residential district", "Quartier résidentiel"), description: bi("Balanced access, rent, and competition.", "Équilibre entre accès, loyer et concurrence."), rent: 26000, reachable: 1200, competition: .96, moveCost: 20000, parkingCost: 10000, parkingMaintenance: 1000, segmentMultipliers: { community: 1, routine: 1.08, budget: 1.02, advanced: .92 }, serviceMultipliers: {} },
-    centre: { name: bi("City centre", "Centre-ville"), description: bi("Higher rent and competition with stronger advanced-care demand.", "Loyer et concurrence élevés, avec davantage de soins avancés."), rent: 44000, reachable: 1500, competition: .90, moveCost: 20000, parkingCost: 18000, parkingMaintenance: 1800, segmentMultipliers: { community: 1.05, routine: 1.08, budget: .85, advanced: 1.18 }, serviceMultipliers: { lab: 1.08, ultrasound: 1.12, radiography: 1.12, orthopedic: 1.15 } },
-    periurban: { name: bi("Peri-urban area", "Zone périurbaine"), description: bi("Lower rent with stronger budget, parking, and boarding demand.", "Loyer réduit, avec davantage de demande économique, de parking et de pension."), rent: 20000, reachable: 1000, competition: .98, moveCost: 20000, parkingCost: 6000, parkingMaintenance: 700, segmentMultipliers: { community: .96, routine: .95, budget: 1.15, advanced: .85 }, serviceMultipliers: { boarding: 1.25, retail: 1.1 } }
+    residential: { name: bi("Residential district", "Quartier résidentiel"), description: bi("Balanced access, rent, and competition.", "Équilibre entre accès, loyer et concurrence."), rent: 26000, competition: .96, moveCost: 20000, parkingCost: 10000, parkingMaintenance: 1000, segmentMultipliers: { community: 1, routine: 1.08, budget: 1.02, advanced: .92 }, serviceMultipliers: {} },
+    centre: { name: bi("City centre", "Centre-ville"), description: bi("Higher rent and competition with stronger advanced-care demand.", "Loyer et concurrence élevés, avec davantage de soins avancés."), rent: 44000, competition: .90, moveCost: 20000, parkingCost: 18000, parkingMaintenance: 1800, segmentMultipliers: { community: 1.05, routine: 1.08, budget: .85, advanced: 1.18 }, serviceMultipliers: { lab: 1.08, ultrasound: 1.12, radiography: 1.12, orthopedic: 1.15 } },
+    periurban: { name: bi("Peri-urban area", "Zone périurbaine"), description: bi("Lower rent with stronger budget, parking, and boarding demand.", "Loyer réduit, avec davantage de demande économique, de parking et de pension."), rent: 20000, competition: .98, moveCost: 20000, parkingCost: 6000, parkingMaintenance: 700, segmentMultipliers: { community: .96, routine: .95, budget: 1.15, advanced: .85 }, serviceMultipliers: { boarding: 1.25, retail: 1.1 } }
   };
   Object.assign(locations.residential, { averageRoundTripKm: 8, carShare: .75 });
   Object.assign(locations.centre, { averageRoundTripKm: 6, carShare: .45 });
@@ -281,7 +281,7 @@
 
   const socialIndicators = {
     clientTrust: bi("Client trust", "Confiance des clients"),
-    staffClimate: bi("Staff climate", "Climat de travail"),
+    staffClimate: bi("Staff climate", "Climat de l’équipe"),
     referralSupport: bi("Referral support", "Soutien des référents"),
     communityPressure: bi("Access pressure", "Pression d’accès")
   };

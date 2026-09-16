@@ -27,7 +27,7 @@ globalThis.document = {
   addEventListener() {},
   querySelector(selector) { return elements[selector] || null; },
   querySelectorAll() { return []; },
-  createElement() { return { className: "", textContent: "" }; }
+  createElement() { return { className: "", textContent: "", style: {}, setAttribute() {}, appendChild() {}, remove() {} }; }
 };
 
 require("./i18n.js");
@@ -106,7 +106,9 @@ if (!trainingPeople.includes("Dr Amina Kone") || trainingPeople.includes("Expect
 const trainingOptions = ClinicTest.renderUiForTest({ drawer: "training", drawerContext: "vet-founder", confirm: null });
 if (!trainingOptions.includes("Ultrasound") || trainingOptions.includes("Animal care") || !trainingOptions.includes("Unlocks")) throw new Error("Per-person training shows the wrong role's skills");
 const paceService = ClinicTest.renderUiForTest({ drawer: "services", drawerContext: "core", selectedServiceId: "consult", confirm: null });
-if (!paceService.includes("Pace: time per case") || !paceService.includes("Who can staff this")) throw new Error("Service detail lacks pace or staffing clarity");
+if (!paceService.includes("Pace: time per appointment") || !paceService.includes("Who can staff this")) throw new Error("Service detail lacks pace or staffing clarity");
+if (!paceService.includes("Vet time per case") || !paceService.includes("Support time per case")) throw new Error("Service detail must show the vet and support time separately");
+if (/>Time per case</.test(paceService)) throw new Error("The blended time-per-case stat should be gone");
 const overtimeDraft = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: "vet-founder", confirm: null, allocationDrafts: { "vet-founder": [{ serviceId: "consult", share: .9 }, { serviceId: "preventive", share: .3 }] } });
 if (!overtimeDraft.includes("120% assigned") || !overtimeDraft.includes("overtime hours") || !overtimeDraft.includes("Overtime cost")) throw new Error("Allocation drawer does not show overtime consequences");
 ClinicTest.renderUiForTest({ allocationDrafts: {} });
@@ -127,7 +129,10 @@ ClinicTest.renderState(settingsState);
 const settingsHtml = ClinicTest.renderUiForTest({ drawer: "setup", drawerContext: null, confirm: null });
 if (!settingsHtml.includes('data-settings-field="actionLimit"') || !settingsHtml.includes("Save settings")) throw new Error("Settings are not a saved draft with one action-limit selector");
 if (settingsHtml.includes('data-rule="actionLimit"')) throw new Error("Immediate legacy action-limit control is still visible");
-if (!settingsHtml.includes('data-settings-field="startingTreasury"') || !settingsHtml.includes('data-settings-field="forecastPrecision"') || !settingsHtml.includes('data-settings-field="classCode"') || !settingsHtml.includes("data-adjust-cash")) throw new Error("Game setup fields are missing");
+if (!settingsHtml.includes('data-settings-field="startingTreasury"') || !settingsHtml.includes('data-settings-field="forecastPrecision"') || !settingsHtml.includes('data-settings-field="classCode"') || !settingsHtml.includes('data-settings-field="studyGroup"') || !settingsHtml.includes("data-adjust-cash")) throw new Error("Game setup fields are missing");
+const exportDrawerHtml = ClinicTest.renderUiForTest({ drawer: "export", drawerContext: null, confirm: null });
+if (!exportDrawerHtml.includes("data-team-code")) throw new Error("The export drawer must collect a team code");
+if (exportDrawerHtml.includes("data-team-name") || exportDrawerHtml.includes("data-participant-names")) throw new Error("The export drawer must not collect names");
 const costsState = ClinicTest.getState();
 costsState.domain = "overview";
 costsState.setup.forecastPrecision = "costs";
@@ -195,6 +200,149 @@ if (!/@media \(max-width: 1000px\)[\s\S]*?\.plan-panel\s*\{[\s\S]*?position:\s*f
 if (!/\.drawer\s*\{[\s\S]*?height:\s*100dvh;[\s\S]*?max-height:\s*100dvh;/.test(css)) throw new Error("Drawer is not constrained to the dynamic viewport");
 if (!/@media \(max-width: 480px\)[\s\S]*?\.consequence-grid\s*\{\s*grid-template-columns:\s*1fr;/.test(css)) throw new Error("Phone consequence cards do not collapse to one column");
 if (!/\.allocation-rows article[\s\S]*?grid-template-columns:[\s\S]*?@media \(max-width: 480px\)[\s\S]*?\.allocation-rows article\s*\{\s*grid-template-columns:\s*1fr;/.test(css)) throw new Error("Allocation rows do not collapse safely on phones");
+
+// --- Pass 6: clarity of numbers ---
+const mkt = ClinicTest.renderUiForTest({ drawer: "market", drawerContext: null, confirm: null });
+if (/reachable clients/.test(mkt)) throw new Error("The market drawer must not show the unused segment size");
+if (!/Asks most for:/.test(mkt) || !/Price sensitivity:/.test(mkt)) throw new Error("Market segments must describe demand and price tolerance");
+
+const equip = ClinicTest.renderUiForTest({ drawer: "equipment", drawerContext: null, confirm: null });
+if (!/One-time costs/.test(equip)) throw new Error("A purchase must show its one-time cost in the preview");
+if (!/year upkeep if owned/.test(equip)) throw new Error("Owned equipment must show its annual upkeep");
+if (!/Net result/.test(equip) || /Net cash this year/.test(equip)) throw new Error("The preview outcome row must use the app-wide name Net result");
+
+const openDrawer = ClinicTest.renderUiForTest({ drawer: "opening", drawerContext: null, confirm: null });
+if (/One-time costs/.test(openDrawer)) throw new Error("A purely recurring decision must not show a one-time cost row");
+if (!/Added cost per year/.test(openDrawer)) throw new Error("A recurring decision must name its annual charge");
+
+const loc = ClinicTest.renderUiForTest({ drawer: "location", drawerContext: null, confirm: null });
+if (!/once to move/.test(loc)) throw new Error("Relocation must show its one-time move cost");
+if (!/Add parking[\s\S]{0,400}?once/.test(loc)) throw new Error("The parking card must show a price");
+
+// Inspect the preview grids only: the Overview behind the drawer also names staff climate.
+const previewGrids = (html) => html.split('class="consequence-grid"').slice(1);
+const stockGrids = previewGrids(ClinicTest.renderUiForTest({ drawer: "stock", drawerContext: null, confirm: null }));
+if (!stockGrids.length) throw new Error("The stock drawer should preview each strategy");
+if (stockGrids.some((grid) => /Staff climate/.test(grid))) throw new Error("Climate rows must appear only when the decision moves climate");
+const openingGrids = previewGrids(ClinicTest.renderUiForTest({ drawer: "opening", drawerContext: null, confirm: null }));
+if (!openingGrids.every((grid) => /Staff climate/.test(grid))) throw new Error("Every opening period changes climate and must show it");
+
+const vetId = ClinicTest.getState().staff[0].id;
+const partial = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: vetId, confirm: null, allocationDrafts: { [vetId]: [{ serviceId: "consult", share: .65 }] } });
+if (!/data-allocation-fill/.test(partial)) throw new Error("Under 100% the allocation row must offer the remaining hours");
+const filled = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: vetId, confirm: null, allocationDrafts: { [vetId]: [{ serviceId: "consult", share: 1 }] } });
+if (/data-allocation-fill/.test(filled)) throw new Error("At 100% there are no remaining hours to offer");
+if (Math.abs(ClinicTest.allocationRemainder([{ share: .3 }, { share: .25 }], 1) - .45) > 1e-9) throw new Error("allocationRemainder must return the exact unassigned share");
+if (ClinicTest.allocationRemainder([{ share: 1 }], 0) !== 0) throw new Error("A full allocation has no remainder");
+
+const helpState = ClinicTest.getState();
+helpState.helpOpen = true;
+const helpHtml = ClinicTest.renderState(helpState);
+if (!helpHtml.includes("open services only")) throw new Error("The glossary must say requests count open services only");
+helpState.helpOpen = false;
+ClinicTest.renderState(helpState);
+
+
+// --- Pass 7 Phase 0: one quantity, one name, everywhere ---
+// Renders every page and drawer in both languages and fails if a retired name reappears.
+const RETIRED_NAMES = ["Staff use", "Clinic workload", "Requests served", "Care delivered", "Closing treasury", "Climat de travail", "Utilisation du personnel", "Charge de la clinique", "Soins realises", "Demandes traitees", "Tresorerie de cloture"];
+const ALL_DOMAINS = ["overview", "care", "team", "business", "sustainability", "results"];
+const ALL_DRAWERS = ["services", "rooms", "equipment", "person", "staffAllocation", "staffPerson", "staffExit", "training", "capabilities", "hoursByService", "recruitment", "opening", "dropoff", "stock", "hr", "pricing", "finance", "market", "location", "marketing", "sustainability", "plan", "export", "setup"];
+const stripAccents = (text) => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+["en", "fr"].forEach((language) => {
+  const base = ClinicTest.initialState("balanced", language);
+  Object.keys(base.services).forEach((id) => { base.services[id].active = true; });
+  base.history = [ClinicTest.simulateYear(ClinicTest.clone(base), base, ClinicTest.emptyEffects(), [])];
+  let seen = "";
+  ALL_DOMAINS.forEach((domain) => { const next = ClinicTest.clone(base); next.domain = domain; seen += ClinicTest.renderState(next); });
+  ClinicTest.renderState(base);
+  ALL_DRAWERS.forEach((drawer) => { seen += ClinicTest.renderUiForTest({ drawer, drawerContext: null, selectedServiceId: "surgery", confirm: null }); });
+  seen += ClinicTest.buildPrintableReportHtml();
+  const plain = stripAccents(seen);
+  RETIRED_NAMES.forEach((name) => {
+    if (plain.includes(stripAccents(name))) throw new Error(`Retired name "${name}" still reaches the screen in ${language}: one quantity must carry one name everywhere`);
+  });
+});
+
+
+// --- Pass 7 Phase 1: dead model data stays dead ---
+const DEAD_NAMESPACES = ["money", "services", "operations", "market"];
+DEAD_NAMESPACES.forEach((ns) => {
+  if (ClinicI18n.dictionaries.en[ns] || ClinicI18n.dictionaries.fr[ns]) throw new Error(`i18n namespace "${ns}" drives nothing and must not return`);
+});
+if (Object.keys(ClinicI18n.dictionaries.en.dashboard).length !== 1) throw new Error("Only dashboard.chooseScenario is still used");
+const serialisedData = JSON.stringify(ClinicTest.data);
+["\"size\"", "\"reachable\"", "\"reputationSensitivity\""].forEach((field) => {
+  if (serialisedData.includes(field)) throw new Error(`Data field ${field} is read by nothing and must not return`);
+});
+
+
+// --- Pass 7 Phase 2: what the model knows must reach the screen ---
+const balancedStart = ClinicTest.initialState("balanced", "en");
+const overviewHtml = ClinicTest.renderState(balancedStart);
+// Assert on the Cases-served card itself: the scenario-goal text also contains "of open requests",
+// so a page-wide regex stays green even when the caption is deleted.
+const servedCaption = (html) => (html.match(/Cases served<\/span><strong>[^<]*<\/strong><em>([^<]*)</) || [])[1] || "";
+const overviewCaption = servedCaption(overviewHtml);
+if (!/of open requests/.test(overviewCaption)) throw new Error("The Cases-served card must say the rate is of OPEN requests");
+if (!/not offered/.test(overviewCaption)) throw new Error("The Cases-served card must show how many requests are not offered");
+const careStart = ClinicTest.clone(balancedStart); careStart.domain = "care";
+const careCaption = servedCaption(ClinicTest.renderState(careStart));
+if (!/of open requests/.test(careCaption) || !/not offered/.test(careCaption)) throw new Error("The Care page Cases-served card must show the unmet market too");
+
+const ramping = ClinicTest.initialState("balanced", "en");
+ramping.services.vaccination.active = true;
+ramping.services.vaccination.openedYear = ramping.year;
+ramping.domain = "care";
+if (!/first year · 60% of demand/.test(ClinicTest.renderState(ramping))) throw new Error("A service in its opening year must say its demand is reduced");
+const established = ClinicTest.clone(ramping);
+established.services.vaccination.openedYear = established.year - 1;
+if (/first year · 60% of demand/.test(ClinicTest.renderState(established))) throw new Error("An established service must not claim to be in its first year");
+
+const withYear = (lang, loan) => {
+  const clinic = ClinicTest.initialState("balanced", lang);
+  if (loan) clinic.finance.loan = { principal: 50000, remaining: 50000, yearsRemaining: 5, rate: .06 };
+  clinic.history = [ClinicTest.simulateYear(ClinicTest.clone(clinic), clinic, ClinicTest.emptyEffects(), [])];
+  clinic.domain = "results";
+  return clinic;
+};
+const resultsHtml = ClinicTest.renderState(withYear("en", false));
+if (!/Referral support/.test(resultsHtml) || !/Access pressure/.test(resultsHtml)) throw new Error("Referral support and access pressure shift demand and must be visible");
+const frResults = ClinicTest.renderState(withYear("fr", false));
+if (!/Soutien des référents/.test(frResults) || !/Pression d’accès/.test(frResults)) throw new Error("The social indicators must be translated");
+ClinicTest.renderState(withYear("en", true));
+if (!/Loan interest/.test(ClinicTest.buildPrintableReportHtml())) throw new Error("A loan year must report its interest as its own line");
+ClinicTest.renderState(withYear("en", false));
+if (/Loan interest/.test(ClinicTest.buildPrintableReportHtml())) throw new Error("A year with no loan must not show a loan-interest line");
+
+
+// --- Pass 7 Phase 3: price response must never plateau ---
+// Two earlier attempts flattened instead: a .25 clamp held demand at 475 from about 3x willingness,
+// and a flat .02 clamp merely moved the cliff. Each service's linear term reached zero at a
+// different ratio (1.65 retail to 5.55 emergency), so only a decaying curve is monotonic for all.
+const priceProbe = ClinicTest.initialState("balanced", "en");
+const consultService = ClinicTest.data.services.find((service) => service.id === "consult");
+const demandAt = (price) => { const clinic = ClinicTest.clone(priceProbe); clinic.services.consult.price = price; return ClinicTest.projectedDemand(consultService, clinic); };
+const ladder = [100, 150, 240, 500, 5000].map(demandAt);
+ladder.forEach((value, index) => {
+  if (index && value >= ladder[index - 1]) throw new Error(`Demand must keep falling as price rises: ${ladder.join(" -> ")}`);
+});
+if (demandAt(5000) > 5) throw new Error("An absurd price must destroy the market, not plateau");
+
+
+// --- Pass 7: a badge must never contradict the figure beside it ---
+// referralSupport drifts 50 -> 49.5 in a normal first year. Rounded for display that is still "50",
+// so judging the badge on the raw float warned about a number the card showed as unchanged.
+const badgeClinic = ClinicTest.initialState("balanced", "en");
+const badgeReport = ClinicTest.simulateYear(ClinicTest.clone(badgeClinic), badgeClinic, ClinicTest.emptyEffects(), []);
+badgeReport.social.before.referralSupport = 50;
+badgeReport.social.after.referralSupport = 49.5;
+badgeClinic.history = [badgeReport];
+badgeClinic.domain = "results";
+const badgeCard = ClinicTest.renderState(badgeClinic).match(/Referral support<\/span><strong>([^<]*)<\/strong><em>([^<]*)</);
+if (!badgeCard) throw new Error("The referral-support card should render");
+if (badgeCard[1] === "50" && /Needs attention/.test(badgeCard[2])) throw new Error("A metric card must not warn about a value it displays as unchanged");
+
 require("./tests.js");
 
 for (const item of resultItems) console.log(item.textContent);

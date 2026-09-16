@@ -103,7 +103,7 @@
 
   test("state migration preserves legacy clinic values", () => {
     const migrated = T.hydrate({ year: 3, treasury: 12345, clients: 777, services: { consult: { active: true, price: 61 } }, equipment: { anesthesia: 1 }, rooms: { consult: 3 } });
-    assert(migrated.schemaVersion === 7, "Schema version was not upgraded");
+    assert(migrated.schemaVersion === T.initialState("balanced", "en").schemaVersion, "Schema version was not upgraded");
     assert(migrated.year === 3 && migrated.treasury === 12345 && migrated.clients === 777, "Core values were lost");
     assert(migrated.equipment.anesthesia.owned === 1, "Legacy equipment was not migrated");
     assert(migrated.uiPreferences.beginnerGuideDismissed === false, "Legacy clinics need a safe guide preference default");
@@ -348,14 +348,15 @@
     const report = T.simulateYear(T.clone(clinic), clinic, T.emptyEffects(), []);
     clinic.history = [report];
     clinic.reflections = { 1: { rationale: "We used spare time", expected: "More care", observed: "It worked", surprise: "Travel rose", uncertainty: "Demand" } };
-    clinic.playerTeam = { teamName: "Team Cedar", participantNames: ["Alex", "Sam"] };
+    clinic.playerTeam = { teamCode: "G-07" };
     T.renderState(clinic);
     const json = T.buildExportPayload();
-    assert(json.playerTeam.teamName === "Team Cedar", "Export lost team identity");
+    assert(json.playerTeam.teamCode === "G-07", "Export lost the team code");
+    assert(!("teamName" in json.playerTeam) && !("participantNames" in json.playerTeam), "Export must not carry free-text names");
     assert(json.years[0].operational.staffRows.length === clinic.staff.length, "JSON export lost staff hour rows");
     assert(json.years[0].reflection.rationale === "We used spare time", "JSON export lost reflection text");
     const printable = T.buildPrintableReportHtml();
-    assert(printable.includes("Team Cedar") && printable.includes("We used spare time"), "Printable report lost participant or reflection detail");
+    assert(printable.includes("G-07") && printable.includes("We used spare time"), "Printable report lost the team code or reflection detail");
     assert(printable.includes("Staff hours") && printable.includes("Carbon footprint"), "Printable report lacks operational or carbon detail");
   });
 
@@ -540,6 +541,49 @@
     clinic.domain = "results";
     const html = T.renderState(clinic);
     assert(html.includes("Why each number changed") && html.includes("Staff climate") && html.includes("Client trust"), "Results do not explain metric changes");
+  });
+
+  test("the study group is recorded in the setup, the export, and the report", () => {
+    const clinic = T.initialState("balanced", "en", { studyGroup: "A2", classCode: "VET-1" });
+    T.renderState(clinic);
+    const json = T.buildExportPayload();
+    assert(json.setup.studyGroup === "A2", "Export lost the study group");
+    assert(json.setup.classCode === "VET-1", "Export lost the class code");
+    assert(T.buildPrintableReportHtml().includes("A2"), "Printable report does not show the study group");
+  });
+
+  test("passing a year freezes the forecast the team was shown", () => {
+    T.renderState(T.initialState("balanced", "en"));
+    T.queueAction("sustainability:solar", { kind: "sustainability", targetId: "solar", value: true });
+    T.resolveTurn();
+    const year = T.getState().history[0];
+    const record = year.forecastShown;
+    assert(record && record.shown && record.realised && record.noActionBaseline, "The shown forecast was not stored on the year");
+    assert(record.precision === "exact", "The forecast precision in force was not recorded");
+    assert(record.realised.netResult === year.financial.netResult, "The realised figures do not match the year");
+    assert(record.error.netResult === record.realised.netResult - record.shown.netResult, "Forecast error is not the gap between shown and realised");
+    assert(record.shown.netResult !== record.noActionBaseline.netResult, "The no-action comparison should differ from the planned forecast");
+    assert(T.buildExportPayload().years[0].forecastShown.shown.served === record.shown.served, "Export lost the stored forecast");
+  });
+
+  test("decisions carry a time and a count of revisions", () => {
+    T.renderState(T.initialState("balanced", "en"));
+    T.queueAction("sustainability:solar", { kind: "sustainability", targetId: "solar", value: true });
+    const first = T.getState().pending["sustainability:solar"];
+    assert(first.revisions === 0 && typeof first.at === "string", "A new decision needs a timestamp and no revisions");
+    T.queueAction("sustainability:solar", { kind: "sustainability", targetId: "solar", value: false });
+    const second = T.getState().pending["sustainability:solar"];
+    assert(second.revisions === 1, "Editing the same target should count as a revision");
+    assert(second.at === first.at, "Revising must keep the time the decision was first made");
+    const log = T.getState().decisionLog;
+    assert(log.length === 2 && log[0].event === "add" && log[1].event === "revise", "The decision log did not record the edit");
+    T.resolveTurn();
+    const record = T.getState().history[0].actionRecords[0];
+    assert(record.revisions === 1 && typeof record.queuedAt === "string", "Action records lost the decision stamps");
+    T.renderState(T.initialState("balanced", "en"));
+    T.queueAction("sustainability:solar", { kind: "sustainability", targetId: "solar", value: true });
+    T.removeAction("sustainability:solar");
+    assert(T.getState().decisionLog.at(-1).event === "remove", "Removing a planned decision must be recorded");
   });
 
   const list = document.querySelector("#results");

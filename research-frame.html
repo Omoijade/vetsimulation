@@ -1,0 +1,607 @@
+<title>Against the Record</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+
+<style>
+  :root {
+    --ground: #F7F9F8;
+    --raised: #FFFFFF;
+    --ink: #17201D;
+    --ink-soft: #4C5F59;
+    --ink-faint: #71847E;
+    --rule: #CCD8D4;
+    --rule-soft: #E3EBE8;
+    --accent: #146C5A;
+    --accent-soft: #E6F0ED;
+    --open: #9A6B1F;
+    --open-soft: #F7EFE0;
+    --serif: "Spectral", Georgia, "Times New Roman", serif;
+    --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #101715;
+      --raised: #17211E;
+      --ink: #E8EFEC;
+      --ink-soft: #A8BBB5;
+      --ink-faint: #7C908A;
+      --rule: #2C3B37;
+      --rule-soft: #212D2A;
+      --accent: #5FBFA6;
+      --accent-soft: #16302A;
+      --open: #D7A75A;
+      --open-soft: #2E2416;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #101715;
+    --raised: #17211E;
+    --ink: #E8EFEC;
+    --ink-soft: #A8BBB5;
+    --ink-faint: #7C908A;
+    --rule: #2C3B37;
+    --rule-soft: #212D2A;
+    --accent: #5FBFA6;
+    --accent-soft: #16302A;
+    --open: #D7A75A;
+    --open-soft: #2E2416;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    margin: 0;
+    padding-block: 0 72px;
+    padding-left: 20px;
+    padding-right: 20px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 720px; margin: 0 auto; }
+
+  header.masthead {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    padding-block: 56px 30px;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0;
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(34px, 6.4vw, 50px);
+    line-height: 1.08;
+    letter-spacing: -.015em;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .standfirst {
+    font-family: var(--serif);
+    font-size: 19px;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    margin: 0;
+    max-width: 60ch;
+  }
+
+  .masthead dl {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 20px 30px;
+    margin: 6px 0 0;
+    padding-top: 18px;
+    border-top: 1px solid var(--rule-soft);
+  }
+  .masthead dl > div { display: flex; flex-direction: column; }
+  .masthead dt {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 3px;
+  }
+  .masthead dd { margin: 0; font-size: 14.5px; color: var(--ink); }
+
+  section.part {
+    display: block;
+    padding-block: 40px 0;
+    border-top: 1px solid var(--rule-soft);
+  }
+  section.part:first-of-type { border-top: 0; }
+
+  .part-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+
+  .part-num {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: .06em;
+    flex: none;
+    padding-top: 2px;
+  }
+
+  h2 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(23px, 3.6vw, 29px);
+    line-height: 1.2;
+    letter-spacing: -.01em;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  h3 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 15px;
+    letter-spacing: .005em;
+    margin: 30px 0 10px;
+  }
+
+  p { margin: 0 0 15px; max-width: 68ch; }
+  p.lede { font-size: 17.5px; color: var(--ink-soft); }
+
+  ul, ol { margin: 0 0 16px; padding-left: 20px; max-width: 68ch; }
+  li { margin-bottom: 7px; }
+  li::marker { color: var(--ink-faint); }
+
+  strong { font-weight: 600; }
+  em.term { font-style: italic; }
+
+  code {
+    font-family: var(--mono);
+    font-size: .875em;
+    background: var(--rule-soft);
+    padding: 1px 5px;
+    border-radius: 3px;
+    word-break: break-word;
+  }
+
+  a { color: var(--accent); text-underline-offset: 2px; }
+
+  .ledger {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    margin: 22px 0 24px;
+  }
+  .ledger > div { background: var(--raised); padding: 16px 18px; }
+  .ledger h4 {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    margin: 0 0 9px;
+  }
+  .ledger .yes h4 { color: var(--accent); }
+  .ledger .no h4 { color: var(--open); }
+  .ledger p { font-size: 14.5px; margin: 0; color: var(--ink-soft); }
+
+  .arms {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+    margin: 22px 0 24px;
+  }
+  .arm {
+    border: 1px solid var(--rule);
+    border-top: 3px solid var(--accent);
+    background: var(--raised);
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .arm .tag {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .arm h4 { font-family: var(--serif); font-size: 19px; font-weight: 600; margin: 0; line-height: 1.25; }
+  .arm p { font-size: 14.5px; margin: 0; color: var(--ink-soft); }
+  .arm .tests {
+    font-size: 13px;
+    color: var(--ink);
+    border-top: 1px solid var(--rule-soft);
+    padding-top: 9px;
+    margin-top: auto;
+  }
+
+  .scroller { overflow-x: auto; margin: 20px 0 24px; border: 1px solid var(--rule); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; background: var(--raised); }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  thead th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 500;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td code { background: transparent; padding: 0; color: var(--accent); }
+
+  .codes { display: flex; flex-direction: column; gap: 0; margin: 20px 0 24px; border: 1px solid var(--rule); }
+  .code-row {
+    display: grid;
+    grid-template-columns: 190px 1fr;
+    gap: 16px;
+    padding: 14px 16px;
+    background: var(--raised);
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .code-row:last-child { border-bottom: 0; }
+  .code-row .name {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: .04em;
+    color: var(--accent);
+    padding-top: 2px;
+  }
+  .code-row p { font-size: 14.5px; margin: 0; color: var(--ink-soft); }
+
+  .week { border-left: 2px solid var(--rule); padding-left: 20px; margin: 22px 0 24px; display: flex; flex-direction: column; gap: 18px; }
+  .day { position: relative; }
+  .day::before {
+    content: "";
+    position: absolute;
+    left: -26px;
+    top: 7px;
+    width: 9px;
+    height: 9px;
+    background: var(--accent);
+    border-radius: 50%;
+  }
+  .day h4 { font-family: var(--sans); font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+  .day p { font-size: 14.5px; margin: 0; color: var(--ink-soft); }
+
+  blockquote {
+    margin: 24px 0;
+    padding: 4px 0 4px 20px;
+    border-left: 3px solid var(--accent);
+    font-family: var(--serif);
+    font-size: 18px;
+    line-height: 1.5;
+    color: var(--ink);
+    max-width: 62ch;
+  }
+  blockquote cite { display: block; font-family: var(--sans); font-style: normal; font-size: 13px; color: var(--ink-faint); margin-top: 9px; }
+
+  .flag {
+    background: var(--open-soft);
+    border-left: 3px solid var(--open);
+    padding: 14px 16px;
+    margin: 20px 0 24px;
+    font-size: 14.5px;
+    color: var(--ink);
+  }
+  .flag p { margin: 0; max-width: none; }
+  .flag p + p { margin-top: 9px; }
+
+  footer {
+    margin-top: 48px;
+    padding-top: 22px;
+    border-top: 2px solid var(--ink);
+    font-size: 13.5px;
+    color: var(--ink-faint);
+  }
+  footer p { max-width: 68ch; }
+
+  @media (max-width: 620px) {
+    .ledger { grid-template-columns: 1fr; }
+    .code-row { grid-template-columns: 1fr; gap: 5px; }
+  }
+
+  @media print {
+    body { background: #fff; padding: 0; }
+    .arm, table, .ledger > div { background: #fff; }
+    section.part { break-inside: avoid; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">Research frame · draft for discussion</p>
+    <h1>Against the Record</h1>
+    <p class="standfirst">A study design for one article. Students explain an investment decision they made in a simulated veterinary clinic, and because the software logged everything they did, their explanation can be checked against what actually happened.</p>
+    <dl>
+      <div><dt>Setting</dt>
+      <dd>Mandatory veterinary management course, University of Liège</dd></div>
+      <div><dt>Scale</dt>
+      <dd>≈150 Master's students, ≈28 teams, one cohort, one week</dd></div>
+      <div><dt>Instrument</dt>
+      <dd>Clinic simulation and five half-day module, French</dd></div>
+      <div><dt>Output</dt>
+      <dd>One empirical article that stands on its own</dd></div>
+    </dl>
+  </header>
+
+  <section class="part">
+    <div class="part-head"><span class="part-num">00</span><h2>The idea</h2></div>
+
+    <p class="lede">Students spend a week running a veterinary clinic that is losing money. They hire, fire, set prices, allocate people's hours, buy or lease equipment, and pass one year at a time. On Friday each team answers a real investment proposal in a ten-minute presentation.</p>
+
+    <p>The software records all of it: every decision, every year's results, which shortage actually held the clinic back, and short notes the students write before and after each year saying what they expect and what they observed.</p>
+
+    <p>That record makes one thing possible that studies of this kind normally cannot do. When a student explains why the team decided what it decided, <strong>you can check the explanation against what their clinic actually did.</strong> Not whether it sounds thoughtful — whether it is true of their own case.</p>
+
+    <p>That is the article. Not "does this game teach systems thinking", which no single cohort can answer, but a narrower question that a single cohort can: when students explain a decision they own, how well does what they say match the record, and what changes it?</p>
+
+    <div class="ledger">
+      <div class="yes">
+        <h4>What this can establish</h4>
+        <p>What students point to when they justify a decision, how far that matches their own recorded figures, and whether two specific changes to how the week ends make a difference.</p>
+      </div>
+      <div class="no">
+        <h4>What it cannot</h4>
+        <p>That students learned more, understood better, or will decide differently in practice. One cohort, one school, one activity, and a teacher who is also the researcher.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="part">
+    <div class="part-head"><span class="part-num">01</span><h2>The question</h2></div>
+
+    <blockquote>When students explain an investment decision they made in a simulated clinic, how far does the explanation match the record of what happened — and does it change if they have that record in front of them, or if they write alone before rather than after the group presentation?
+      <cite>Proposed main question</cite></blockquote>
+
+    <ol>
+      <li>What do students actually point to when they justify the decision: money, people's hours, room space, client trust, or the things the model never prices?</li>
+      <li>How often does what they say match their own figures, and how often does it contradict them?</li>
+      <li>Does having the record on screen during the presentation change either?</li>
+      <li>Does writing alone <em class="term">after</em> the group presentation produce different reasoning than writing alone before it?</li>
+      <li>What do the before-and-after notes show about how students revise when a forecast lets them down?</li>
+    </ol>
+
+    <p>The last one is worth a line. Students write what they expect <em class="term">before</em> passing a year and what they saw afterwards. Most studies of learning from activities collect reasoning only once it is over. Here the change of mind is on the page, in the students' own words, dated.</p>
+  </section>
+
+  <section class="part">
+    <div class="part-head"><span class="part-num">02</span><h2>What you vary</h2></div>
+
+    <p>Two things, each chosen because there is an obvious rival explanation it rules out or a practical decision it settles. Teams are assigned at random.</p>
+
+    <div class="arms">
+      <div class="arm">
+        <span class="tag">Contrast A</span>
+        <h4>The record in front of them, or not</h4>
+        <p>Half the teams present on Friday with their year-by-year record open and projectable. Half present from memory and handwritten notes, and get the record back immediately afterwards.</p>
+        <p class="tests">Rules out the obvious objection: that a well-evidenced account only means they could read the figures off a screen.</p>
+      </div>
+      <div class="arm">
+        <span class="tag">Contrast B</span>
+        <h4>Writing alone before, or after</h4>
+        <p>Every student writes one short individual position on the proposal. Half write it before the group presentation and questions; half write it after. Everyone writes and everyone takes part in the discussion — only the order differs.</p>
+        <p class="tests">Settles something schools actually decide: where an individual assessment should sit relative to group discussion.</p>
+      </div>
+    </div>
+
+    <p>The clinic itself is held constant, and not by assumption. The class code seeds the year-to-year swings in demand, so every team sharing a code meets an identical clinic meeting identical conditions. Differences between teams cannot come from an easier run.</p>
+
+    <p>Crossed, the two contrasts give four groups of about seven teams — too few to analyse as a grid. <strong>Analyse each contrast on its own</strong>, roughly fourteen teams a side, and treat anything that looks like an interaction as description only. Write that decision down before the week runs.</p>
+
+    <div class="flag">
+      <p><strong>On fairness, which the ethics committee will raise first.</strong> Both contrasts keep the teaching equivalent: everyone presents, everyone discusses, everyone writes, everyone gets their record back. What varies is the order of two tasks and what is on a screen for ten minutes — not who is taught what.</p>
+    </div>
+  </section>
+
+  <section class="part">
+    <div class="part-head"><span class="part-num">03</span><h2>How you read what they say</h2></div>
+
+    <p>Work in units of one explanation: a stretch where a student accounts for something. Why they chose it, what got in the way, how one thing affected another, what they would now say differently. Note which of the clinic's workings each explanation is about — a shortage that built up over time, a cost that arrived a year late, a trade-off between two people's hours, something the model leaves out entirely.</p>
+
+    <p>Then check each one against that team's own log:</p>
+
+    <div class="codes">
+      <div class="code-row">
+        <span class="name">matches the record</span>
+        <p>The claim can be traced to a figure in their own run — a year's result, the room that was full, the hours nobody used, the shortage that actually bound.</p>
+      </div>
+      <div class="code-row">
+        <span class="name">contradicted by it</span>
+        <p>The claim is about their run, and the log says otherwise. These are the most useful cases in the whole study, and without a log you cannot find them at all.</p>
+      </div>
+      <div class="code-row">
+        <span class="name">not about their clinic</span>
+        <p>General reasoning with no particular referent in the run. Fluent, often sensible, and about nothing that happened to them.</p>
+      </div>
+    </div>
+
+    <p>One caution that belongs in the method, not the discussion. The third category is <strong>not</strong> a failure grade. A student can make a sound professional argument — about animal welfare, about what a client would tolerate, about what a young vet can sustain — with no numbers in it at all, and be more right than the figures. Report the two things separately and never add them into a score.</p>
+  </section>
+
+  <section class="part">
+    <div class="part-head"><span class="part-num">04</span><h2>What to collect</h2></div>
+
+    <div class="scroller">
+      <table>
+        <thead>
+          <tr><th>Source</th><th>What it holds</th><th>Asks of students</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>The log</strong><br>One file per team</td>
+            <td>Every decision and what it was, each year's full results, per-service outcomes, staff morale and client trust, the shortage that bound each year, hiring, the settings used, and the five short notes per year.</td>
+            <td class="num">Nothing</td>
+          </tr>
+          <tr>
+            <td><strong>Recordings</strong><br>Transcribed in French</td>
+            <td>Friday presentations and the questions afterwards. Optionally Thursday, when a working practitioner contradicts the model.</td>
+            <td class="num">Consent</td>
+          </tr>
+          <tr>
+            <td><strong>Individual writing</strong><br>One prompt</td>
+            <td>Where each student stands on the proposal and why, written alone, about fifteen minutes, before or after the discussion by group.</td>
+            <td class="num">15 min</td>
+          </tr>
+          <tr>
+            <td><strong>Your own log</strong><br>Day by day</td>
+            <td>The question you put to each group as it came up — already built into the week as the “question de la séance”.</td>
+            <td class="num">Nothing</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Code the French directly. Do not translate before analysing, and have a colleague who was in the room check your reading of anything ambiguous.</p>
+  </section>
+
+  <section class="part">
+    <div class="part-head"><span class="part-num">05</span><h2>What the software records</h2></div>
+
+    <p>The four things this design needed and the software did not keep have now been built, and the regression suite covers each of them. An exported file is self-describing: it says which arm it belongs to, what the team was told would happen, and how much they went back and forth before committing.</p>
+
+    <div class="scroller">
+      <table>
+        <thead>
+          <tr><th>What</th><th>What it holds</th><th>Where it sits</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Study group</strong></td>
+            <td>The arm label the instructor gives out, entered beside the class code before Year 1, and logged again whenever it is changed.</td>
+            <td><code>setup.studyGroup</code></td>
+          </tr>
+          <tr>
+            <td><strong>The forecast they were shown</strong></td>
+            <td>Frozen at the moment the year is passed: the precision mode in force, the planned forecast, the no-action comparison beside it, what actually happened, and the gap between the last two for net result, cases served and cash.</td>
+            <td><code>years[].forecastShown</code></td>
+          </tr>
+          <tr>
+            <td><strong>Decision timing</strong></td>
+            <td>When each decision was first made, when it was last changed, and how many times it was revised. A separate log records every addition, revision and removal with its year and time, so decisions planned and then dropped are visible too.</td>
+            <td><code>years[].actionRecords</code>, <code>decisionLog</code></td>
+          </tr>
+          <tr>
+            <td><strong>Team code, not names</strong></td>
+            <td>A short anonymous code. The team-name and participant-name boxes are gone, and names held in a save from an older version are discarded when that save is loaded.</td>
+            <td><code>playerTeam.teamCode</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Repeated edits to one decision still cost a single action, so nothing about how the game plays has changed. What changed is that the deliberation behind a decision is no longer thrown away.</p>
+
+    <p>A fifth is possible and I would leave it out: logging which screens students opened would be an easy measure of attention, and it would turn a teaching tool into surveillance for very little. Their written notes already say what they were looking at, in their own words.</p>
+  </section>
+
+  <section class="part">
+    <div class="part-head"><span class="part-num">06</span><h2>How the week collects it</h2></div>
+
+    <p>No extra sessions. Everything sits inside the module as it already runs.</p>
+
+    <div class="week">
+      <div class="day">
+        <h4>Monday · consent, then setup</h4>
+        <p>A colleague takes research consent before the week opens, separately from the course and with no effect on marks. Students then enter the settings you give them, including the group field.</p>
+      </div>
+      <div class="day">
+        <h4>Tuesday to Thursday · the record builds</h4>
+        <p>Each year passed writes itself to the file, including what the team expected beforehand and what they saw afterwards. You keep your own note of the questions you introduced.</p>
+      </div>
+      <div class="day">
+        <h4>Thursday evening · the team's position</h4>
+        <p>Already part of the design. It marks what the team thought before the presentation and the questions reshaped it.</p>
+      </div>
+      <div class="day">
+        <h4>Friday · presentations</h4>
+        <p>Ten minutes per team with everyone speaking, recorded, with or without the record on screen by group. Questions. The individual writing, before or after by group. Files collected.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="part">
+    <div class="part-head"><span class="part-num">07</span><h2>Analysis</h2></div>
+
+    <p><strong>The main work is qualitative.</strong> Break the transcripts into explanations, note what each is about, and check each against the log. A second coder works through a good share of it independently, and you settle the disagreements before the categories are fixed.</p>
+
+    <p><strong>Comparison.</strong> Report counts per team as rates, by group. The team is the unit — students within a team are not independent of each other, and treating them as if they were would make the findings look far more precise than they are. If you want a statistical test, use one that accounts for teams, and keep it secondary to the description.</p>
+
+    <p><strong>One outside reader.</strong> You designed the activity, you teach the students, you facilitate the week, and you analyse the result. Have someone outside the project code a sample with the group labels stripped off, and report how far you agreed. It costs little and it answers the first objection any reviewer will make.</p>
+  </section>
+
+  <section class="part">
+    <div class="part-head"><span class="part-num">08</span><h2>Ethics</h2></div>
+
+    <p>The course is compulsory. The research is not, and students have to be able to see that difference, not just be told it exists.</p>
+
+    <ul>
+      <li><strong>Consent handled by someone else</strong>, withdrawable at any point, with no effect on marks and no way for you to know who declined until marking is finished.</li>
+      <li><strong>Transcripts stay closed until marks are submitted.</strong></li>
+      <li><strong>Team codes, not names</strong>, in anything that becomes data; the list linking them held separately and destroyed on a stated date.</li>
+      <li><strong>Recordings are personal data.</strong> Legal basis, where they are stored, how long they are kept and when they are deleted go in the protocol from the start, not in an amendment later.</li>
+    </ul>
+  </section>
+
+  <section class="part">
+    <div class="part-head"><span class="part-num">09</span><h2>Why it matters</h2></div>
+
+    <h3>For research on learning games</h3>
+    <p>Most studies ask whether an activity taught something and measure it with a questionnaire before and after. Those tests often come back flat while the discussion in the room is full of reasoning, which tells you as much about the instrument as about the students. This study asks something different and more answerable: whether what participants say about their own play holds up against what they actually did. Any activity that keeps a log can be studied this way, so the method travels beyond this clinic.</p>
+
+    <h3>For teaching</h3>
+    <p>It settles a practical scheduling question with real consequences. Programmes assess students individually, usually before or without group discussion. If the order turns out to matter, that is a change any course can make next year at no cost.</p>
+
+    <h3>For systems thinking</h3>
+    <p>The field has a persistent difficulty telling the vocabulary apart from the reasoning — a student who has learned to say "feedback loop" and "unintended consequence" reads as competent. Checking claims against a log separates the two mechanically. The clinic is well suited to it: shortages that build up quietly, costs that arrive a year after the decision, and an investment whose real merits sit mostly outside anything the model prices.</p>
+
+    <p>There is also a design reason to expect this to work. Earlier work in this same course found that students' explanations stayed close to whatever the prompts asked them about, and said comparatively little about the economic and professional realities behind their choice. Here the final task asks for exactly that, about a clinic they ran themselves.</p>
+  </section>
+
+  <section class="part">
+    <div class="part-head"><span class="part-num">10</span><h2>Limits, written down at the start</h2></div>
+
+    <p>One cohort at one school with one activity. Nothing here reaches whether students reason differently in practice a year later, and the article should not gesture at it.</p>
+
+    <p>The clinic is a model, so an explanation can match the record and still be wrong about veterinary practice. That is precisely what Thursday's practitioner is there to expose, and it is worth analysing rather than treating as noise.</p>
+
+    <p>Checking against a log rewards students who cite figures. Keep that axis separate from the quality of the argument, permanently.</p>
+
+    <p>And a recorder in the room changes a presentation. It changes both groups equally, which is what the comparison needs, but it does change them.</p>
+
+    <div class="flag">
+      <p><strong>The single claim to protect.</strong> The article says: here is a way to check whether learners' accounts of their own decisions match what they did, here is what that showed in one cohort, and here are two things that changed it. Every temptation to widen that — into what they learned, into what they will do as vets — makes it weaker, not bigger.</p>
+    </div>
+  </section>
+
+  <footer>
+    <p>Draft frame for a study of the veterinary clinic simulation, University of Liège. Statements about what the software records were read from its export code. Prior comparative work by the author on learning activities is background and is cited as such; this study stands on its own question.</p>
+  </footer>
+
+</div>
