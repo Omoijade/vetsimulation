@@ -343,6 +343,123 @@ const badgeCard = ClinicTest.renderState(badgeClinic).match(/Referral support<\/
 if (!badgeCard) throw new Error("The referral-support card should render");
 if (badgeCard[1] === "50" && /Needs attention/.test(badgeCard[2])) throw new Error("A metric card must not warn about a value it displays as unchanged");
 
+
+// --- Pass 8: a price rise must be a real decision ---
+// Two anchors pin the steepness of the above-willingness curve. The previous pass softened it
+// without noticing (exponential decay retains more than the linear curve it replaced at every
+// ratio below ~2.6), so this guards the slope itself rather than only its monotonicity.
+const priceCurveClinic = ClinicTest.initialState("balanced", "en");
+const consultForCurve = ClinicTest.data.services.find((service) => service.id === "consult");
+const keptAtPrice = (price) => {
+  const clinic = ClinicTest.clone(priceCurveClinic);
+  clinic.services.consult.price = price;
+  return ClinicTest.projectedDemand(consultForCurve, clinic) / ClinicTest.projectedDemand(consultForCurve, priceCurveClinic);
+};
+if (keptAtPrice(75) >= .75) throw new Error(`Half again the willingness price must cost real requests, kept ${(keptAtPrice(75) * 100).toFixed(1)}%`);
+if (keptAtPrice(100) >= .55) throw new Error(`Doubling the price must cost about half the requests, kept ${(keptAtPrice(100) * 100).toFixed(1)}%`);
+
+
+// --- Pass 8: marketing must still be worth buying when capacity binds ---
+// Before this pass, paid marketing only scaled demand, so once honored = min(demand, caps) the fee
+// bought nothing and lowered honoredRate, which lowers trust. Paid tiers now also raise what
+// clients accept paying, which keeps returning after the ceiling is reached.
+const capacityBound = (tier) => {
+  const clinic = ClinicTest.initialState("growth", "en");
+  Object.keys(clinic.services).forEach((id) => { clinic.services[id].active = true; });
+  clinic.marketing.communication = tier;
+  return ClinicTest.simulateYear(ClinicTest.clone(clinic), clinic, ClinicTest.emptyEffects(), []);
+};
+const boundBasic = capacityBound("basic");
+if (boundBasic.operational.honoredRate > .8) throw new Error("This probe is meant to be capacity-bound; it is not");
+const boundTargeted = capacityBound("targeted");
+if (boundTargeted.financial.netResult - boundBasic.financial.netResult < 2000) throw new Error("Paid communication must still pay for itself on a capacity-bound clinic");
+
+// The calibration firewall: the default tier carries no willingness field, so the multiplier is
+// exactly 1 and every scenario baseline is untouched by this feature.
+if (ClinicTest.data.marketingStrategies.communication.basic.willingness) throw new Error("The default communication tier must stay free of any willingness boost");
+if (!ClinicTest.data.marketingStrategies.communication.targeted.willingness) throw new Error("Paid communication must raise the price clients accept");
+// Test the mechanism, not just the field: above the willingness line the pivot itself has moved,
+// so the same price costs fewer requests. The capacity test above cannot see this on its own,
+// because its probe clinic still has demand headroom on several services.
+const pivotProbe = (tier) => {
+  const clinic = ClinicTest.initialState("balanced", "en");
+  clinic.marketing.communication = tier;
+  clinic.services.consult.price = 100;
+  return ClinicTest.projectedDemand(ClinicTest.data.services.find((service) => service.id === "consult"), clinic);
+};
+if (pivotProbe("targeted") <= pivotProbe("basic") * 1.02) throw new Error("Above the willingness price, paid communication must visibly soften the loss of requests");
+
+
+// --- Pass 8: the supplies percentage, and the stock drawer naming every affected service ---
+const suppliesPattern = /(?:supplies|fournitures)\s[0-9][0-9,.\s\u00a0\u202f]*%/;
+["en", "fr"].forEach((language) => {
+  const clinic = ClinicTest.initialState("balanced", language);
+  Object.keys(clinic.services).forEach((id) => { clinic.services[id].active = true; });
+  ClinicTest.renderState(clinic);
+  const detail = (ClinicTest.renderUiForTest({ drawer: "services", selectedServiceId: "consult", confirm: null }).match(suppliesPattern) || [])[0];
+  const pricing = (ClinicTest.renderUiForTest({ drawer: "pricing", drawerContext: null, confirm: null }).match(suppliesPattern) || [])[0];
+  if (!detail) throw new Error(`The service card must show the supplies percentage (${language})`);
+  if (!pricing) throw new Error(`The pricing drawer must show the supplies percentage (${language})`);
+  if (detail !== pricing) throw new Error(`Both surfaces must show the same supplies percentage for one service: "${detail}" vs "${pricing}"`);
+});
+
+// Iterate the real set, so adding a service to STOCK_SERVICES without naming it here fails here
+// rather than silently misinforming students, which is how orthopedics went unmentioned.
+const STOCK_WORDS = {
+  pharmacy: [/pharmacy/i, /pharmacie/i], surgery: [/surgery/i, /chirurgie/i],
+  hospital: [/hospital/i, /hospitalisation/i], dentistry: [/dentistry/i, /dentisterie/i],
+  orthopedic: [/orthoped/i, /orthop\u00e9d/i], vaccination: [/vaccination/i, /vaccination/i],
+  preventive: [/preventive/i, /pr\u00e9vention/i]
+};
+["en", "fr"].forEach((language, index) => {
+  ClinicTest.renderState(ClinicTest.initialState("balanced", language));
+  const stockHtml = ClinicTest.renderUiForTest({ drawer: "stock", drawerContext: null, confirm: null });
+  [...ClinicTest.stockServices].forEach((id) => {
+    const pattern = (STOCK_WORDS[id] || [])[index];
+    if (!pattern) throw new Error(`No keyword for stock-dependent service "${id}" — add one when adding the service`);
+    if (!pattern.test(stockHtml)) throw new Error(`The stock drawer must name every stock-dependent service; "${id}" is missing (${language})`);
+  });
+});
+
+
+// --- Pass 8: every decision says how long it lasts ---
+// The marker rides with consequencePreview, so any surface that previews a decision must carry one.
+const DURATION_SURFACES = [
+  ["services", "core", "vaccination"], ["rooms", null, null], ["equipment", null, null],
+  ["training", null, null], ["pricing", null, null], ["staffExit", "support-maya", null],
+  ["staffPerson", "vet-founder", null], ["opening", null, null], ["dropoff", null, null],
+  ["stock", null, null], ["hr", null, null], ["finance", null, null], ["market", null, null],
+  ["location", null, null], ["marketing", "communication", null], ["sustainability", "building", null]
+];
+["en", "fr"].forEach((language) => {
+  ClinicTest.renderState(ClinicTest.initialState("balanced", language));
+  DURATION_SURFACES.forEach(([drawer, drawerContext, selectedServiceId]) => {
+    const html = ClinicTest.renderUiForTest({ drawer, drawerContext, selectedServiceId, confirm: null });
+    const previews = (html.match(/class="consequence-grid"/g) || []).length;
+    const markers = (html.match(/class="lasts"/g) || []).length;
+    if (previews && markers < previews) throw new Error(`Every previewed decision must say how long it lasts; ${drawer} has ${markers} of ${previews} (${language})`);
+  });
+});
+
+// The five effects that used to be invisible, each named where the decision is made.
+const riderFor = (drawer, payload) => {
+  const html = ClinicTest.renderUiForTest({ drawer, drawerContext: null, confirm: { key: "probe", payload } });
+  return (html.match(/class="lasts">([^<]*)</) || [])[1] || "";
+};
+ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+const RIDERS = [
+  ["services", { kind: "toggle-service", targetId: "vaccination", value: true }, "first year 60% of demand"],
+  ["market", { kind: "market-focus", targetId: "advanced" }, "first year −10% requests"],
+  ["location", { kind: "location", targetId: "centre" }, "first year −5% requests"],
+  ["recruitment", { kind: "hire", targetId: "vet-generalist", value: { role: "vet", desiredSkills: ["general"], salaryBudget: 60000, offeredSalary: 52000 } }, "first year 25% settling in"],
+  ["staffExit", { kind: "fire", targetId: "support-maya" }, "no rehire for one year"]
+];
+RIDERS.forEach(([drawer, payload, expected]) => {
+  if (!riderFor(drawer, payload).includes(expected)) throw new Error(`A one-year effect must be named where the decision is made: "${expected}" missing from ${drawer}`);
+});
+// Leasing recurs; buying is once plus upkeep. Same action kind, two different commitments.
+if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", mode: "lease" }) === riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", mode: "buy" })) throw new Error("Leasing and buying must not claim the same duration");
+
 require("./tests.js");
 
 for (const item of resultItems) console.log(item.textContent);

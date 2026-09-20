@@ -264,8 +264,11 @@
   const marketingStrategies = {
     communication: {
       basic: { name: bi("Basic communication", "Communication de base"), cost: 0, trust: 0, demand: 0 },
-      standard: { name: bi("Regular follow-up", "Suivi régulier"), cost: 3000, trust: 2, demand: .02 },
-      targeted: { name: bi("Targeted communication", "Communication ciblée"), cost: 8000, trust: 5, demand: .05 }
+      // `willingness` raises the price clients accept, so communication still pays once the clinic
+      // is capacity-bound and extra demand converts to nothing. `basic` deliberately has no field:
+      // that keeps the default multiplier at exactly 1 and the scenario calibration untouched.
+      standard: { name: bi("Regular follow-up", "Suivi régulier"), cost: 3000, trust: 2, demand: .02, willingness: .03 },
+      targeted: { name: bi("Targeted communication", "Communication ciblée"), cost: 8000, trust: 5, demand: .05, willingness: .08 }
     },
     monitoring: {
       none: { name: bi("No monitoring", "Aucune veille"), cost: 0, supportHours: 0, relief: 0 },
