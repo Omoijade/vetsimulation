@@ -110,7 +110,30 @@ if (!paceService.includes("Pace: time per appointment") || !paceService.includes
 if (!paceService.includes("Vet time per case") || !paceService.includes("Support time per case")) throw new Error("Service detail must show the vet and support time separately");
 if (/>Time per case</.test(paceService)) throw new Error("The blended time-per-case stat should be gone");
 const overtimeDraft = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: "vet-founder", confirm: null, allocationDrafts: { "vet-founder": [{ serviceId: "consult", share: .9 }, { serviceId: "preventive", share: .3 }] } });
-if (!overtimeDraft.includes("120% assigned") || !overtimeDraft.includes("overtime hours") || !overtimeDraft.includes("Overtime cost")) throw new Error("Allocation drawer does not show overtime consequences");
+if (!overtimeDraft.includes("120% assigned") || !overtimeDraft.includes("overtime hours")) throw new Error("Above 100% the meter must say how many overtime hours are allowed");
+if (!/Forecast worked: 0 h/.test(overtimeDraft)) throw new Error("The meter must also say how many overtime hours will actually be worked, not just how many are allowed");
+if (overtimeDraft.includes("Overtime cost")) throw new Error("With no overtime actually worked, the cost row is 0 to 0 and should stay hidden");
+{
+  // With a capacity-constrained person the hours really are worked, and then the cost must appear.
+  const small = ClinicTest.initialState("balanced", "en");
+  small.services.vaccination.active = true;
+  small.staff.find((person) => person.id === "support-maya").capacity = 300;
+  ClinicTest.renderState(small);
+  const worked = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: "support-maya", confirm: null, allocationDrafts: { "support-maya": [{ serviceId: "vaccination", share: 1.3 }] } });
+  if (!worked.includes("Overtime cost")) throw new Error("When overtime is actually worked, its cost must be shown");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+// The meter described the assignment while the hours were blocked: a student read "fully booked"
+// at the exact moment their clinic collapsed.
+{
+  const untrained = ClinicTest.initialState("balanced", "en");
+  untrained.services.lab.active = true;
+  ClinicTest.renderState(untrained);
+  const blocked = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: "support-maya", confirm: null, allocationDrafts: { "support-maya": [{ serviceId: "lab", share: 1 }] } });
+  if (blocked.includes("fully booked")) throw new Error("Hours blocked until training must not be described as fully booked");
+  if (!/blocked until training/.test(blocked)) throw new Error("The meter must say the hours are blocked, since no case can be handled");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
 ClinicTest.renderUiForTest({ allocationDrafts: {} });
 const frenchTeamState = ClinicTest.getState();
 frenchTeamState.language = "fr";
@@ -213,7 +236,8 @@ if (!/Net result/.test(equip) || /Net cash this year/.test(equip)) throw new Err
 
 const openDrawer = ClinicTest.renderUiForTest({ drawer: "opening", drawerContext: null, confirm: null });
 if (/One-time costs/.test(openDrawer)) throw new Error("A purely recurring decision must not show a one-time cost row");
-if (!/Added cost per year/.test(openDrawer)) throw new Error("A recurring decision must name its annual charge");
+if (!/Operating costs/.test(openDrawer)) throw new Error("A recurring decision must name the cost line its annual charge lands on");
+if (!/€12,000/.test(openDrawer)) throw new Error("The annual charge in the preview must equal the price printed on the card");
 
 const loc = ClinicTest.renderUiForTest({ drawer: "location", drawerContext: null, confirm: null });
 if (!/once to move/.test(loc)) throw new Error("Relocation must show its one-time move cost");
@@ -235,6 +259,451 @@ if (/data-allocation-fill/.test(filled)) throw new Error("At 100% there are no r
 if (Math.abs(ClinicTest.allocationRemainder([{ share: .3 }, { share: .25 }], 1) - .45) > 1e-9) throw new Error("allocationRemainder must return the exact unassigned share");
 if (ClinicTest.allocationRemainder([{ share: 1 }], 0) !== 0) throw new Error("A full allocation has no remainder");
 
+// The hours grid used to read the SAVED allocation, so it printed the same four figures whatever
+// the student was dragging — and contradicted the workload line three rows below it. It must move
+// with the draft, and the cells must add up at every share, overtime included.
+function hoursGridCells(share, mutate) {
+  const setup = ClinicTest.initialState("balanced", "en");
+  setup.services.vaccination.active = true;
+  if (mutate) mutate(setup);
+  ClinicTest.renderState(setup);
+  const html = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: "support-maya", confirm: null, allocationDrafts: { "support-maya": [{ serviceId: "vaccination", share }] } });
+  const grid = html.match(/<div class="mini-hours">([\s\S]*?)<\/div><div class="allocation-total/);
+  if (!grid) throw new Error("The allocation drawer must render an hours grid");
+  const cells = {};
+  for (const match of grid[1].matchAll(/<span>([^<]*)<\/span><strong>([^<]*)<\/strong>/g)) cells[match[1]] = Number(match[2].replace(/[^\d]/g, ""));
+  return cells;
+}
+const lightDraft = hoursGridCells(.2);
+const heavyDraft = hoursGridCells(1);
+if (lightDraft["Hours used"] === heavyDraft["Hours used"]) throw new Error("The hours grid must follow the draft, not the saved allocation");
+// available + overtime = used + unused + blocked, at every share. The model's own unusedHours falls
+// back to assigned hours above 100%, which is what made these cells stop adding up.
+[[.2, null], [.65, null], [1, null], [1.3, null], [.65, (s) => { s.staff.find((p) => p.id === "support-maya").capacity = 300; }], [1.3, (s) => { s.staff.find((p) => p.id === "support-maya").capacity = 300; }]].forEach(([share, mutate]) => {
+  const c = hoursGridCells(share, mutate);
+  const left = c["Available hours"] + (c["Overtime hours"] || 0);
+  const right = c["Hours used"] + c["Unused hours"] + c["Blocked hours"];
+  if (Math.abs(left - right) > 1) throw new Error(`The hours grid must reconcile at ${Math.round(share * 100)}%: ${left} vs ${right}`);
+});
+// The sentence above the grid and the grid itself must never describe different clinics. The
+// meter used to talk about the assignment ("35% unassigned", "fully booked") while the hours told
+// a different story underneath it — three-quarters idle, or every hour blocked.
+function meterAndGrid(share, mutate, service = "vaccination") {
+  const setup = ClinicTest.initialState("balanced", "en");
+  setup.services[service].active = true;
+  if (mutate) mutate(setup);
+  ClinicTest.renderState(setup);
+  const html = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: "support-maya", confirm: null, allocationDrafts: { "support-maya": [{ serviceId: service, share }] } });
+  const meter = html.match(/<div class="allocation-total[^"]*"><strong>([^<]*)</)?.[1] || "";
+  const grid = html.match(/<div class="mini-hours">([\s\S]*?)<\/div><div class="allocation-total/)?.[1] || "";
+  const cells = {};
+  for (const cell of grid.matchAll(/<span>([^<]*)<\/span><strong>([^<]*)<\/strong>/g)) cells[cell[1]] = Number(cell[2].replace(/[^\d]/g, ""));
+  return { meter, cells };
+}
+const shrink = (setup) => { setup.staff.find((person) => person.id === "support-maya").capacity = 300; };
+[[.65, null], [1, null], [1, shrink]].forEach(([share, mutate]) => {
+  const { meter, cells } = meterAndGrid(share, mutate);
+  if (cells["Unused hours"] >= 1 && !meter.includes(`${cells["Unused hours"].toLocaleString("en-GB").replace(/,/g, ",")} h paid and unused`)) {
+    throw new Error(`The meter must report the hours the grid calls unused (${cells["Unused hours"]}), not a share of the assignment: "${meter}"`);
+  }
+});
+// Overtime the model will actually work has to reach the sentence, not only the allowance.
+{
+  const { meter, cells } = meterAndGrid(1.3, shrink);
+  if (!meter.includes(`Forecast worked: ${cells["Overtime hours"]} h`)) throw new Error(`The meter must name the overtime actually worked (${cells["Overtime hours"]} h): "${meter}"`);
+}
+
+// Worked overtime belongs where the hours are, not only inside a sentence.
+const overtimeCells = hoursGridCells(1.3, (s) => { s.staff.find((p) => p.id === "support-maya").capacity = 300; });
+if (!(overtimeCells["Overtime hours"] > 0)) throw new Error("Overtime hours must appear in the grid when they are worked");
+if (hoursGridCells(.65)["Overtime hours"] !== undefined) throw new Error("The overtime cell must stay hidden when no overtime is worked");
+
+const stateBeforePlanRowTests = ClinicTest.getState();
+// The mobile plan drawer built its own rows with raw money()/number()/pct(), so a game set to
+// ranges or costs precision printed exact figures on a phone — defeating an instructor setting.
+// Desktop and mobile must draw the same rows from the same formatter.
+function planLabels(html) {
+  return [...html.matchAll(/<(?:strong)>([^<]*)<\/strong><span>/g)].map((match) => match[1]);
+}
+["en", "fr"].forEach((language) => {
+  ["ranges", "costs"].forEach((precision) => {
+    const setup = ClinicTest.initialState("balanced", language);
+    setup.setup.forecastPrecision = precision;
+    const desktop = ClinicTest.renderState(setup);
+    const mobile = ClinicTest.renderUiForTest({ drawer: "plan", drawerContext: null, confirm: null });
+    const leak = precision === "costs" ? /Revealed at year end|Révélé en fin d’année/ : /…/;
+    const details = mobile.match(/<div class="mobile-plan-details">[\s\S]*?<div class="plan-actions">/)?.[0] || "";
+    if (!details) throw new Error("The mobile plan drawer must render its comparison list");
+    if (!leak.test(details)) throw new Error(`The mobile plan drawer leaks exact figures under ${precision} precision (${language})`);
+    const panel = desktop.match(/<div class="forecast-table">[\s\S]*?<\/div>\s*<div class="plan-actions">/)?.[0] || desktop;
+    ["forecast.revenue", "forecast.totalCosts", "forecast.netResult", "forecast.treasury", "forecast.served", "forecast.staffUse"].forEach((key) => {
+      const label = ClinicTest.planRowLabel(key);
+      if (!details.includes(label)) throw new Error(`The mobile plan drawer drops "${label}" (${language}/${precision})`);
+      if (!panel.includes(label)) throw new Error(`The desktop plan panel drops "${label}" (${language}/${precision})`);
+    });
+  });
+});
+ClinicTest.renderState(stateBeforePlanRowTests);
+
+// A link and a click must land on the same screen. applyRoute did not fold the legacy per-person
+// drawers into the person hub the way openDrawer does, so the workbook's own link opened a
+// different, untabbed screen than the button next to it.
+const WORKBOOK_LINKS = ["#overview", "#business/finance", "#care", "#care/services/core/vaccination", "#team", "#team/staffAllocation/support-maya"];
+WORKBOOK_LINKS.forEach((link) => {
+  const route = ClinicTest.parseRoute(link);
+  if (!route.domain) throw new Error(`The workbook link ${link} does not name a real area`);
+  ClinicTest.applyRoute(route);
+  const landed = ClinicTest.routeFor();
+  const again = ClinicTest.parseRoute(landed);
+  ClinicTest.applyRoute(again);
+  if (ClinicTest.routeFor() !== landed) throw new Error(`The workbook link ${link} does not settle: ${landed} then ${ClinicTest.routeFor()}`);
+});
+ClinicTest.applyRoute(ClinicTest.parseRoute("#team/staffAllocation/support-maya"));
+const viaLink = ClinicTest.routeFor();
+ClinicTest.openDrawer("staffAllocation", "support-maya");
+if (ClinicTest.routeFor() !== viaLink) throw new Error(`The workbook link and the button must open one screen: ${viaLink} vs ${ClinicTest.routeFor()}`);
+
+// Friday's proposal is financed by a 30 000 € loan. Without it the exercise cannot be modelled.
+const financeHtml = ClinicTest.renderUiForTest({ drawer: "finance", drawerContext: null, confirm: null });
+[30000, 50000, 100000].forEach((amount) => {
+  if (!financeHtml.includes(`%22value%22%3A${amount}%7D`)) throw new Error(`The financing drawer must offer a ${amount} loan`);
+});
+// Borrowing and selling equipment move cash without passing through costs. Without a treasury row
+// a loan reads as pure loss: the interest is charged and the money received appears nowhere.
+if (!/Treasury|Trésorerie/.test(financeHtml)) throw new Error("A loan preview must show what it does to the treasury");
+
+// --- "Agir" lands on the thing you came to buy ------------------------------------------------
+// The link used to open the drawer at the top of a list, leaving the student to find the room or
+// the course themselves — the opposite of what a one-click shortcut is for.
+{
+  const clinic = ClinicTest.initialState("balanced", "en");
+  const surgery = ClinicTest.data.services.find((service) => service.id === "surgery");
+  const missing = ClinicTest.missingRequirements(surgery, clinic);
+  if (!missing.length) throw new Error("Surgery should still be missing requirements in a fresh balanced clinic");
+  const list = ClinicTest.requirementList(surgery, clinic);
+  missing.forEach((reason) => {
+    if (!list.includes(`data-focus="${reason.id}"`)) throw new Error(`"Address this" must carry the missing item ${reason.id}, or it opens a list to scroll`);
+  });
+  // A missing skill needs a person before it can be acted on, so the link carries one.
+  const skill = missing.find((reason) => reason.type.includes("Skill"));
+  if (skill && !/data-focus="[^"]*"\s+data-context="/.test(list)) throw new Error("A missing skill must carry the person who would learn it");
+
+  // The wanted card comes first and is marked, in every drawer the link can reach.
+  [["rooms", "surgery"], ["equipment", "orthopedicKit"], ["training", "surgery"]].forEach(([drawer, id]) => {
+    const html = ClinicTest.renderUiForTest({ drawer, drawerContext: drawer === "training" ? "support-maya" : null, confirm: null, focusItem: id });
+    if (!html.includes("data-target-card")) throw new Error(`The ${drawer} drawer must mark the card the student was sent to`);
+    const cards = html.match(/<article[^>]*class="choice-card[^"]*"/g) || [];
+    if (!cards.length) throw new Error(`The ${drawer} drawer renders no choice cards`);
+    if (!/^<article data-target-card/.test(cards[0])) throw new Error(`The card the student was sent to must come first in ${drawer}, not buried in the list`);
+  });
+  // Without a target, nothing is marked and the original order is kept.
+  const plain = ClinicTest.renderUiForTest({ drawer: "rooms", drawerContext: null, confirm: null, focusItem: null });
+  if (plain.includes("data-target-card")) throw new Error("Opening a drawer normally must not mark any card");
+}
+
+// --- The verdict must follow the clinic, not the calendar -------------------------------------
+// endState was decided by the year counter alone, so four years of doing nothing ended balanced at
+// -89,389 € under a green tick reading "Target year complete", with the treasury shown nowhere.
+["balanced", "rescue"].forEach((scenario) => {
+  ClinicTest.renderState(ClinicTest.initialState(scenario, "en"));
+  for (let year = 0; year < 4; year += 1) ClinicTest.resolveTurn();
+  const finished = ClinicTest.getState();
+  if (!(finished.treasury < 0)) throw new Error(`${scenario} was expected to end insolvent when nothing is done; this test no longer exercises the case`);
+  if (finished.endState.type === "success") throw new Error(`${scenario} ends at ${Math.round(finished.treasury)} and must not be reported as a success`);
+  const modal = document.querySelector("#app").innerHTML;
+  if (!/Final treasury/.test(modal)) throw new Error("The end modal must show the treasury the verdict is based on");
+  if (!/insolvent/i.test(modal)) throw new Error("The end modal must say the clinic is insolvent, not only show a symbol");
+});
+// A clinic that ends solvent at the target year is still a success.
+{
+  ClinicTest.renderState(ClinicTest.initialState("growth", "en"));
+  for (let year = 0; year < 4; year += 1) ClinicTest.resolveTurn();
+  const finished = ClinicTest.getState();
+  if (finished.treasury < 0) throw new Error("growth was expected to end solvent; this test no longer exercises the case");
+  if (finished.endState.type !== "success") throw new Error("A solvent clinic reaching the target year must still be a success");
+}
+ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+
+// --- The hiring pool must not be one person deep -----------------------------------------------
+// Every skill but `general` used to have exactly one source candidate, so firing that person took
+// the skill off the market for a year (rehireBlocked). Three fields have no default and break
+// loudly or silently if a new candidate omits them.
+{
+  const pool = ClinicTest.data.candidates;
+  pool.forEach((candidate) => {
+    if (candidate.expectedSalary === undefined) throw new Error(`${candidate.id} has no expectedSalary: it could never be hired and would not even be listed`);
+    if (candidate.postingFee === undefined) throw new Error(`${candidate.id} has no postingFee: one-time costs would become NaN`);
+    if (!Array.isArray(candidate.skills)) throw new Error(`${candidate.id} has no skills array: the applicant list would throw while rendering`);
+  });
+  // Every skill needs a second route. `general` cannot be trained, so it needs several hires;
+  // everything else is dual-sourced by hiring, by training, or both.
+  const trainable = new Set(Object.keys(ClinicTest.data.trainings));
+  Object.keys(ClinicTest.data.skills).forEach((skill) => {
+    const hires = pool.filter((candidate) => candidate.skills.includes(skill)).length;
+    const routes = hires + (trainable.has(skill) ? 1 : 0);
+    if (routes < 2) throw new Error(`"${skill}" has only one route into the clinic (${hires} candidates, trainable: ${trainable.has(skill)})`);
+    if (skill === "general" && hires < 2) throw new Error("`general` cannot be trained, so it needs more than one candidate offering it");
+  });
+  // Each candidate must be able to work the service they are pitched for, or their hours are
+  // blocked on arrival.
+  const byId = Object.fromEntries(ClinicTest.data.services.map((service) => [service.id, service]));
+  pool.forEach((candidate) => {
+    const service = byId[candidate.primaryService];
+    if (!service) throw new Error(`${candidate.id} names a service that does not exist: ${candidate.primaryService}`);
+    if (candidate.role === "support" && !(service.supportShare > 0)) throw new Error(`${candidate.id} is support but ${service.id} has no support work; the allocation would be dropped silently`);
+    const required = candidate.role === "vet" ? service.vetSkills : service.supportSkills;
+    required.forEach((skill) => {
+      if (!candidate.skills.includes(skill)) throw new Error(`${candidate.id} lacks "${skill}" for ${service.id}: their hours would arrive blocked`);
+    });
+  });
+  // The default vacancy budget used to reveal exactly one vet, so the specialists looked absent.
+  const affordable = pool.filter((candidate) => candidate.role === "vet" && candidate.expectedSalary <= 60000);
+  if (affordable.length < 2) throw new Error(`Only ${affordable.length} vet is visible at the default 60,000 budget; the pool reads as empty`);
+}
+
+// --- "Exact figures" must mean exact ---------------------------------------------------------
+// The plan panel's End treasury used to come in above the realised figure, always. The forecast
+// clips demand at capacity BEFORE the class-seeded swing is applied, so an upward swing bought
+// nothing while a downward swing cost money: over 300 class codes the largest year-3 gap was
+// exactly 0.00 €. In exact mode the swing is now off on both sides.
+["", "VET-1", "GRP7"].forEach((classCode) => {
+  const setup = ClinicTest.initialState("balanced", "en");
+  setup.setup.classCode = classCode;
+  setup.setup.forecastPrecision = "exact";
+  ClinicTest.renderState(setup);
+  for (let year = 1; year <= 4; year += 1) {
+    const projected = ClinicTest.simulatePlan(ClinicTest.pendingActions()).financial.treasury;
+    ClinicTest.resolveTurn();
+    const realised = ClinicTest.getState().treasury;
+    if (Math.abs(realised - projected) > 0.01) throw new Error(`With exact figures the year must land on its own forecast: class "${classCode}" year ${year} projected ${projected}, got ${realised}`);
+  }
+});
+// ...but the variance itself must survive where it is the lesson.
+{
+  const varied = ClinicTest.initialState("balanced", "en");
+  varied.setup.classCode = "VET-1";
+  varied.setup.forecastPrecision = "ranges";
+  ClinicTest.renderState(varied);
+  let sawADifference = false;
+  for (let year = 1; year <= 4; year += 1) {
+    const projected = ClinicTest.simulatePlan(ClinicTest.pendingActions()).financial.treasury;
+    ClinicTest.resolveTurn();
+    if (Math.abs(ClinicTest.getState().treasury - projected) > 0.01) sawADifference = true;
+  }
+  if (!sawADifference) throw new Error("Ranges mode must keep the demand variance; it was deleted globally rather than gated on the precision setting");
+}
+ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+
+// --- Hours parked on closed services must be named where they are edited --------------------
+// A fresh clinic assigns its support person entirely to services that are not open. That is the
+// Monday lesson and it stays — but the drawer used to call it "100% assigned" in a positive tone
+// while the workload underneath read 0%. The same applies to a new hire, who lands on the
+// specialist service they were recruited for, before it exists.
+{
+  const fresh = ClinicTest.initialState("balanced", "en");
+  ClinicTest.renderState(fresh);
+  const drawer = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: "support-maya", confirm: null });
+  if (!drawer.includes("closed-hours")) throw new Error("The allocation drawer must say when a person's hours sit on closed services");
+  if (!/assigned to services that are not open/.test(drawer)) throw new Error("The closed-hours warning must name what is wrong");
+  ["Vaccination", "Preventive care"].forEach((name) => {
+    if (!drawer.includes(name)) throw new Error(`The closed-hours warning must name the service: ${name}`);
+  });
+  // ...and must fall silent once the services are open, or it becomes noise.
+  const open = ClinicTest.initialState("balanced", "en");
+  open.services.vaccination.active = true;
+  open.services.preventive.active = true;
+  ClinicTest.renderState(open);
+  const quiet = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: "support-maya", confirm: null });
+  if (quiet.includes("closed-hours")) throw new Error("With every assigned service open, the warning must not appear");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// The relations drawer is an action on the team, not a setting: it belongs beside "Plan training",
+// not in the settings menu whose other rows each name the option you are currently on.
+{
+  const team = ClinicTest.initialState("balanced", "en");
+  team.domain = "team";
+  const html = ClinicTest.renderState(team);
+  const menu = html.match(/<div class="operation-rows">[\s\S]*?<\/div>/)?.[0] || "";
+  if (menu.includes('data-open-drawer="relations"')) throw new Error("The relations drawer is an action, not a setting; it must not sit in the operations menu");
+  if (!/Act on climate and trust/.test(html)) throw new Error("The team page must offer the climate and trust actions by name");
+  if (/Climate \d+ · Trust \d+/.test(menu)) throw new Error("The settings menu must not carry forecast numbers; the Overview cards already show them with their thresholds");
+}
+
+// --- Staff climate and client trust must be things you can act on ----------------------------
+// Four social actions were fully built — costs, effects, a reducer, an action label, a click
+// handler — and no screen ever rendered a button for them, so students could watch the two
+// indicators move and had no direct way to change either.
+["en", "fr"].forEach((language) => {
+  ClinicTest.renderState(ClinicTest.initialState("balanced", language));
+  const html = ClinicTest.renderUiForTest({ drawer: "relations", drawerContext: null, confirm: null });
+  const cards = html.match(/<article[^>]*class="choice-card[^"]*"/g) || [];
+  if (cards.length !== Object.keys(ClinicTest.data.socialActions).length) throw new Error(`Every social action needs a card a student can press (${language}): ${cards.length} of ${Object.keys(ClinicTest.data.socialActions).length}`);
+  Object.keys(ClinicTest.data.socialActions).forEach((id) => {
+    if (!html.includes(`%22targetId%22%3A%22${id}%22`)) throw new Error(`"${id}" is defined in the model but no button offers it (${language})`);
+  });
+  // Each one must visibly move something, or it reads as a decision that does nothing.
+  const climate = language === "en" ? "Staff climate" : "Climat de l’équipe";
+  const trust = language === "en" ? "Client trust" : "Confiance des clients";
+  const referral = language === "en" ? "Referral support" : "Soutien des référents";
+  [climate, trust, referral].forEach((label) => {
+    if (!html.includes(label)) throw new Error(`The team-and-clients drawer must show ${label} moving, or its action looks inert (${language})`);
+  });
+});
+// The drawer has to be reachable from the Team page, not only by typing a URL.
+{
+  const team = ClinicTest.initialState("balanced", "en");
+  team.domain = "team";
+  if (!ClinicTest.renderState(team).includes('data-open-drawer="relations"')) throw new Error("Team and clients must be offered on the Team page");
+}
+// The drawer context comes from the hash, so a typo must not take the whole app down.
+{
+  ClinicTest.applyRoute(ClinicTest.parseRoute("#business/marketing/typo"));
+  ClinicTest.renderUiForTest({});
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// --- Variable costs are readable, and the three buckets still add up -------------------------
+// The workbook's Tuesday exercise is `coûts fixes = coûts totaux − coûts variables`, done on
+// screen. Both operands must be on the Business page, in both languages.
+["en", "fr"].forEach((language) => {
+  const base = ClinicTest.initialState("balanced", language);
+  base.domain = "business";
+  const html = ClinicTest.renderState(base);
+  const label = language === "en" ? "Variable costs" : "Coûts variables";
+  const total = language === "en" ? "Total costs" : "Coûts totaux";
+  if (!html.includes(label)) throw new Error(`The Business page must show ${label}: the workbook tells students to read it there`);
+  if (!html.includes(total)) throw new Error(`The Business page must show ${total}`);
+  const perCase = language === "en" ? /per case treated/ : /par cas traité/;
+  if (!perCase.test(html)) throw new Error(`Variable costs must say how they scale with the number of cases (${language})`);
+  // Overtime sits in neither bucket, so the subtraction is only exact while it is zero. Disclose it
+  // exactly when it exists, and stay silent otherwise.
+  const quiet = language === "en" ? /incl\. .* of overtime/ : /dont .* d’heures supplémentaires/;
+  if (quiet.test(html)) throw new Error(`With no overtime the Total costs card must not mention it (${language})`);
+});
+// totalCosts = variableCosts + fixedCosts + overtimeCost. Nothing may quietly join or leave a
+// bucket: that identity is what makes the students' subtraction honest.
+{
+  const clinic = ClinicTest.initialState("balanced", "en");
+  const run = ClinicTest.simulateYear(ClinicTest.clone(clinic), clinic, ClinicTest.emptyEffects(), []);
+  const f = run.financial;
+  const gap = f.totalCosts - f.variableCosts - f.fixedCosts - f.overtimeCost;
+  if (Math.abs(gap) > 0.01) throw new Error(`Total costs must be variable + fixed + overtime; ${gap} is unaccounted for`);
+}
+
+// --- Undoing a year -------------------------------------------------------------------------
+// The model has no random generator, so undoing a year and passing it again must reproduce it
+// exactly. If this ever fails, something non-deterministic has entered the model.
+const undoStart = ClinicTest.initialState("balanced", "en");
+undoStart.setup.classCode = "UNDO7";
+ClinicTest.renderState(undoStart);
+ClinicTest.queueAction("service:vaccination", { kind: "toggle-service", targetId: "vaccination", value: true });
+ClinicTest.resolveTurn();
+const afterFirstPass = JSON.stringify(ClinicTest.getState());
+if (!ClinicTest.getState().undo) throw new Error("Passing a year must leave a snapshot to undo");
+if (!ClinicTest.undoYear()) throw new Error("undoYear must report that it restored the year");
+const undone = ClinicTest.getState();
+if (undone.undo) throw new Error("An undo consumes its snapshot; there is no second step back");
+if (undone.year !== 1) throw new Error(`Undo must return to the year that was passed, not ${undone.year}`);
+if (undone.history.length !== 0) throw new Error("Undo must drop the year's report from the history");
+if (!Object.keys(undone.pending).length) throw new Error("Undo must hand the team back the plan they had queued");
+ClinicTest.resolveTurn();
+const afterSecondPass = JSON.stringify(ClinicTest.getState());
+const scrub = (json) => JSON.parse(json, (key, value) => (key === "at" || key === "updatedAt" || key === "queuedAt" || key === "confirmedAt" ? null : value));
+if (JSON.stringify(scrub(afterFirstPass).history) !== JSON.stringify(scrub(afterSecondPass).history)) throw new Error("Passing the same year twice must produce the same result — the model is no longer deterministic");
+// The snapshot must stay flat. Letting `history` or a nested `undo` in makes the save grow by a
+// full year's report every year, which is what excluding them prevents.
+const snapshotSize = JSON.stringify(ClinicTest.getState().undo.snapshot).length;
+if (snapshotSize > 8000) throw new Error(`The undo snapshot must stay flat, not ${snapshotSize} bytes — is history or a nested undo leaking in?`);
+if (ClinicTest.getState().undo.snapshot.history !== undefined) throw new Error("The undo snapshot must not carry the history");
+if (ClinicTest.getState().undo.snapshot.undo !== undefined) throw new Error("The undo snapshot must not nest the previous snapshot");
+
+// An undo restores the clinic but never erases the record of it.
+const logged = ClinicTest.getState();
+const undoEntries = logged.decisionLog.filter((entry) => entry.event === "undo-year");
+if (undoEntries.length !== 1) throw new Error("Every undo must be written to the decision log");
+if (!ClinicTest.buildPrintableReportHtml().includes("year undone")) throw new Error("The instructor's report must show that a year was undone");
+
+// A grant announced after the year was passed sits outside the snapshot; restoring must re-apply
+// it rather than silently deleting money the cash log still claims was given.
+ClinicTest.resolveTurn();
+const beforeGrant = ClinicTest.getState().treasury;
+ClinicTest.adjustCash(12000, "grant");
+if (ClinicTest.getState().treasury !== beforeGrant + 12000) throw new Error("A cash adjustment must reach the treasury");
+const cashLogLength = ClinicTest.getState().cashLog.length;
+const snapshotTreasury = ClinicTest.getState().undo.snapshot.treasury;
+ClinicTest.undoYear();
+const restored = ClinicTest.getState();
+if (restored.cashLog.length !== cashLogLength) throw new Error("Undo must keep the cash log");
+if (!restored.cashLog.some((entry) => entry.amount === 12000)) throw new Error("Undo must keep the grant that was announced after the pass");
+// ...and the money itself must still be there. The snapshot predates the grant, so without the
+// re-apply the treasury would quietly lose 12 000 while the log went on claiming it was given.
+if (restored.treasury !== snapshotTreasury + 12000) throw new Error(`Undo must re-apply a cash adjustment made after the pass: expected ${snapshotTreasury + 12000}, got ${restored.treasury}`);
+// Leave the harness on a clean state: these tests changed scenario, class code and year.
+ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+
+// --- Settings survive a restart -------------------------------------------------------------
+// The instructor's block already survived; the rules of play did not, so every restart silently
+// went back to 3 actions, year 4 and a -200 000 threshold whatever the class had been told.
+const configured = ClinicTest.initialState("balanced", "en");
+configured.rules = { actionLimit: 6, unlimited: true, targetYear: 8, bankruptcyThreshold: -50000 };
+configured.setup = { ...configured.setup, forecastPrecision: "ranges", classCode: "GRP7", studyGroup: "S2", startingTreasury: 120000, customTreasury: true };
+configured.playerTeam = { teamCode: "TEAM9" };
+configured.treasury = 120000;
+ClinicTest.renderState(configured);
+ClinicTest.resetScenario();
+const sameScenario = ClinicTest.getState();
+if (sameScenario.rules.actionLimit !== 6 || sameScenario.rules.unlimited !== true || sameScenario.rules.targetYear !== 8 || sameScenario.rules.bankruptcyThreshold !== -50000) throw new Error("A restart must keep the rules of play the instructor set");
+if (sameScenario.setup.forecastPrecision !== "ranges" || sameScenario.setup.classCode !== "GRP7" || sameScenario.setup.studyGroup !== "S2") throw new Error("A restart must keep the instructor's game setup");
+if (sameScenario.playerTeam.teamCode !== "TEAM9") throw new Error("A restart must keep the team code, or the export stops being attributable");
+if (sameScenario.treasury !== 120000) throw new Error(`Restarting the same scenario must keep the starting cash that was set, not ${sameScenario.treasury}`);
+if (sameScenario.year !== 1 || sameScenario.history.length) throw new Error("A restart must return to year 1");
+
+// A *different* scenario is a different opening position, so the custom starting cash is released.
+ClinicTest.renderState(configured);
+ClinicTest.resetScenario("rescue");
+const other = ClinicTest.getState();
+if (other.rules.actionLimit !== 6 || other.setup.classCode !== "GRP7" || other.setup.forecastPrecision !== "ranges") throw new Error("Choosing another scenario must still keep the rules and the class seed");
+if (other.setup.customTreasury !== false) throw new Error("Choosing another scenario must release the custom starting cash");
+if (other.treasury !== ClinicTest.data.scenarios.rescue.treasury) throw new Error(`Choosing another scenario must use its own starting cash, not ${other.treasury}`);
+ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+
+// --- Closing a drawer returns you where you came from ---------------------------------------
+// Opening a drawer moves the page behind it to the drawer's own area, which is deliberate and
+// tested above. What was wrong is that closing left the student on that area instead of the screen
+// they started from — so the drawer's own home became a place they never chose to be.
+ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+if (ClinicTest.getState().domain !== "overview") throw new Error("A fresh clinic starts on the overview");
+ClinicTest.openDrawer("services", null, "vaccination");
+if (ClinicTest.getState().domain !== "care") throw new Error("Opening a service drawer should move the page to Care & facilities");
+ClinicTest.closeDrawer();
+if (ClinicTest.getState().domain !== "overview") throw new Error("Closing a drawer must return to the screen it was opened from");
+if (ClinicTest.routeFor() !== "#overview") throw new Error(`Closing must leave the route on the origin, not ${ClinicTest.routeFor()}`);
+
+// A drawer that replaces another steps back one at a time: buying the missing room must return to
+// the service that sent you, or the student believes they opened it when they only bought the room.
+ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+ClinicTest.openDrawer("services", null, "vaccination");
+const serviceRoute = ClinicTest.routeFor();
+ClinicTest.openDrawer("rooms");
+ClinicTest.closeDrawer();
+if (ClinicTest.routeFor() !== serviceRoute) throw new Error(`Closing the room drawer must return to the service card, not ${ClinicTest.routeFor()}`);
+// ...and closing again leaves the chain entirely.
+ClinicTest.closeDrawer();
+if (ClinicTest.getState().domain !== "overview") throw new Error("Closing the last drawer must return to the screen the chain began on");
+
+// The same chain on the team side: the capability matrix must come back after training someone.
+ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+ClinicTest.openDrawer("capabilities");
+const matrixRoute = ClinicTest.routeFor();
+ClinicTest.openDrawer("person", "support-maya", "training");
+ClinicTest.closeDrawer();
+if (ClinicTest.routeFor() !== matrixRoute) throw new Error(`Closing the person drawer must return to the capability matrix, not ${ClinicTest.routeFor()}`);
+
+ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+
+
+
 const helpState = ClinicTest.getState();
 helpState.helpOpen = true;
 const helpHtml = ClinicTest.renderState(helpState);
@@ -245,10 +714,86 @@ ClinicTest.renderState(helpState);
 
 // --- Pass 7 Phase 0: one quantity, one name, everywhere ---
 // Renders every page and drawer in both languages and fails if a retired name reappears.
-const RETIRED_NAMES = ["Staff use", "Clinic workload", "Requests served", "Care delivered", "Closing treasury", "Climat de travail", "Utilisation du personnel", "Charge de la clinique", "Soins realises", "Demandes traitees", "Tresorerie de cloture"];
+// --- One quantity, one name -------------------------------------------------------------------
+// A denylist of retired names cannot catch a SECOND name nobody has thought of yet — and it was
+// case-sensitive, which is how a lowercase "revenus" survived the last cleanup. This is an
+// allowlist instead: every label rendered into a label slot must be a name we chose on purpose.
+const CANONICAL = [
+  { id: "financial.revenue", en: "Revenue", fr: "Recettes", aliases: ["Revenus"] },
+  { id: "financial.variableCosts", en: "Variable costs", fr: "Coûts variables", aliases: ["Direct costs", "Coûts directs", "Supplies", "Fournitures", "External purchases", "Achats externes"] },
+  { id: "financial.totalCosts", en: "Total costs", fr: "Coûts totaux", aliases: [] },
+  { id: "financial.netResult", en: "Net result", fr: "Résultat net", aliases: ["Financial result", "Résultat financier", "Net cash this year"] },
+  { id: "financial.treasury", en: "End treasury", fr: "Trésorerie finale", aliases: ["Closing treasury", "Tresorerie de cloture"] },
+  { id: "financial.oneTimeCosts", en: "One-time costs", fr: "Coûts ponctuels", aliases: ["One-time investments", "Investissements ponctuels"] },
+  { id: "financial.overtimeCost", en: "Overtime", fr: "Heures supplémentaires", aliases: ["Overtime pay and charges", "Heures supplémentaires et charges"] },
+  { id: "financial.operating", en: "Operating costs", fr: "Coûts d’exploitation", aliases: ["Operations", "Opérations"] },
+  { id: "carbon.total", en: "Carbon footprint", fr: "Empreinte carbone", aliases: ["Total footprint", "Empreinte totale"] },
+  { id: "operational.totalHonored", en: "Cases served", fr: "Cas traités", aliases: ["Requests served", "Care delivered", "Soins realises", "Demandes traitees"] },
+  { id: "operational.staffUse", en: "Team workload", fr: "Charge de l’équipe", aliases: ["Staff use", "Clinic workload", "Utilisation du personnel", "Charge de la clinique"] },
+  { id: "operational.mainConstraint", en: "Main constraint", fr: "Contrainte principale", aliases: ["Main service constraint", "Contrainte principale des services"] },
+  { id: "social.staffClimate", en: "Staff climate", fr: "Climat de l’équipe", aliases: ["Climat de travail"] },
+  { id: "social.clientTrust", en: "Client trust", fr: "Confiance des clients", aliases: [] }
+];
 const ALL_DOMAINS = ["overview", "care", "team", "business", "sustainability", "results"];
 const ALL_DRAWERS = ["services", "rooms", "equipment", "person", "staffAllocation", "staffPerson", "staffExit", "training", "capabilities", "hoursByService", "recruitment", "opening", "dropoff", "stock", "hr", "pricing", "finance", "market", "location", "marketing", "sustainability", "plan", "export", "setup"];
 const stripAccents = (text) => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+// Labels that live in the same slots but do not name a model quantity. Anything not here and not
+// canonical fails, which is the whole point: adding a new label has to be a deliberate act.
+const NOT_A_QUANTITY = new Set([
+  "Salaries", "Salaires", "Employer charges", "Charges sociales", "Facilities", "Installations",
+  "Administration", "Frais d’administration", "Payroll and charges", "Salaires et charges",
+  "Payroll, charges and overtime", "Salaires, charges et heures supplémentaires",
+  "Loan interest", "Intérêts d’emprunt", "Tax", "Impôt", "Per treated case", "Par cas traité",
+  "Largest cost", "Coût principal", "Largest carbon source", "Principale source de carbone",
+  "Available hours", "Heures disponibles", "Hours used", "Heures utilisées",
+  "Unused hours", "Heures inutilisées", "Blocked hours", "Heures bloquées",
+  "Overtime hours", "Heures supplémentaires travaillées",
+  "Overtime cost", "Coût des heures supplémentaires",
+  "This person’s workload", "Charge de cette personne",
+  "Referral support", "Soutien des référents", "Access pressure", "Pression d’accès",
+  "Demand vs forecast", "Demande par rapport à la prévision",
+  "Lost to stock-outs", "Perdus par rupture de stock",
+  "Scenario target", "Objectif du scénario", "Main source", "Source principale",
+  "Reputation", "Réputation", "Clients", "Starting treasury", "Trésorerie de départ",
+  "Active services", "Services actifs", "Rooms", "Salles",
+  "Veterinary hours available", "Heures vétérinaires disponibles",
+  "Support hours available", "Heures de soutien disponibles",
+  "Unused team hours", "Heures d’équipe inutilisées",
+  "Largest source", "Source principale",
+  // the carbon sources, which name where the footprint comes from rather than a quantity
+  "Clinical care", "Soins cliniques", "Clinical equipment", "Équipement clinique",
+  "Building and energy", "Bâtiment et énergie", "Client travel", "Déplacements des clients",
+  "Materials and waste", "Matériaux et déchets"
+]);
+
+const LABEL_SLOTS = [
+  /<article class="metric-card[^"]*"><span>([^<]*)<\/span>/g,
+  /<div class="consequence-grid"[^>]*>(?:<div><span>([^<]*)<\/span>)/g,
+  /<div class="consequence-grid"[^>]*>[\s\S]*?<\/div><\/div>/g,
+  /<div class="forecast-row[^"]*"><strong>([^<]*)<\/strong>/g,
+  /<div class="comparison-list"[^>]*>[\s\S]*?<\/div><\/div>/g,
+  /<div class="summary-grid"><p><span>([^<]*)<\/span>/g
+];
+
+function extractLabels(html) {
+  const labels = [];
+  for (const match of html.matchAll(/<article class="metric-card[^"]*"><span>([^<]*)<\/span>/g)) labels.push(match[1]);
+  for (const match of html.matchAll(/<div class="forecast-row[^"]*"><strong>([^<]*)<\/strong>/g)) labels.push(match[1]);
+  for (const block of html.matchAll(/<div class="consequence-grid"[^>]*>([\s\S]*?)<\/div>(?=<\/div>|<p|$)/g)) {
+    for (const cell of block[1].matchAll(/<span>([^<]*)<\/span>/g)) labels.push(cell[1]);
+  }
+  for (const block of html.matchAll(/<div class="comparison-list"[^>]*>([\s\S]*?)<\/div>(?=<\/div>|<p|$)/g)) {
+    for (const cell of block[1].matchAll(/<strong>([^<]*)<\/strong>/g)) labels.push(cell[1]);
+  }
+  for (const grid of html.matchAll(/<div class="summary-grid">([\s\S]*?)<\/div>/g)) {
+    for (const cell of grid[1].matchAll(/<p><span>([^<]*)<\/span>/g)) labels.push(cell[1]);
+  }
+  return labels.map((label) => label.trim()).filter(Boolean);
+}
+
+const decode = (text) => text.replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+
 ["en", "fr"].forEach((language) => {
   const base = ClinicTest.initialState("balanced", language);
   Object.keys(base.services).forEach((id) => { base.services[id].active = true; });
@@ -258,11 +803,38 @@ const stripAccents = (text) => text.normalize("NFD").replace(/[\u0300-\u036f]/g,
   ClinicTest.renderState(base);
   ALL_DRAWERS.forEach((drawer) => { seen += ClinicTest.renderUiForTest({ drawer, drawerContext: null, selectedServiceId: "surgery", confirm: null }); });
   seen += ClinicTest.buildPrintableReportHtml();
-  const plain = stripAccents(seen);
-  RETIRED_NAMES.forEach((name) => {
-    if (plain.includes(stripAccents(name))) throw new Error(`Retired name "${name}" still reaches the screen in ${language}: one quantity must carry one name everywhere`);
+
+  const names = new Set(CANONICAL.map((row) => row[language]));
+  const labels = extractLabels(seen).map(decode);
+  // A broken regex must fail loudly rather than pass by finding nothing.
+  if (labels.length < 40) throw new Error(`Label extraction found only ${labels.length} labels in ${language}; the slot patterns are broken`);
+
+  // (a) Closure: every label is a name we chose, or explicitly not a quantity. This is what fails
+  // when someone introduces a second name for something that already has one.
+  labels.forEach((label) => {
+    if (names.has(label) || NOT_A_QUANTITY.has(label)) return;
+    if (/^[\d\s+\-–—.,%€/…]*$/.test(label)) return;
+    throw new Error(`Unknown label "${label}" reached a label slot in ${language}. If it names a model quantity, add it to CANONICAL; if not, add it to NOT_A_QUANTITY. Do not invent a second name for a quantity that already has one.`);
+  });
+
+  // (b) Coverage: a canonical name that appears nowhere has silently disappeared — which is exactly
+  // how clinic-wide variable costs stayed off every screen.
+  ["financial.revenue", "financial.totalCosts", "financial.variableCosts", "financial.netResult", "operational.totalHonored", "carbon.total"].forEach((id) => {
+    const row = CANONICAL.find((item) => item.id === id);
+    if (!seen.includes(row[language])) throw new Error(`"${row[language]}" no longer appears anywhere in ${language}: a quantity has gone missing from the interface`);
+  });
+
+  // (c) Alias ban. Canonical names are stripped first, so "Carbone" can be banned while
+  // "Empreinte carbone" is the name we keep.
+  let haystack = stripAccents(seen);
+  CANONICAL.forEach((row) => { haystack = haystack.split(stripAccents(row[language])).join(" "); });
+  CANONICAL.forEach((row) => {
+    row.aliases.forEach((alias) => {
+      if (haystack.includes(stripAccents(alias))) throw new Error(`Retired name "${alias}" still reaches the screen in ${language}: ${row.id} must carry one name everywhere`);
+    });
   });
 });
+
 
 
 // --- Pass 7 Phase 1: dead model data stays dead ---

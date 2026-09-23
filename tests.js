@@ -507,15 +507,20 @@
     assert(switched.operational.totalDemand < settled.operational.totalDemand, "A focus change should lower demand in its first year");
   });
 
-  test("actual demand varies by class code while forecasts stay stable", () => {
-    const run = (code, actual) => {
+  test("demand varies by class code, except in exact mode where the forecast is the outcome", () => {
+    const run = (code, actual, precision) => {
       const clinic = T.initialState("balanced", "en");
       clinic.setup.classCode = code;
+      clinic.setup.forecastPrecision = precision;
       return T.simulateYear(T.clone(clinic), clinic, T.emptyEffects(), [], { actual }).operational.totalDemand;
     };
-    assert(run("A", true) === run("A", true), "The same class code should give the same demand");
-    assert(run("A", true) !== run("B", true), "Different class codes should give different demand");
-    assert(run("A", false) === run("B", false), "Forecasts should not depend on the class code");
+    assert(run("A", true, "ranges") === run("A", true, "ranges"), "The same class code should give the same demand");
+    assert(run("A", true, "ranges") !== run("B", true, "ranges"), "Different class codes should give different demand");
+    assert(run("A", false, "ranges") === run("B", false, "ranges"), "Forecasts should not depend on the class code");
+    // The forecast clips demand at capacity before the swing, so a good year could never beat the
+    // projection while a bad one missed it. Exact figures now mean exactly that.
+    assert(run("A", true, "exact") === run("A", false, "exact"), "In exact mode the resolved year must match its own forecast");
+    assert(run("A", true, "exact") === run("B", true, "exact"), "In exact mode the class code must not move demand");
   });
 
   test("staff meetings halve last year's overtime fatigue", () => {
@@ -540,7 +545,17 @@
     clinic.history = [T.simulateYear(T.clone(clinic), clinic, T.emptyEffects(), [])];
     clinic.domain = "results";
     const html = T.renderState(clinic);
-    assert(html.includes("Why each number changed") && html.includes("Staff climate") && html.includes("Client trust"), "Results do not explain metric changes");
+    assert(html.includes("How the result is built"), "Year one has nothing to compare against, so the block must not claim to explain changes");
+    assert(html.includes("Staff climate") && html.includes("Client trust"), "Results do not explain metric changes");
+    // The money rows are a closed set that must sum to the headline. Cutting them to the three
+    // largest hid three lines, variable costs among them — which is how that figure stayed
+    // invisible everywhere in the app.
+    ["Revenue", "Payroll, charges and overtime", "Facilities", "Operating costs", "Variable costs"].forEach((line) => {
+      assert(html.includes(line), `The financial bridge must name every cost line, missing: ${line}`);
+    });
+    clinic.history = [clinic.history[0], T.simulateYear(T.clone(clinic), clinic, T.emptyEffects(), [])];
+    const second = T.renderState(clinic);
+    assert(second.includes("Why each number changed"), "From year two the block compares with the previous year");
   });
 
   test("the study group is recorded in the setup, the export, and the report", () => {

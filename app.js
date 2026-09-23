@@ -123,7 +123,7 @@
     return total > 0 && total <= MAX_ALLOCATION + .0001;
   }
 
-  function initialState(scenarioId = "balanced", language = detectedLanguage(), setupOverride = null) {
+  function initialState(scenarioId = "balanced", language = detectedLanguage(), setupOverride = null, rulesOverride = null) {
     const scenario = D.scenarios[scenarioId] || D.scenarios.balanced;
     const setup = { startingTreasury: scenario.treasury, customTreasury: false, forecastPrecision: "exact", classCode: "", studyGroup: "", ...(setupOverride || {}) };
     if (!setup.customTreasury) setup.startingTreasury = scenario.treasury;
@@ -163,7 +163,7 @@
       carbonModelVersion: D.carbonModel.version,
       sustainability: { energyUpgrade: "none", heatPump: false, solar: false, anaesthesiaProtocol: "standard", wasteStrategy: "standard", accessPlan: false },
       carbonBaseline: null,
-      rules: { actionLimit: 3, unlimited: false, targetYear: 4, bankruptcyThreshold: -200000 },
+      rules: { actionLimit: 3, unlimited: false, targetYear: 4, bankruptcyThreshold: -200000, ...(rulesOverride || {}) },
       reflections: {},
       pending: {},
       history: [],
@@ -177,7 +177,8 @@
       setupLog: [],
       cashLog: [],
       decisionLog: [],
-      rehireBlocked: {}
+      rehireBlocked: {},
+      undo: null
     };
   }
 
@@ -261,6 +262,9 @@
     merged.cashLog = Array.isArray(saved.cashLog) ? saved.cashLog : [];
     merged.decisionLog = Array.isArray(saved.decisionLog) ? saved.decisionLog : [];
     merged.rehireBlocked = saved.rehireBlocked || {};
+    // An undo snapshot from an older schema would restore a clinic this version cannot read, so it
+    // is only carried when it came from this one.
+    merged.undo = saved.undo && saved.undo.snapshot && saved.undo.snapshot.schemaVersion === SCHEMA_VERSION ? saved.undo : null;
     // Only an anonymous team code is carried. Free-text names from older saves are dropped on load
     // so they cannot reach an export that becomes research data.
     merged.playerTeam = { teamCode: String(saved.playerTeam?.teamCode || "").trim().slice(0, 24) };
@@ -283,7 +287,7 @@
 
   let state = loadState();
   let t = I18N.createTranslator(state.language);
-  let ui = { passCheck: false, personTab: "time", showClosedServices: false, drawer: null, drawerStep: 1, drawerContext: null, selectedServiceId: null, reopenBeginnerGuide: false, vacancy: { role: "vet", skills: [], budget: 60000 }, candidateLimit: 4, reflectionStep: 0, lastFocus: null, allocationDrafts: {}, decisionDrafts: {}, settingsOpen: false, settingsDraft: null, settingsError: "", restore: null, returnFocus: null, autoFocusDrawer: false };
+  let ui = { passCheck: false, personTab: "time", showClosedServices: false, drawer: null, drawerStep: 1, drawerContext: null, selectedServiceId: null, reopenBeginnerGuide: false, vacancy: { role: "vet", skills: [], budget: 60000 }, candidateLimit: 4, reflectionStep: 0, lastFocus: null, allocationDrafts: {}, decisionDrafts: {}, settingsOpen: false, settingsDraft: null, settingsError: "", restore: null, returnFocus: null, autoFocusDrawer: false, replaceRoute: false, originStack: [], returnLabel: null, focusItem: null };
 
   function saveState() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -901,8 +905,13 @@
       const serviceState = clinic.services[service.id];
       const openedThisYear = serviceState.openedYear === clinic.year;
       const expectedDemand = Math.round(projectedDemand(service, clinic, effects) * (openedThisYear ? SERVICE_RAMP_UP : 1));
-      // Forecasts use expected demand; the resolved year applies the class-seeded swing.
-      const demand = options.actual ? Math.round(expectedDemand * demandSwing(clinic, service.id)) : expectedDemand;
+      // "Exact figures" must mean exact. The forecast clips demand at capacity BEFORE the swing is
+      // applied, so a good year can never beat the projection while a bad one misses it: measured
+      // over 300 class codes, the largest year-3 gap is 0.00 €. In exact mode the swing is off on
+      // both sides and the plan lands to the euro. Ranges and costs keep the variance — that is
+      // where uncertainty is the lesson.
+      const demandVaries = clinic.setup?.forecastPrecision !== "exact";
+      const demand = options.actual && demandVaries ? Math.round(expectedDemand * demandSwing(clinic, service.id)) : expectedDemand;
       const missing = missingRequirements(service, clinic);
       const vd = vetDuration(service, clinic);
       const sd = supportDuration(service, clinic);
@@ -1133,6 +1142,25 @@
     return simulateYear(clinic, state, effects, actions);
   }
 
+  // The same plan seen one year on: the service is out of its first year at 60% of demand, the new
+  // hire has finished settling in, and the move's disruption is over. Without this, "per year" named
+  // the first year only — 62% below what a service actually costs from year two, permanently.
+  function settledPlan(actions) {
+    const clinic = clone(state);
+    const effects = emptyEffects();
+    actions.forEach((action) => combineEffects(effects, applyAction(clinic, action, true)));
+    clinic.year += 1;
+    return simulateYear(clinic, state, effects, actions);
+  }
+
+  // Only these decisions behave differently in their first year, so only these pay for the second
+  // pair of simulations.
+  const SETTLES_IN = new Set(["toggle-service", "market-focus", "location", "hire"]);
+  function hasSettledYear(payload) {
+    if (!payload || !SETTLES_IN.has(payload.kind)) return false;
+    return payload.kind === "toggle-service" ? Boolean(payload.value) : true;
+  }
+
   function forecastPair() {
     return { baseline: simulatePlan([]), forecast: simulatePlan(pendingActions()) };
   }
@@ -1225,6 +1253,15 @@
     });
     const leaving = new Set((report.resignations || []).map((item) => item.id));
     if (leaving.size) state.staff = state.staff.filter((person) => !leaving.has(person.id));
+    // `before` was already cloned above and thrown away. Keeping it is the whole of undo: the model
+    // has no random generator — the demand seed is a pure function of class code, scenario and year
+    // — so restoring this object and passing the year again reproduces the year exactly.
+    // `history` and `undo` are excluded: history is restored by truncation, and nesting the previous
+    // snapshot inside the next would make the save grow by a year every year.
+    const snapshot = { ...before };
+    delete snapshot.history;
+    delete snapshot.undo;
+    state.undo = { year: report.turn, at: new Date().toISOString(), snapshot, historyLength: before.history.length, cashLogLength: (before.cashLog || []).length };
     state.history.push(report);
     state.pending = {};
     state.year += 1;
@@ -1234,11 +1271,42 @@
     ui.confirm = null;
     if (!state.sandboxMode) {
       if (state.treasury < state.rules.bankruptcyThreshold) state.endState = { type: "failure", reportTurn: report.turn };
-      else if (report.turn >= state.rules.targetYear) state.endState = { type: "success", reportTurn: report.turn };
+      else if (report.turn >= state.rules.targetYear) state.endState = { type: state.treasury < 0 ? "strained" : "success", reportTurn: report.turn };
     }
     saveState();
     render();
     toast(t("toast.yearComplete", { year: report.turn }), "good");
+  }
+
+  // Undoing a year restores the clinic but never the record of it. The decision log is research data
+  // and the reflections are the students' own writing, so both survive; an `undo-year` entry is
+  // appended instead, and the instructor's report prints it. A cash adjustment announced after the
+  // year was passed sits outside the snapshot, so it is re-applied rather than silently erased.
+  function undoYear() {
+    const memo = state.undo;
+    if (!memo) return false;
+    const kept = {
+      decisionLog: state.decisionLog,
+      cashLog: state.cashLog,
+      setupLog: state.setupLog,
+      reflections: state.reflections,
+      rules: state.rules,
+      setup: state.setup,
+      playerTeam: state.playerTeam,
+      uiPreferences: state.uiPreferences,
+      language: state.language
+    };
+    const lateCash = (state.cashLog || []).slice(memo.cashLogLength).reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
+    const history = state.history.slice(0, memo.historyLength);
+    state = { ...memo.snapshot, ...kept, history, undo: null };
+    state.treasury += lateCash;
+    logDecision("undo-year", `year:${memo.year}`);
+    ui.drawer = null;
+    ui.drawerContext = null;
+    ui.confirm = null;
+    saveState();
+    render();
+    return true;
   }
 
   function blockerText(reason) {
@@ -1390,7 +1458,9 @@
           ? L("They are paid below 95% of their benchmark while staff climate is low. Raise their pay, improve the HR strategy, or hold a staff meeting.", "Cette personne est payée sous 95 % de sa référence alors que le climat est bas. Augmentez son salaire, améliorez la stratégie RH ou organisez une réunion d’équipe.")
           : L("Staff climate is forecast to fall too low. Reduce overtime or extra opening hours, improve the HR strategy, raise pay, or hold a staff meeting.", "Le climat de l’équipe devrait tomber trop bas. Réduisez les heures supplémentaires ou les horaires étendus, améliorez la stratégie RH, augmentez les salaires ou organisez une réunion d’équipe."),
         action: L("Review HR strategy", "Examiner la stratégie RH"),
-        secondary: { label: L(`Review ${leaver.name}’s pay`, `Examiner le salaire de ${leaver.name}`), destination: { drawer: "staffPerson", context: leaver.id } }
+        secondary: leaver.reason === "pay"
+          ? { label: L(`Review ${leaver.name}’s pay`, `Examiner le salaire de ${leaver.name}`), destination: { drawer: "staffPerson", context: leaver.id } }
+          : { label: L("Hold a staff meeting", "Organiser une réunion d’équipe"), destination: { drawer: "relations" } }
       });
     });
     const unstaffed = forecast.serviceResults.find((row) => row.active && row.bottleneck.type === "unstaffed");
@@ -1478,6 +1548,7 @@
   function formatMetric(value, type) {
     if (type === "money") return money(value);
     if (type === "percent") return pct(value);
+    if (type === "carbon") return tonnes(value);
     return number(value);
   }
 
@@ -1513,7 +1584,7 @@
   }
 
   // Each drawer belongs to one work area; opening it moves the page behind it there.
-  const DRAWER_HOME = { services: "care", rooms: "care", equipment: "care", person: "team", staffAllocation: "team", staffPerson: "team", staffExit: "team", training: "team", capabilities: "team", hoursByService: "team", recruitment: "team", opening: "team", dropoff: "team", stock: "team", hr: "team", pricing: "business", finance: "business", market: "business", location: "business", marketing: "business", sustainability: "sustainability", plan: null, export: null, setup: null };
+  const DRAWER_HOME = { relations: "team", services: "care", rooms: "care", equipment: "care", person: "team", staffAllocation: "team", staffPerson: "team", staffExit: "team", training: "team", capabilities: "team", hoursByService: "team", recruitment: "team", opening: "team", dropoff: "team", stock: "team", hr: "team", pricing: "business", finance: "business", market: "business", location: "business", marketing: "business", sustainability: "sustainability", plan: null, export: null, setup: null };
   const AREAS = ["overview", "care", "team", "business", "sustainability", "results"];
   // Older per-person drawers now open the person hub on the matching tab.
   const PERSON_TABS = { staffAllocation: "time", staffPerson: "pay", staffExit: "exit", training: "training" };
@@ -1522,7 +1593,12 @@
     return ({ overview: L("Overview", "Vue d’ensemble"), care: L("Care & facilities", "Soins et installations"), team: L("Team & operations", "Équipe et opérations"), business: L("Business", "Gestion"), sustainability: L("Sustainability", "Durabilité"), results: L("Results", "Résultats") })[id] || id;
   }
 
+  function drawerTitleFor(drawer) {
+    return drawerTitles()[drawer] || areaLabel(DRAWER_HOME[drawer] || state.domain);
+  }
+
   function drawerBreadcrumb(planned) {
+    if (ui.returnLabel) return ui.returnLabel;
     const home = DRAWER_HOME[ui.drawer];
     const parts = [home ? areaLabel(home) : L("Decision workspace", "Espace de décision")];
     if (ui.drawer === "services" && ui.selectedServiceId) parts.push(serviceName(ui.selectedServiceId));
@@ -1531,6 +1607,16 @@
   }
 
   function openDrawer(drawer, context = null, detail = null) {
+    // Closing has to put the student back exactly where they left. The origin is a ROUTE, not a
+    // work area: a student who jumps from a service's missing-requirement list to buy the room must
+    // land back on that service card, not on the bare Care page, or they believe they opened the
+    // service when they only bought the room. It must be captured before anything below mutates,
+    // and applyRoute already restores every field the route encodes.
+    // Every open pushes where we were; every close pops back one step. A student who jumps from a
+    // service's missing-requirement list to buy the room lands back on that service card — without
+    // it they believe they opened the service when they only bought the room. Captured before
+    // anything below mutates; applyRoute restores every field the route encodes.
+    ui.originStack = [...(ui.originStack || []), routeFor()].slice(-6);
     let target = drawer;
     if (PERSON_TABS[drawer] && context) { target = "person"; detail = detail && drawer === "person" ? detail : PERSON_TABS[drawer]; }
     ui.lastFocus = { drawer, context: context || "" };
@@ -1562,18 +1648,38 @@
     return `#${parts.map((part) => encodeURIComponent(part)).join("/")}`;
   }
 
+  // `replaceRoute` marks a navigation that should not become a Back step. Loading with no hash was
+  // the worst case: the first render pushed #overview on top of the bare document, and Back landed
+  // on a hashless URL that re-pushed it, so Back could never leave the page.
   function syncRoute() {
     if (typeof location === "undefined" || !window.history?.pushState) return;
     const next = routeFor();
-    if (location.hash !== next) window.history.pushState(null, "", next);
+    const replace = ui.replaceRoute || !location.hash;
+    ui.replaceRoute = false;
+    if (location.hash === next) return;
+    if (replace && window.history.replaceState) window.history.replaceState(null, "", next);
+    else window.history.pushState(null, "", next);
   }
 
   function applyRoute(route) {
     if (route.domain) state.domain = route.domain;
-    ui.drawer = route.drawer;
-    ui.drawerContext = route.drawer ? route.context : null;
-    ui.selectedServiceId = route.drawer === "services" ? route.detail : null;
-    if (route.drawer === "person") ui.personTab = route.detail || "time";
+    // A link and a click must land on the same screen. openDrawer folds the legacy per-person
+    // drawers into the person hub; without the same fold here, the workbook's own link
+    // (#team/staffAllocation/support-maya) opened a different, untabbed screen than the button did.
+    let drawer = route.drawer;
+    let detail = route.detail;
+    if (drawer && PERSON_TABS[drawer] && route.context) { detail = drawer === "person" ? detail : PERSON_TABS[drawer]; drawer = "person"; }
+    ui.drawer = drawer;
+    ui.drawerContext = drawer ? route.context : null;
+    ui.selectedServiceId = drawer === "services" ? detail : null;
+    if (drawer === "person") ui.personTab = detail || "time";
+    // Arriving by Back must not inherit leftovers from the last drawer: a stale step reopened
+    // recruitment on the applicant list, and a stale restore stole focus and forced scroll to 0.
+    ui.drawerStep = 1;
+    ui.restore = null;
+    ui.focusItem = null;
+    ui.returnLabel = null;
+    ui.candidateLimit = 4;
     ui.confirm = null;
     ui.passCheck = false;
   }
@@ -1654,9 +1760,12 @@
     return `<nav class="domain-nav six" aria-label="${escapeHtml(t("app.title"))}">${areas.map(([id, label, short]) => `<button data-domain="${id}" class="${state.domain === id ? "active" : ""}" aria-label="${escapeHtml(label)}"><span class="nav-full">${escapeHtml(label)}</span><span class="nav-compact" aria-hidden="true">${escapeHtml(short)}</span></button>`).join("")}</nav>`;
   }
 
-  function renderPlanPanel(baseline, forecast) {
-    // The fifth value marks outcomes, which follow the game-setup forecast precision; costs stay exact.
-    const rows = [
+  // One source of rows for the desktop panel and the mobile drawer. They had drifted apart: the
+  // mobile version reordered them, dropped two, and formatted with raw money()/number()/pct(), so a
+  // game set to ranges or costs precision printed exact figures on a phone.
+  // The fifth value marks outcomes, which follow the game-setup forecast precision; costs stay exact.
+  function planRows(baseline, forecast) {
+    return [
       ["forecast.revenue", baseline.financial.revenue, forecast.financial.revenue, "money", true],
       ["forecast.totalCosts", baseline.financial.totalCosts, forecast.financial.totalCosts, "money", false],
       ["forecast.netResult", baseline.financial.netResult, forecast.financial.netResult, "money", true],
@@ -1665,12 +1774,25 @@
       ["forecast.staffUse", baseline.operational.staffUse, forecast.operational.staffUse, "percent", true],
       ["carbon.total", baseline.carbon.total, forecast.carbon.total, "carbon", true]
     ];
+  }
+
+  function planRowLabel(key) {
+    return key === "carbon.total" ? L("Carbon footprint", "Empreinte carbone") : t(key);
+  }
+
+  function planValue(type, outcome, value, options = {}) {
+    if (outcome) return forecastText(value, type, options);
+    return options.signed ? signed(value, type) : formatMetric(value, type);
+  }
+
+  function renderPlanPanel(baseline, forecast) {
+    const rows = planRows(baseline, forecast);
     return `<aside class="plan-panel" aria-label="${escapeHtml(t("forecast.title"))}">
-      <button class="mobile-plan-toggle" data-open-drawer="plan"><strong>${escapeHtml(L("Plan", "Plan"))} · ${pendingActions().length} ${escapeHtml(pendingActions().length === 1 ? t("common.action") : t("common.actions"))}</strong><span>${escapeHtml(forecastText(forecast.financial.treasury - baseline.financial.treasury, "money", { signed: true }))}</span></button>
+      <button class="mobile-plan-toggle" data-open-drawer="plan"><strong>${escapeHtml(L("Plan", "Plan"))} · ${pendingActions().length} ${escapeHtml(pendingActions().length === 1 ? t("common.action") : t("common.actions"))}</strong><span>${escapeHtml(t("forecast.treasury"))} ${escapeHtml(forecastText(forecast.financial.treasury - baseline.financial.treasury, "money", { signed: true }))}</span></button>
       <div class="panel-heading"><div><h2>${escapeHtml(t("forecast.title"))}</h2><p>${escapeHtml(forecastNote())}</p></div></div>
       <div class="forecast-table">
         <div class="forecast-head"><span></span><span>${escapeHtml(t("common.baseline"))}</span><span>${escapeHtml(t("common.planned"))}</span><span>${escapeHtml(t("common.delta"))}</span></div>
-        ${rows.map(([key, base, plan, type, outcome]) => { const show = (value, options = {}) => outcome ? forecastText(value, type, options) : (options.signed ? signed(value, type) : formatMetric(value, type)); return `<div class="forecast-row"><strong>${escapeHtml(key === "carbon.total" ? L("Carbon", "Carbone") : t(key))}</strong><span>${escapeHtml(show(base))}</span><span>${escapeHtml(show(plan))}</span><em>${escapeHtml(show(plan - base, { signed: true }))}</em></div>`; }).join("")}
+        ${rows.map(([key, base, plan, type, outcome]) => `<div class="forecast-row"><strong>${escapeHtml(planRowLabel(key))}</strong><span>${escapeHtml(planValue(type, outcome, base))}</span><span>${escapeHtml(planValue(type, outcome, plan))}</span><em>${escapeHtml(planValue(type, outcome, plan - base, { signed: true }))}</em></div>`).join("")}
         <div class="forecast-row constraint"><strong>${escapeHtml(t("forecast.constraint"))}</strong><span>${escapeHtml(blockerText(baseline.operational.mainConstraint))}</span><span>${escapeHtml(blockerText(forecast.operational.mainConstraint))}</span><em>${baseline.operational.mainConstraint.type === forecast.operational.mainConstraint.type ? "=" : "↻"}</em></div>
       </div>
       <div class="plan-actions">
@@ -1702,15 +1824,11 @@
     return `${format(value - band)} … ${format(value + band)}`;
   }
 
-  function outcomeWord(value, lowerIsBetter = false) {
-    return forecastPrecision() === "costs" ? "" : effectWord(value, lowerIsBetter);
-  }
-
   function forecastNote() {
     const mode = forecastPrecision();
     if (mode === "costs") return L("Costs are shown; cases and results are revealed at year end. Actual demand varies each year.", "Les coûts sont affichés ; les cas et résultats sont révélés en fin d’année. La demande réelle varie chaque année.");
     if (mode === "ranges") return L("Forecast ranges compared with passing the year without new actions. Actual demand varies each year, so results can land anywhere in the range.", "Fourchettes prévues par rapport au passage de l’année sans nouvelle action. La demande réelle varie chaque année : le résultat peut tomber n’importe où dans la fourchette.");
-    return L("Expected result compared with passing the year without new actions. Actual demand varies a little each year.", "Résultat attendu par rapport au passage de l’année sans nouvelle action. La demande réelle varie un peu chaque année.");
+    return L("Expected result compared with passing the year without new actions. With exact figures this is what the year will produce.", "Résultat attendu par rapport au passage de l’année sans nouvelle action. En chiffres exacts, c’est ce que l’année produira.");
   }
 
   function absenceNote(row) {
@@ -1757,7 +1875,10 @@
   function setupLogLines() {
     return [
       ...(state.setupLog || []).map((entry) => `${L("Year", "Année")} ${entry.year}: ${entry.changes.map((change) => `${change.field} ${change.from} → ${change.to}`).join(", ")}`),
-      ...(state.cashLog || []).map((entry) => `${L("Year", "Année")} ${entry.year}: ${L("cash", "trésorerie")} ${signed(entry.amount, "money")} · ${cashReasonLabel(entry.reason)}`)
+      ...(state.cashLog || []).map((entry) => `${L("Year", "Année")} ${entry.year}: ${L("cash", "trésorerie")} ${signed(entry.amount, "money")} · ${cashReasonLabel(entry.reason)}`),
+      // An undo is a fact about how the week was played, so it belongs in the record the instructor
+      // reads, beside the settings changes and the cash adjustments.
+      ...(state.decisionLog || []).filter((entry) => entry.event === "undo-year").map((entry) => `${L("Year", "Année")} ${entry.year}: ${L("year undone", "année annulée")}`)
     ];
   }
 
@@ -1785,44 +1906,89 @@
     const without = pendingActions().filter((action) => action.key !== key);
     const before = simulatePlan(without);
     const after = simulatePlan([...without, { key, payload }]);
-    return { before, after };
+    if (!hasSettledYear(payload)) return { before, after, settledBefore: null, settledAfter: null };
+    return { before, after, settledBefore: settledPlan(without), settledAfter: settledPlan([...without, { key, payload }]) };
   }
 
-  function effectWord(value, lowerIsBetter = false) {
-    if (Math.abs(value) < .0001) return L("No direct effect", "Aucun effet direct");
-    const improves = lowerIsBetter ? value < 0 : value > 0;
-    return improves ? L("Improves", "Améliore") : L("Worsens", "Dégrade");
+  // What a decision adds to each cost line, by name. "Coût ajouté par an" used to fuse all of these
+  // into one euro figure, which is why no card's price ever matched its preview: opening a service
+  // showed +12 090 € against a card with no price at all, and a hire card said 52 000 € while its
+  // preview said 63 440 € — the 22% employer charge appeared nowhere in the app.
+  function costBuckets(run) {
+    const f = run.financial;
+    return {
+      variable: f.variableCosts,
+      payroll: f.payroll,
+      charges: f.socialCharges,
+      overtime: f.overtimeCost,
+      facilities: f.facilityCosts,
+      admin: f.admin,
+      operating: f.openingCosts + f.dropoffCost + f.stockCost + f.hrCost + f.marketingCost + f.sustainabilityCost + f.loanInterest
+    };
   }
 
-  function consequencePreview(key, payload) {
-    const { before, after } = previewAction(key, payload);
-    const netResult = after.financial.netResult - before.financial.netResult;
+  const COST_LINES = [
+    ["variable", () => L("Variable costs", "Coûts variables")],
+    ["payroll", () => L("Salaries", "Salaires")],
+    ["charges", () => L("Employer charges", "Charges sociales")],
+    ["overtime", () => L("Overtime", "Heures supplémentaires")],
+    ["facilities", () => L("Facilities", "Installations")],
+    ["admin", () => L("Administration", "Frais d’administration")],
+    ["operating", () => L("Operating costs", "Coûts d’exploitation")]
+  ];
+
+  function consequencePreview(key, payload, options = {}) {
+    const { before, after, settledBefore, settledAfter } = previewAction(key, payload);
+    const hidden = forecastPrecision() === "costs";
+
+    // --- What this decision costs. Exact, always, and split by the line it lands on. ---
     const once = after.financial.oneTimeCosts - before.financial.oneTimeCosts;
-    const recurring = (after.financial.totalCosts - after.financial.oneTimeCosts) - (before.financial.totalCosts - before.financial.oneTimeCosts);
+    const firstYear = costBuckets(after), baseYear = costBuckets(before);
+    const settled = settledAfter ? costBuckets(settledAfter) : null;
+    const settledBase = settledBefore ? costBuckets(settledBefore) : null;
+    const costCells = [];
+    if (Math.abs(once) >= 1) costCells.push([L("One-time costs", "Coûts ponctuels"), signed(once, "money"), ""]);
+    COST_LINES.forEach(([id, label]) => {
+      const now = firstYear[id] - baseYear[id];
+      const later = settled ? settled[id] - settledBase[id] : now;
+      if (Math.abs(now) < 1 && Math.abs(later) < 1) return;
+      // The second figure is the whole point for a service or a hire: the first year is the cheap
+      // one, and a decision judged on it is judged on its most flattering year.
+      const note = Math.abs(later - now) >= 1 ? L(`${money(later)} from year two`, `${money(later)} ensuite`) : "";
+      costCells.push([label(), signed(now, "money"), note]);
+    });
+
+    // --- What it does to the clinic. Plan-level, and filtered by the forecast precision. ---
+    const moved = (a, b, threshold) => Math.abs(a - b) >= threshold;
+    const compareRows = [
+      [L("Net result", "Résultat net"), before.financial.netResult, after.financial.netResult, "money", true],
+      [L("End treasury", "Trésorerie finale"), before.financial.treasury, after.financial.treasury, "money", true],
+      [L("Cases served", "Cas traités"), before.operational.totalHonored, after.operational.totalHonored, "number", true],
+      ...(moved(after.operational.staffUse, before.operational.staffUse, .005) ? [[L("Team workload", "Charge de l’équipe"), before.operational.staffUse, after.operational.staffUse, "percent", false]] : []),
+      ...(moved(after.carbon.total, before.carbon.total, .05) ? [[L("Carbon footprint", "Empreinte carbone"), before.carbon.total, after.carbon.total, "carbon", false]] : []),
+      ...(moved(after.social.after.staffClimate, before.social.after.staffClimate, .5) ? [[L("Staff climate", "Climat de l’équipe"), Math.round(before.social.after.staffClimate), Math.round(after.social.after.staffClimate), "number", false]] : []),
+      ...(moved(after.social.after.clientTrust, before.social.after.clientTrust, .5) ? [[L("Client trust", "Confiance des clients"), Math.round(before.social.after.clientTrust), Math.round(after.social.after.clientTrust), "number", false]] : []),
+      ...(moved(after.social.after.referralSupport, before.social.after.referralSupport, .5) ? [[itemLabel(D.socialIndicators.referralSupport), Math.round(before.social.after.referralSupport), Math.round(after.social.after.referralSupport), "number", false]] : []),
+      ...(moved(after.social.after.communityPressure, before.social.after.communityPressure, .5) ? [[itemLabel(D.socialIndicators.communityPressure), Math.round(before.social.after.communityPressure), Math.round(after.social.after.communityPressure), "number", false]] : [])
+    ];
+
     const served = after.operational.totalHonored - before.operational.totalHonored;
     const workload = after.operational.staffUse - before.operational.staffUse;
-    const carbon = after.carbon.total - before.carbon.total;
-    // Climate and trust decide absence, resignations and future demand, so they belong beside the
-    // money. They appear only when the decision actually moves them, to keep ordinary cards short.
-    const climate = after.social.after.staffClimate - before.social.after.staffClimate;
-    const trust = after.social.after.clientTrust - before.social.after.clientTrust;
-    const hidden = forecastPrecision() === "costs";
-    const cells = [
-      // The two costs come first, in the same words the card uses, so the price a student just read
-      // reappears unchanged. The outcome row keeps the name it has everywhere else: "Net result".
-      ...(Math.abs(once) >= 1 ? [[L("One-time costs", "Coûts ponctuels"), signed(once, "money"), effectWord(once, true)]] : []),
-      ...(Math.abs(recurring) >= 1 ? [[L("Added cost per year", "Coût ajouté par an"), signed(recurring, "money"), effectWord(recurring, true)]] : []),
-      [L("Net result", "Résultat net"), forecastText(netResult, "money", { signed: true }), outcomeWord(netResult)],
-      [L("Cases served", "Cas traités"), forecastText(served, "number", { signed: true }), outcomeWord(served)],
-      [L("Team workload", "Charge de l’équipe"), forecastText(workload, "percent", { signed: true }), hidden ? "" : Math.abs(workload) < .0001 ? L("No direct effect", "Aucun effet direct") : L("Changes", "Change")],
-      [L("Carbon", "Carbone"), forecastText(carbon, "carbon", { signed: true, digits: 2 }), outcomeWord(carbon, true)],
-      ...(Math.abs(climate) >= .5 ? [[L("Staff climate", "Climat de l’équipe"), signed(Math.round(climate)), effectWord(climate)]] : []),
-      ...(Math.abs(trust) >= .5 ? [[L("Client trust", "Confiance des clients"), signed(Math.round(trust)), effectWord(trust)]] : [])
-    ];
-    const note = Math.abs(served) < .5 && Math.abs(workload) < .0001 ? noEffectReason(payload) : "";
+    const note = options.note === false ? "" : (Math.abs(served) < .5 && Math.abs(workload) < .0001 ? noEffectReason(payload) : "");
+
+    // Showing what happens without the decision beside what happens with it makes the direction
+    // intrinsic, so the old "Improves / Worsens" column is gone: six phrases per card that only
+    // restated the sign of the number next to them.
+    const comparison = hidden
+      ? `<p class="no-effect">${escapeHtml(L("Revealed at year end", "Révélé en fin d’année"))}</p>`
+      : `<div class="comparison-list" aria-label="${escapeHtml(L("Expected consequences", "Conséquences attendues"))}">${compareRows.map(([label, base, plan, type]) => `<div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(formatMetric(base, type))}</span><em>→ ${escapeHtml(formatMetric(plan, type))}</em></div>`).join("")}</div>`;
+
     // The duration marker rides with the preview so every decision surface gets it from one place:
     // the option cards, and the nine hand-built cards that never went through optionCard.
-    return `<small class="lasts">${escapeHtml(durationLabel(payload))}</small><div class="consequence-grid" aria-label="${escapeHtml(L("Expected consequences", "Conséquences attendues"))}">${cells.map(([label, value, word]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><em>${escapeHtml(word)}</em></div>`).join("")}</div>${note ? `<p class="no-effect"><strong>${escapeHtml(L("No effect on cases yet", "Pas encore d’effet sur les cas"))}:</strong> ${escapeHtml(note)}</p>` : ""}`;
+    return `<small class="lasts">${escapeHtml(durationLabel(payload))}</small>`
+      + (costCells.length ? `<p class="preview-label">${escapeHtml(L("What this decision costs", "Ce que cette décision coûte"))}</p><div class="consequence-grid" aria-label="${escapeHtml(L("Cost of this decision", "Coût de cette décision"))}" data-cost-block>${costCells.map(([label, value, extra]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><em>${escapeHtml(extra)}</em></div>`).join("")}</div>` : "")
+      + `<p class="preview-label">${escapeHtml(L("Without this decision → with it", "Sans cette décision → avec"))}</p>${comparison}`
+      + (note ? `<p class="no-effect"><strong>${escapeHtml(L("No effect on cases yet", "Pas encore d’effet sur les cas"))}:</strong> ${escapeHtml(note)}</p>` : "");
   }
 
   // Explains why a decision leaves cases and workload unchanged, naming what is still missing.
@@ -1895,8 +2061,8 @@
     return once;
   }
 
-  function optionCard(title, description, key, payload, meta = "") {
-    return `<article class="choice-card"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(description)}</p>${meta ? `<small>${escapeHtml(meta)}</small>` : ""}${consequencePreview(key, payload)}${reviewButton(key, payload)}</article>`;
+  function optionCard(title, description, key, payload, meta = "", id = null) {
+    return `<article${id ? targetCard(id) : ' class="choice-card"'}><h3>${escapeHtml(title)}</h3><p>${escapeHtml(description)}</p>${meta ? `<small>${escapeHtml(meta)}</small>` : ""}${consequencePreview(key, payload)}${reviewButton(key, payload)}</article>`;
   }
 
   function sourceLabel(id) {
@@ -1913,13 +2079,13 @@
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Clinic overview", "Vue d’ensemble de la clinique"))}</h1><p>${escapeHtml(L("See the situation, choose one area, and check the consequences before acting.", "Observez la situation, choisissez un domaine et vérifiez les conséquences avant d’agir."))}</p></div></div>
       ${renderStartBanner()}
       ${showGuide ? `<section class="beginner-guide" aria-labelledby="beginner-guide-title"><div><span>${escapeHtml(L("Year 1 guide", "Guide de l’année 1"))}</span><h2 id="beginner-guide-title">${escapeHtml(L("Your first turn", "Votre premier tour"))}</h2></div><ol><li><strong>${escapeHtml(L("Read the clinic situation", "Comprenez la situation"))}</strong><span>${escapeHtml(L("Start with the signals below.", "Commencez par les signaux ci-dessous."))}</span></li><li><strong>${escapeHtml(L("Choose one priority", "Choisissez une priorité"))}</strong><span>${escapeHtml(L("Open only the area you want to improve.", "Ouvrez uniquement le domaine à améliorer."))}</span></li><li><strong>${escapeHtml(L("Compare before confirming", "Comparez avant de confirmer"))}</strong><span>${escapeHtml(L("Nothing is spent until you add a decision to the plan.", "Rien n’est dépensé avant l’ajout d’une décision au plan."))}</span></li></ol><button class="button secondary" data-dismiss-guide>${escapeHtml(L("Got it", "J’ai compris"))}</button></section>` : ""}
-      <div class="dashboard-grid compact-five">
+      <div class="dashboard-grid compact-three">
         ${metricCard(L("Net result", "Résultat net"), forecastText(forecast.financial.netResult, "money"), forecastPrecision() === "exact" ? pct(forecast.financial.margin) : L("Forecast", "Prévision"), hideOutcomes ? "" : forecast.financial.netResult >= 0 ? "good" : "bad")}
         ${metricCard(L("Cases served", "Cas traités"), hideOutcomes ? forecastText(0, "number") : `${forecastText(forecast.operational.totalHonored, "number")} / ${number(forecast.operational.totalDemand)}`, forecastPrecision() === "exact" ? `${pct(forecast.operational.honoredRate)} ${L("of open requests", "des demandes ouvertes")}${unmetRequests(forecast) ? ` · ${number(unmetRequests(forecast))} ${L("not offered", "non proposées")}` : ""}` : "", hideOutcomes ? "" : forecast.operational.honoredRate >= .82 ? "good" : "warn")}
-        ${metricCard(L("Team workload", "Charge de l’équipe"), forecastText(forecast.operational.staffUse, "percent"), `${number(forecast.operational.reservedSupportHours)} ${L("support hours reserved", "heures de soutien réservées")}`, forecast.operational.staffUse > .94 ? "bad" : "")}
+        ${metricCard(L("Team workload", "Charge de l’équipe"), forecastText(forecast.operational.staffUse, "percent"), "", forecast.operational.staffUse > .94 ? "bad" : "")}
         ${metricCard(L("Carbon footprint", "Empreinte carbone"), tonnes(forecast.carbon.total), `${carbonDelta > 0 ? "+" : ""}${tonnes(carbonDelta)} ${L("vs start", "par rapport au départ")}`, carbonDelta <= 0 ? "good" : "warn")}
-        ${metricCard(L("Staff climate", "Climat de l’équipe"), forecastText(forecast.social.after.staffClimate, "number"), L("Resignation below 30", "Démission sous 30"), hideOutcomes ? "" : forecast.social.after.staffClimate < 45 ? "bad" : forecast.social.after.staffClimate >= 60 ? "good" : "warn")}
-        ${metricCard(L("Client trust", "Confiance des clients"), forecastText(forecast.social.after.clientTrust, "number"), L("Drives demand and reputation", "Influence la demande et la réputation"), hideOutcomes ? "" : forecast.social.after.clientTrust < 45 ? "warn" : forecast.social.after.clientTrust >= 60 ? "good" : "")}
+        ${metricCard(L("Staff climate", "Climat de l’équipe"), forecastText(forecast.social.after.staffClimate, "number"), "", hideOutcomes ? "" : forecast.social.after.staffClimate < 45 ? "bad" : forecast.social.after.staffClimate >= 60 ? "good" : "warn")}
+        ${metricCard(L("Client trust", "Confiance des clients"), forecastText(forecast.social.after.clientTrust, "number"), "", hideOutcomes ? "" : forecast.social.after.clientTrust < 45 ? "warn" : forecast.social.after.clientTrust >= 60 ? "good" : "")}
       </div>
       <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("What needs attention", "Points d’attention"))}</h2><p>${escapeHtml(L("Each signal explains what is happening and where you can investigate it.", "Chaque signal explique ce qui se passe et où l’examiner."))}</p></div></div><div class="priority-list">${signals.map((item) => `<article class="signal-${item.status}" data-signal-key="${item.key}"><div><span>${escapeHtml(item.title)}</span><strong>${escapeHtml(item.text)}</strong></div><div class="signal-actions">${signalButton(item.destination, item.action, "primary")}${item.secondary ? signalButton(item.secondary.destination, item.secondary.label, "secondary") : ""}</div></article>`).join("")}</div></section>
       <section class="card-section goals"><div class="panel-heading"><h2>${escapeHtml(L("Scenario goals", "Objectifs du scénario"))}</h2><strong>${hideOutcomes ? "?" : `${passed}/${goals.length}`}</strong></div>${goals.map((goal) => hideOutcomes ? `<div class="goal-row"><span aria-hidden="true">○</span><strong>${escapeHtml(itemLabel(goal.label))}</strong><em>${escapeHtml(L("Revealed at year end", "Révélé en fin d’année"))}</em></div>` : `<div class="goal-row ${goal.ok ? "good" : "bad"}"><span aria-hidden="true">${goal.ok ? "✓" : "○"}</span><strong>${escapeHtml(itemLabel(goal.label))}</strong><em>${escapeHtml(goal.display)}</em></div>`).join("")}</section>
@@ -1962,7 +2128,7 @@
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Team & operations", "Équipe et opérations"))}</h1><p>${escapeHtml(L("See the team first; reveal applicants and operational alternatives only when needed.", "Voyez d’abord l’équipe ; affichez les candidats et les options uniquement si nécessaire."))}</p></div><button class="button primary" data-open-drawer="recruitment">${escapeHtml(L("Post a vacancy", "Publier une offre"))}</button></div>
       <div class="dashboard-grid compact-four">${metricCard(L("Veterinary hours available", "Heures vétérinaires disponibles"), number(vetHours))}${metricCard(L("Support hours available", "Heures de soutien disponibles"), number(supportHours))}${metricCard(L("Team workload", "Charge de l’équipe"), pct(forecast.operational.staffUse))}${metricCard(L("Unused team hours", "Heures d’équipe inutilisées"), number(unusedHours))}</div>
       ${signals.length ? `<section class="hour-signals" aria-label="${escapeHtml(L("Hours needing attention", "Heures à surveiller"))}">${signals.slice(0, 3).map((signal) => `<p><span aria-hidden="true">${signal.icon}</span>${escapeHtml(signal.text)}</p>`).join("")}</section>` : ""}
-      <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Current team", "Équipe actuelle"))}</h2><span class="panel-links"><button class="text-button" data-open-drawer="capabilities">${escapeHtml(L("Who can do what", "Qui peut faire quoi"))} ›</button><button class="text-button" data-open-drawer="hoursByService">${escapeHtml(L("See hours by service", "Voir les heures par service"))} ›</button></span></div><button class="button secondary" data-open-drawer="training">${escapeHtml(L("Plan training", "Planifier une formation"))}</button></div><div class="staff-grid">${planned.staff.map((person) => { const row = rows[person.id]; const summary = normalizeAllocations(person).map((allocation) => `${serviceName(allocation.serviceId)} ${Math.round(allocation.share * 100)}%`).join(" · "); return `<article class="staff-card"><div class="staff-head"><div><h3>${escapeHtml(person.name)}</h3><span>${escapeHtml(person.role === "vet" ? L("Veterinarian", "Vétérinaire") : L("Support", "Soutien"))}</span></div><strong>${pct(row?.workload || 0)}</strong></div><div class="chips" aria-label="${escapeHtml(L("Skills", "Compétences"))}">${person.skills.length ? person.skills.map((skill) => `<span class="chip">${escapeHtml(skillName(skill))}</span>`).join("") : `<span class="chip">${escapeHtml(L("No specialist skills", "Aucune compétence spécialisée"))}</span>`}</div><p class="allocation-summary">${escapeHtml(summary)}</p>${(() => { const zone = allocationZone(row?.assignedShare ?? 1); return `<p class="staff-zone ${zone.tone}">${escapeHtml(zone.text)}</p>`; })()}${(() => { const closed = closedAssignments(person, planned); if (!closed.length) return ""; const hours = closed.reduce((sum, item) => sum + (row?.availableHours || 0) * item.share, 0); const names = closed.map((item) => serviceName(item.serviceId)).join(", "); return `<p class="staff-zone bad">△ ${escapeHtml(L(`${number(hours)} h on closed services (${names}) produce nothing`, `${number(hours)} h sur des services fermés (${names}) ne produisent rien`))}</p>`; })()}<div class="staff-hours-line"><span>${escapeHtml(L("Hours used", "Heures utilisées"))}</span><strong>${number(row?.usedHours || 0)} / ${number(row?.availableHours || 0)}${row?.overtimeHours > 0 ? ` · ${escapeHtml(L("overtime", "heures sup."))} ${number(row.overtimeHours)}` : ""}</strong></div>${meter(row?.workload || 0, row?.workload > 1 ? "bad" : row?.workload > .94 ? "warn" : "good")}<div class="button-row"><button class="button primary" data-open-drawer="staffAllocation" data-context="${person.id}">${escapeHtml(L("Change time allocation", "Modifier l’affectation du temps"))}</button><button class="button secondary" data-open-drawer="staffPerson" data-context="${person.id}">${escapeHtml(L("Pay", "Salaire"))}</button>${pendingActions().some((action) => (action.payload.kind === "hire" && action.payload.targetId === person.id) || (action.payload.kind === "training" && action.payload.personId === person.id)) ? "" : `<button class="button secondary" data-open-drawer="staffExit" data-context="${person.id}">${escapeHtml(L("Let go", "Se séparer"))}</button>`}</div></article>`; }).join("")}</div></section>
+      <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Current team", "Équipe actuelle"))}</h2><span class="panel-links"><button class="text-button" data-open-drawer="capabilities">${escapeHtml(L("Who can do what", "Qui peut faire quoi"))} ›</button><button class="text-button" data-open-drawer="hoursByService">${escapeHtml(L("See hours by service", "Voir les heures par service"))} ›</button></span></div><button class="button secondary" data-open-drawer="training">${escapeHtml(L("Plan training", "Planifier une formation"))}</button><button class="button secondary" data-open-drawer="relations">${escapeHtml(L("Act on climate and trust", "Agir sur le climat et la confiance"))}</button></div><div class="staff-grid">${planned.staff.map((person) => { const row = rows[person.id]; const summary = normalizeAllocations(person).map((allocation) => `${serviceName(allocation.serviceId)} ${Math.round(allocation.share * 100)}%`).join(" · "); return `<article class="staff-card"><div class="staff-head"><div><h3>${escapeHtml(person.name)}</h3><span>${escapeHtml(person.role === "vet" ? L("Veterinarian", "Vétérinaire") : L("Support", "Soutien"))}</span></div><strong>${pct(row?.workload || 0)}</strong></div><div class="chips" aria-label="${escapeHtml(L("Skills", "Compétences"))}">${person.skills.length ? person.skills.map((skill) => `<span class="chip">${escapeHtml(skillName(skill))}</span>`).join("") : `<span class="chip">${escapeHtml(L("No specialist skills", "Aucune compétence spécialisée"))}</span>`}</div><p class="allocation-summary">${escapeHtml(summary)}</p>${(() => { const zone = allocationZone(row?.assignedShare ?? 1); return `<p class="staff-zone ${zone.tone}">${escapeHtml(zone.text)}</p>`; })()}${(() => { const closed = closedAssignments(person, planned); if (!closed.length) return ""; const hours = closed.reduce((sum, item) => sum + (row?.availableHours || 0) * item.share, 0); const names = closed.map((item) => serviceName(item.serviceId)).join(", "); return `<p class="staff-zone bad">△ ${escapeHtml(L(`${number(hours)} h on closed services (${names}) produce nothing`, `${number(hours)} h sur des services fermés (${names}) ne produisent rien`))}</p>`; })()}<div class="staff-hours-line"><span>${escapeHtml(L("Hours used", "Heures utilisées"))}</span><strong>${number(row?.usedHours || 0)} / ${number(row?.availableHours || 0)}${row?.overtimeHours > 0 ? ` · ${escapeHtml(L("overtime", "heures sup."))} ${number(row.overtimeHours)}` : ""}</strong></div>${meter(row?.workload || 0, row?.workload > 1 ? "bad" : row?.workload > .94 ? "warn" : "good")}<div class="button-row"><button class="button primary" data-open-drawer="staffAllocation" data-context="${person.id}">${escapeHtml(L("Change time allocation", "Modifier l’affectation du temps"))}</button><button class="button secondary" data-open-drawer="staffPerson" data-context="${person.id}">${escapeHtml(L("Pay", "Salaire"))}</button>${pendingActions().some((action) => (action.payload.kind === "hire" && action.payload.targetId === person.id) || (action.payload.kind === "training" && action.payload.personId === person.id)) ? "" : `<button class="button secondary" data-open-drawer="staffExit" data-context="${person.id}">${escapeHtml(L("Let go", "Se séparer"))}</button>`}</div></article>`; }).join("")}</div></section>
       <section class="card-section"><div class="panel-heading"><h2>${escapeHtml(L("How the clinic operates", "Fonctionnement de la clinique"))}</h2></div><div class="operation-rows">
         <button data-open-drawer="opening"><span>${escapeHtml(L("Opening schedule", "Horaires d’ouverture"))}</span><strong>${escapeHtml(openingNames.join(", ") || L("Standard daytime", "Journée standard"))}</strong><em>›</em></button>
         <button data-open-drawer="dropoff"><span>${escapeHtml(L("Drop-off workflow", "Parcours de dépôt"))}</span><strong>${escapeHtml(planned.operations.dropoff ? L("Enabled", "Activé") : L("Disabled", "Désactivé"))}</strong><em>›</em></button>
@@ -2000,8 +2166,8 @@
   function renderTrainingDrawer(planned, embedded = false) {
     const person = planned.staff.find((item) => item.id === ui.drawerContext);
     if (!person) return `<p>${escapeHtml(L("Training is given to one person at a time. Choose who to train.", "La formation concerne une personne à la fois. Choisissez qui former."))}</p><div class="drawer-menu">${planned.staff.map((item) => `<button data-drawer-context="${escapeHtml(item.id)}"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(roleLabel(item.role))} · ${escapeHtml(item.skills.map(skillName).join(", ") || L("No specialist skills", "Aucune compétence spécialisée"))}</span><em>›</em></button>`).join("")}</div>`;
-    const options = Object.entries(D.trainings).filter(([, training]) => training.role === person.role);
-    return `${embedded ? "" : `<button class="text-button" data-drawer-context="">‹ ${escapeHtml(L("Choose another person", "Choisir une autre personne"))}</button>`}<p>${escapeHtml(L(`Training takes hours from ${person.name} only, this year only.`, `La formation prend des heures à ${person.name} uniquement, cette année seulement.`))}</p><div class="drawer-cards">${options.map(([id, training]) => { const has = person.skills.includes(id); const unlocks = D.services.filter((service) => (person.role === "vet" ? service.vetSkills : service.supportSkills).includes(id)).map((service) => serviceName(service.id)).join(", "); const key = `training:${id}:${person.id}`; const payload = { kind: "training", targetId: id, personId: person.id }; return `<article class="choice-card"><h3>${escapeHtml(itemLabel(training.name))}</h3><p>${money(training.cost)} ${escapeHtml(L("once", "une fois"))} · ${number(training.hours)} ${escapeHtml(L("training hours", "heures de formation"))}</p><small>${escapeHtml(L("Unlocks", "Débloque"))}: ${escapeHtml(unlocks)}</small>${has ? `<strong>✓ ${escapeHtml(L("Already has this skill", "Possède déjà cette compétence"))}</strong>` : `${consequencePreview(key, payload)}${reviewButton(key, payload)}`}</article>`; }).join("")}</div>`;
+    const options = focusFirst(Object.entries(D.trainings).filter(([, training]) => training.role === person.role));
+    return `${embedded ? "" : `<button class="text-button" data-drawer-context="">‹ ${escapeHtml(L("Choose another person", "Choisir une autre personne"))}</button>`}<p>${escapeHtml(L(`Training takes hours from ${person.name} only, this year only.`, `La formation prend des heures à ${person.name} uniquement, cette année seulement.`))}</p><div class="drawer-cards">${options.map(([id, training]) => { const has = person.skills.includes(id); const unlocks = D.services.filter((service) => (person.role === "vet" ? service.vetSkills : service.supportSkills).includes(id)).map((service) => serviceName(service.id)).join(", "); const key = `training:${id}:${person.id}`; const payload = { kind: "training", targetId: id, personId: person.id }; return `<article${targetCard(id)}><h3>${escapeHtml(itemLabel(training.name))}</h3><p>${money(training.cost)} ${escapeHtml(L("once", "une fois"))} · ${number(training.hours)} ${escapeHtml(L("training hours", "heures de formation"))}</p><small>${escapeHtml(L("Unlocks", "Débloque"))}: ${escapeHtml(unlocks)}</small>${has ? `<strong>✓ ${escapeHtml(L("Already has this skill", "Possède déjà cette compétence"))}</strong>` : `${consequencePreview(key, payload)}${reviewButton(key, payload)}`}</article>`; }).join("")}</div>`;
   }
 
   function allocationDraftFor(person) {
@@ -2040,6 +2206,39 @@
     return parts.length ? `<small>${escapeHtml(parts.join(" · "))}</small>` : "";
   }
 
+  // These four cells read from the DRAFT, not from the saved allocation: they used to show the same
+  // figures whatever the student was dragging, and contradicted the workload line three rows below.
+  // `unused` is derived from available hours alone — the model's own unusedHours falls back to
+  // assigned hours above 100%, which made the cells stop adding up. The invariant held here is
+  // available + overtime = used + unused + blocked, at every share including 130%.
+  function hoursCells(row) {
+    const available = row?.availableHours || 0;
+    const used = row?.usedHours || 0;
+    const blocked = row?.blockedHours || 0;
+    const overtime = row?.overtimeHours || 0;
+    const unused = Math.max(0, available - used - blocked);
+    return [
+      [L("Available hours", "Heures disponibles"), available],
+      [L("Hours used", "Heures utilisées"), used],
+      ...(overtime >= .5 ? [[L("Overtime hours", "Heures supplémentaires"), overtime]] : []),
+      [L("Unused hours", "Heures inutilisées"), unused],
+      [L("Blocked hours", "Heures bloquées"), blocked]
+    ];
+  }
+
+  // A fresh clinic starts with its support person fully assigned to services that are not open, and
+  // the drawer's own headline called that "100% assigned" while the workload underneath read 0%.
+  // The situation is the Monday lesson and stays; what changes is that the drawer says so first,
+  // instead of leaving a student to infer it from a row note further down.
+  function closedHoursWarning(person, clinic, availableHours) {
+    const closed = closedAssignments(person, clinic);
+    if (!closed.length) return "";
+    const hours = Number(availableHours || 0);
+    const names = closed.map((item) => serviceName(item.serviceId)).join(", ");
+    const share = closed.reduce((sum, item) => sum + item.share, 0);
+    return `<p class="callout closed-hours">△ ${escapeHtml(L(`${number(Math.round(hours * share))} h of ${person.name}'s time is assigned to services that are not open (${names}). Those hours are paid and produce nothing until you open the service or move the hours.`, `${number(Math.round(hours * share))} h du temps de ${person.name} sont affectées à des services qui ne sont pas ouverts (${names}). Ces heures sont payées et ne produisent rien tant que le service n’est pas ouvert ou que les heures ne sont pas déplacées.`))}</p>`;
+  }
+
   function renderAllocationDrawer(planned, forecast) {
     const person = planned.staff.find((item) => item.id === ui.drawerContext);
     if (!person) return "";
@@ -2062,13 +2261,18 @@
     const remainingBlockers = [...blockerMap.values()].slice(0, 3);
     const percent = Math.round(total * 100);
     const draftOvertimeCost = (draftRow?.overtimePay || 0) * (1 + SOCIAL_CHARGE_RATE);
+    const draftBlocked = draftRow?.blockedHours || 0;
+    const draftUsed = draftRow?.usedHours || 0;
+    const draftUnused = Math.max(0, (draftRow?.availableHours || 0) - draftUsed - draftBlocked);
     const meterText = percent === 0 ? L("0% assigned — give this person at least one service", "0 % affectés — donnez au moins un service à cette personne")
-      : percent < 100 ? L(`${percent}% assigned · ${100 - percent}% unassigned (paid but idle)`, `${percent} % affectés · ${100 - percent} % non affectés (payés mais inoccupés)`)
-      : percent === 100 ? L("100% assigned — fully booked, no overtime", "100 % affectés — temps plein, sans heures supplémentaires")
-      : L(`${percent}% assigned · up to ${number(draftRow?.overtimeAssignedHours || 0)} overtime hours (max ${Math.round(MAX_ALLOCATION * 100)}%). Forecast worked: ${number(draftRow?.overtimeHours || 0)} h ≈ ${money(draftOvertimeCost)}`, `${percent} % affectés · jusqu’à ${number(draftRow?.overtimeAssignedHours || 0)} heures supplémentaires (max ${Math.round(MAX_ALLOCATION * 100)} %). Prévu : ${number(draftRow?.overtimeHours || 0)} h ≈ ${money(draftOvertimeCost)}`);
+      : draftBlocked >= 1 && draftUsed < 1 ? L(`${percent}% assigned, but all ${number(draftBlocked)} h are blocked until training — no cases can be handled`, `${percent} % affectés, mais les ${number(draftBlocked)} h sont bloquées jusqu’à la formation — aucun cas ne peut être traité`)
+      : draftBlocked >= 1 ? L(`${percent}% assigned · ${number(draftBlocked)} h blocked until training`, `${percent} % affectés · ${number(draftBlocked)} h bloquées jusqu’à la formation`)
+      : percent > 100 ? L(`${percent}% assigned · up to ${number(draftRow?.overtimeAssignedHours || 0)} overtime hours (max ${Math.round(MAX_ALLOCATION * 100)}%). Forecast worked: ${number(draftRow?.overtimeHours || 0)} h ≈ ${money(draftOvertimeCost)}`, `${percent} % affectés · jusqu’à ${number(draftRow?.overtimeAssignedHours || 0)} heures supplémentaires (max ${Math.round(MAX_ALLOCATION * 100)} %). Prévu : ${number(draftRow?.overtimeHours || 0)} h ≈ ${money(draftOvertimeCost)}`)
+      : draftUnused >= 1 ? L(`${percent}% assigned · ${number(draftUnused)} h paid and unused`, `${percent} % affectés · ${number(draftUnused)} h payées sans emploi`)
+      : L("100% assigned — fully booked, no overtime", "100 % affectés — temps plein, sans heures supplémentaires");
     const zoneClass = !valid ? "warn" : percent > 100 ? "overtime" : percent < 100 ? "idle" : "ready";
     const hoursFlow = currentRow ? L(`${number(currentRow.contractedHours)} contracted − ${number(currentRow.expectedAbsenceHours)} expected absence${absenceNote(currentRow)} − ${number(currentRow.trainingHours)} training${currentRow.onboardingHours > 1 ? ` − ${number(currentRow.onboardingHours)} onboarding` : ""} −${number(currentRow.nonClinicalHours)} other duties = ${number(currentRow.availableHours)} available hours`, `${number(currentRow.contractedHours)} contractuelles − ${number(currentRow.expectedAbsenceHours)} d’absence prévue${absenceNote(currentRow)} − ${number(currentRow.trainingHours)} de formation${currentRow.onboardingHours > 1 ? ` − ${number(currentRow.onboardingHours)} d’intégration` : ""} −${number(currentRow.nonClinicalHours)} d’autres tâches = ${number(currentRow.availableHours)} heures disponibles`) : "";
-    return `<div class="allocation-editor"><p class="callout">${escapeHtml(L(`Up to 100%, changing percentages moves existing hours; it does not create new hours. Above 100% is paid overtime (${OVERTIME_PREMIUM}× pay, maximum ${Math.round(MAX_ALLOCATION * 100)}%) and lowers staff climate. Below 100% is paid idle time.`, `Jusqu’à 100 %, modifier les pourcentages déplace des heures existantes ; cela ne crée pas de nouvelles heures. Au-delà de 100 %, ce sont des heures supplémentaires payées (${String(OVERTIME_PREMIUM).replace(".", ",")}× le salaire, ${Math.round(MAX_ALLOCATION * 100)} % maximum) qui dégradent le climat d’équipe. En dessous, le temps payé reste inoccupé.`))}</p>${hoursFlow ? `<p class="hours-flow">${escapeHtml(hoursFlow)}</p>` : ""}<div class="mini-hours">${[[L("Available hours", "Heures disponibles"), currentRow?.availableHours], [L("Hours used", "Heures utilisées"), currentRow?.usedHours], [L("Unused hours", "Heures inutilisées"), currentRow?.unusedHours], [L("Blocked hours", "Heures bloquées"), currentRow?.blockedHours]].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${number(value || 0)}</strong></div>`).join("")}</div><div class="allocation-total ${zoneClass}"><strong>${escapeHtml(meterText)}</strong>${meter(total / MAX_ALLOCATION, percent > 100 ? "bad" : valid && percent === 100 ? "good" : "warn")}</div><div class="allocation-rows">${draft.map((allocation, index) => { const service = SERVICE_BY_ID[allocation.serviceId]; const qualified = personQualified(person, service); const hours = (currentRow?.availableHours || 0) * allocation.share; return `<article><div><strong>${escapeHtml(serviceName(service.id))}</strong>${qualified ? "" : `<span class="qualification-warning">△ ${escapeHtml(L("Needs training", "Formation nécessaire"))}</span>`}<small>${number(hours)} ${escapeHtml(qualified ? L("assigned hours", "heures affectées") : L("hours blocked until training", "heures bloquées jusqu’à la formation"))}</small>${allocationRowNote(person, service, comparison.after, planned)}${allocationRemainder(draft, index) > 0 ? `<button class="text-button" data-allocation-fill="${index}">${escapeHtml(L(`Use remaining ${number((currentRow?.availableHours || 0) * allocationRemainder(draft, index))} h`, `Utiliser les ${number((currentRow?.availableHours || 0) * allocationRemainder(draft, index))} h restantes`))}</button>` : ""}</div><div class="stepper" role="group" aria-label="${escapeHtml(serviceName(service.id))}"><button data-allocation-adjust="-5" data-allocation-index="${index}" aria-label="${escapeHtml(L("Reduce by 5%", "Réduire de 5 %"))}">−</button><output>${Math.round(allocation.share * 100)}%</output><button data-allocation-adjust="5" data-allocation-index="${index}" ${total >= MAX_ALLOCATION - .0001 ? "disabled" : ""} aria-label="${escapeHtml(L("Increase by 5%", "Augmenter de 5 %"))}">+</button><button class="remove-allocation" data-remove-allocation="${index}" aria-label="${escapeHtml(L("Remove service", "Retirer le service"))}">×</button></div></article>`; }).join("")}</div>${ordered.length ? `<div class="add-allocation"><label><span>${escapeHtml(L("Add another service", "Ajouter un autre service"))}</span><select data-allocation-service>${optionGroup(L("Active and planned services", "Services actifs et planifiés"), activeOptions)}${optionGroup(L("Other services", "Autres services"), otherOptions)}${optionGroup(L("Needs training", "Formation nécessaire"), trainingOptions)}</select></label><button class="button secondary" data-add-allocation>${escapeHtml(L("Add at 0%", "Ajouter à 0 %"))}</button></div>` : ""}${remainingBlockers.length ? `<div class="requirement-list"><strong>${escapeHtml(L("Other blockers still apply", "D’autres blocages restent à résoudre"))}</strong>${remainingBlockers.map((item) => `<div><span>△ ${escapeHtml(serviceName(item.serviceId))}: ${escapeHtml(blockerText(item.reason))}</span></div>`).join("")}</div>` : ""}<section class="allocation-impact"><h3>${escapeHtml(L("Live impact", "Impact en direct"))}</h3><div class="comparison-list"><div><strong>${escapeHtml(L("This person’s workload", "Charge de cette personne"))}</strong><span>${pct(currentRow?.workload || 0)}</span><em>→ ${pct(draftRow?.workload || 0)}</em></div><div><strong>${escapeHtml(L("Team workload", "Charge de l’équipe"))}</strong><span>${pct(comparison.before.operational.staffUse)}</span><em>→ ${pct(comparison.after.operational.staffUse)}</em></div><div><strong>${escapeHtml(L("Cases served", "Cas traités"))}</strong><span>${escapeHtml(forecastText(comparison.before.operational.totalHonored, "number"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.operational.totalHonored, "number"))}</em></div><div><strong>${escapeHtml(L("Net result", "Résultat net"))}</strong><span>${escapeHtml(forecastText(comparison.before.financial.netResult, "money"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.financial.netResult, "money"))}</em></div><div><strong>${escapeHtml(L("Overtime cost", "Coût des heures supplémentaires"))}</strong><span>${money(comparison.before.financial.overtimeCost)}</span><em>→ ${money(comparison.after.financial.overtimeCost)}</em></div><div><strong>${escapeHtml(L("Staff climate", "Climat de l’équipe"))}</strong><span>${number(comparison.before.social.after.staffClimate)}</span><em>→ ${number(comparison.after.social.after.staffClimate)}</em></div><div><strong>${escapeHtml(L("Carbon footprint", "Empreinte carbone"))}</strong><span>${tonnes(comparison.before.carbon.total)}</span><em>→ ${tonnes(comparison.after.carbon.total)}</em></div></div>${serviceDeltas.length ? `<ul>${serviceDeltas.map((row) => `<li><strong>${escapeHtml(serviceName(row.id))}:</strong> ${escapeHtml(row.cases > 0 ? L(`${row.cases} additional cases possible`, `${row.cases} cas supplémentaires possibles`) : L(`${Math.abs(row.cases)} fewer cases possible`, `${Math.abs(row.cases)} cas possibles en moins`))}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No change in cases served with this draft.", "Aucun changement des cas traités avec ce brouillon."))}</p>`}</section><button class="button primary" data-review-allocation="${person.id}" ${valid ? "" : "disabled"}>${escapeHtml(L("Review allocation", "Examiner l’affectation"))}</button></div>`;
+    return `<div class="allocation-editor">${closedHoursWarning(person, planned, currentRow?.availableHours)}<p class="callout">${escapeHtml(L(`Up to 100%, changing percentages moves existing hours; it does not create new hours. Above 100% is paid overtime (${OVERTIME_PREMIUM}× pay, maximum ${Math.round(MAX_ALLOCATION * 100)}%) and lowers staff climate. Below 100% is paid idle time.`, `Jusqu’à 100 %, modifier les pourcentages déplace des heures existantes ; cela ne crée pas de nouvelles heures. Au-delà de 100 %, ce sont des heures supplémentaires payées (${String(OVERTIME_PREMIUM).replace(".", ",")}× le salaire, ${Math.round(MAX_ALLOCATION * 100)} % maximum) qui dégradent le climat d’équipe. En dessous, le temps payé reste inoccupé.`))}</p>${hoursFlow ? `<p class="hours-flow">${escapeHtml(hoursFlow)}</p>` : ""}<div class="mini-hours">${hoursCells(draftRow).map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${number(value || 0)}</strong></div>`).join("")}</div><div class="allocation-total ${zoneClass}"><strong>${escapeHtml(meterText)}</strong>${meter(total / MAX_ALLOCATION, percent > 100 ? "bad" : valid && percent === 100 ? "good" : "warn")}</div><div class="allocation-rows">${draft.map((allocation, index) => { const service = SERVICE_BY_ID[allocation.serviceId]; const qualified = personQualified(person, service); const hours = (currentRow?.availableHours || 0) * allocation.share; return `<article><div><strong>${escapeHtml(serviceName(service.id))}</strong>${qualified ? "" : `<span class="qualification-warning">△ ${escapeHtml(L("Needs training", "Formation nécessaire"))}</span>`}<small>${number(hours)} ${escapeHtml(qualified ? L("assigned hours", "heures affectées") : L("hours blocked until training", "heures bloquées jusqu’à la formation"))}</small>${allocationRowNote(person, service, comparison.after, planned)}${allocationRemainder(draft, index) > 0 ? `<button class="text-button" data-allocation-fill="${index}">${escapeHtml(L(`Use remaining ${number((currentRow?.availableHours || 0) * allocationRemainder(draft, index))} h`, `Utiliser les ${number((currentRow?.availableHours || 0) * allocationRemainder(draft, index))} h restantes`))}</button>` : ""}</div><div class="stepper" role="group" aria-label="${escapeHtml(serviceName(service.id))}"><button data-allocation-adjust="-5" data-allocation-index="${index}" aria-label="${escapeHtml(L("Reduce by 5%", "Réduire de 5 %"))}">−</button><output>${Math.round(allocation.share * 100)}%</output><button data-allocation-adjust="5" data-allocation-index="${index}" ${total >= MAX_ALLOCATION - .0001 ? "disabled" : ""} aria-label="${escapeHtml(L("Increase by 5%", "Augmenter de 5 %"))}">+</button><button class="remove-allocation" data-remove-allocation="${index}" aria-label="${escapeHtml(L("Remove service", "Retirer le service"))}">×</button></div></article>`; }).join("")}</div>${ordered.length ? `<div class="add-allocation"><label><span>${escapeHtml(L("Add another service", "Ajouter un autre service"))}</span><select data-allocation-service>${optionGroup(L("Active and planned services", "Services actifs et planifiés"), activeOptions)}${optionGroup(L("Other services", "Autres services"), otherOptions)}${optionGroup(L("Needs training", "Formation nécessaire"), trainingOptions)}</select></label><button class="button secondary" data-add-allocation>${escapeHtml(L("Add at 0%", "Ajouter à 0 %"))}</button></div>` : ""}${remainingBlockers.length ? `<div class="requirement-list"><strong>${escapeHtml(L("Other blockers still apply", "D’autres blocages restent à résoudre"))}</strong>${remainingBlockers.map((item) => `<div><span>△ ${escapeHtml(serviceName(item.serviceId))}: ${escapeHtml(blockerText(item.reason))}</span></div>`).join("")}</div>` : ""}<section class="allocation-impact"><h3>${escapeHtml(L("Live impact", "Impact en direct"))}</h3><div class="comparison-list"><div><strong>${escapeHtml(L("This person’s workload", "Charge de cette personne"))}</strong><span>${pct(currentRow?.workload || 0)}</span><em>→ ${pct(draftRow?.workload || 0)}</em></div><div><strong>${escapeHtml(L("Team workload", "Charge de l’équipe"))}</strong><span>${pct(comparison.before.operational.staffUse)}</span><em>→ ${pct(comparison.after.operational.staffUse)}</em></div><div><strong>${escapeHtml(L("Cases served", "Cas traités"))}</strong><span>${escapeHtml(forecastText(comparison.before.operational.totalHonored, "number"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.operational.totalHonored, "number"))}</em></div><div><strong>${escapeHtml(L("Net result", "Résultat net"))}</strong><span>${escapeHtml(forecastText(comparison.before.financial.netResult, "money"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.financial.netResult, "money"))}</em></div>${comparison.before.financial.overtimeCost >= 1 || comparison.after.financial.overtimeCost >= 1 ? `<div><strong>${escapeHtml(L("Overtime cost", "Coût des heures supplémentaires"))}</strong><span>${money(comparison.before.financial.overtimeCost)}</span><em>→ ${money(comparison.after.financial.overtimeCost)}</em></div>` : ""}<div><strong>${escapeHtml(L("Staff climate", "Climat de l’équipe"))}</strong><span>${number(comparison.before.social.after.staffClimate)}</span><em>→ ${number(comparison.after.social.after.staffClimate)}</em></div><div><strong>${escapeHtml(L("Carbon footprint", "Empreinte carbone"))}</strong><span>${tonnes(comparison.before.carbon.total)}</span><em>→ ${tonnes(comparison.after.carbon.total)}</em></div></div>${serviceDeltas.length ? `<ul>${serviceDeltas.map((row) => `<li><strong>${escapeHtml(serviceName(row.id))}:</strong> ${escapeHtml(row.cases > 0 ? L(`${row.cases} additional cases possible`, `${row.cases} cas supplémentaires possibles`) : L(`${Math.abs(row.cases)} fewer cases possible`, `${Math.abs(row.cases)} cas possibles en moins`))}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No change in cases served with this draft.", "Aucun changement des cas traités avec ce brouillon."))}</p>`}</section><button class="button primary" data-review-allocation="${person.id}" ${valid ? "" : "disabled"}>${escapeHtml(L("Review allocation", "Examiner l’affectation"))}</button></div>`;
   }
 
   function renderHoursByService(forecast) {
@@ -2080,10 +2284,30 @@
     return `<p>${escapeHtml(L("Enter your team code, then choose a readable report or the full analysis file.", "Saisissez votre code d’équipe, puis choisissez un rapport lisible ou le fichier d’analyse complet."))}</p><div class="form-stack"><label><span>${escapeHtml(L("Team code", "Code d’équipe"))}</span><input type="text" maxlength="24" value="${escapeHtml(state.playerTeam.teamCode || "")}" data-team-code placeholder="${escapeHtml(L("For example G-07", "Par exemple G-07"))}"><small>${escapeHtml(L("Use the code your instructor gives you, not names.", "Utilisez le code donné par votre enseignant, pas des noms."))}</small></label></div><div class="export-choices"><article><h3>${escapeHtml(L("Printable report", "Rapport imprimable"))}</h3><p>${escapeHtml(L("A detailed report for every completed year, including actions, hours, carbon results, and the team’s written reflections.", "Un rapport détaillé pour chaque année terminée, avec les actions, les heures, les résultats carbone et les réflexions écrites de l’équipe."))}</p><button class="button primary" data-print-report>${escapeHtml(L("Print / Save as PDF", "Imprimer / Enregistrer en PDF"))}</button></article><article><h3>${escapeHtml(L("Analytical data", "Données analytiques"))}</h3><p>${escapeHtml(L("The complete structured clinic state and reports for further analysis.", "L’état complet et structuré de la clinique et les rapports pour une analyse ultérieure."))}</p><button class="button secondary" data-download-json>${escapeHtml(L("Download analytical JSON", "Télécharger le JSON analytique"))}</button></article></div>`;
   }
 
+  // Variable costs are the one cost that moves with how many animals you treat. The note is the
+  // point of the card: not the euro total, but the fact that it rises when the clinic does more.
+  function variableCostNote(forecast) {
+    const served = forecast.operational.totalHonored;
+    const revenue = forecast.financial.revenue;
+    const parts = [];
+    if (served > 0) parts.push(L(`≈ ${money(forecast.financial.variableCosts / served)} per case treated`, `≈ ${money(forecast.financial.variableCosts / served)} par cas traité`));
+    if (revenue > 0) parts.push(L(`${pct(forecast.financial.variableCosts / revenue)} of revenue`, `${pct(forecast.financial.variableCosts / revenue)} des recettes`));
+    return parts.join(" · ");
+  }
+
+  // Overtime sits in neither the variable nor the fixed bucket, so `total − variable` is fixed costs
+  // plus overtime. It is zero in almost every game; disclosing it only when it exists keeps the
+  // subtraction honest exactly when it would otherwise be wrong, and silent the rest of the time.
+  function overtimeNote(forecast) {
+    const overtime = forecast.financial.overtimeCost || 0;
+    if (overtime < 1) return "";
+    return L(`incl. ${money(overtime)} of overtime`, `dont ${money(overtime)} d’heures supplémentaires`);
+  }
+
   function renderBusiness(planned, forecast) {
     const location = D.locations[planned.location.sectorId];
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Business", "Gestion"))}</h1><p>${escapeHtml(L("Prices, financing, market position, and location—opened one decision at a time.", "Prix, financement, marché et implantation — une décision à la fois."))}</p></div></div>
-      <div class="dashboard-grid compact-four">${metricCard(L("Revenue", "Recettes"), money(forecast.financial.revenue))}${metricCard(L("Total costs", "Coûts totaux"), money(forecast.financial.totalCosts))}${metricCard(L("Net result", "Résultat net"), money(forecast.financial.netResult), pct(forecast.financial.margin), forecast.financial.netResult >= 0 ? "good" : "bad")}${metricCard(L("End treasury", "Trésorerie finale"), money(forecast.financial.treasury))}</div>
+      <div class="dashboard-grid compact-five">${metricCard(L("Revenue", "Recettes"), money(forecast.financial.revenue))}${metricCard(L("Total costs", "Coûts totaux"), money(forecast.financial.totalCosts), overtimeNote(forecast))}${metricCard(L("Variable costs", "Coûts variables"), money(forecast.financial.variableCosts), variableCostNote(forecast))}${metricCard(L("Net result", "Résultat net"), money(forecast.financial.netResult), pct(forecast.financial.margin), forecast.financial.netResult >= 0 ? "good" : "bad")}${metricCard(L("End treasury", "Trésorerie finale"), money(forecast.financial.treasury))}</div>
       <section class="card-section action-menu"><button data-open-drawer="pricing"><span>${escapeHtml(L("Service prices", "Prix des services"))}</span><strong>${escapeHtml(L("Review price sensitivity and money left after supplies", "Voir la sensibilité au prix et l’argent restant après les fournitures"))}</strong><em>›</em></button><button data-open-drawer="finance"><span>${escapeHtml(L("Financing", "Financement"))}</span><strong>${escapeHtml(planned.finance.loan ? money(planned.finance.loan.remaining) : L("No outstanding loan", "Aucun emprunt"))}</strong><em>›</em></button><button data-open-drawer="market"><span>${escapeHtml(L("Market focus", "Marché cible"))}</span><strong>${escapeHtml(itemLabel(D.segments[planned.marketFocus].name))}</strong><em>›</em></button><button data-open-drawer="location"><span>${escapeHtml(L("Location and parking", "Implantation et parking"))}</span><strong>${escapeHtml(itemLabel(location.name))}</strong><em>›</em></button><button data-open-drawer="marketing"><span>${escapeHtml(L("Market strategies", "Stratégies de marché"))}</span><strong>${escapeHtml(L("Communication, competitor monitoring, and local market research", "Communication, veille concurrentielle et étude du marché local"))}</strong><em>›</em></button></section>
     </section>`;
   }
@@ -2094,17 +2318,38 @@
     const reduction = baseline.perCase ? 1 - forecast.carbon.perCase / baseline.perCase : 0;
     const sources = ["building", "clinical", "waste", "travel"];
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Sustainability", "Durabilité"))}</h1><p>${escapeHtml(L("Choose a source, see the trade-off, and decide whether it fits the clinic.", "Choisissez une source, observez le compromis et décidez s’il convient à la clinique."))}</p></div></div>
-      <div class="dashboard-grid compact-four">${metricCard(L("Total footprint", "Empreinte totale"), tonnes(forecast.carbon.total), `${delta > 0 ? "+" : ""}${tonnes(delta)} ${L("vs start", "par rapport au départ")}`, delta <= 0 ? "good" : "warn")}${metricCard(L("Per treated case", "Par cas traité"), kilograms(forecast.carbon.perCase), `${pct(reduction)} ${L("change", "d’évolution")}`, reduction > 0 ? "good" : "warn")}${metricCard(L("Largest source", "Source principale"), sourceLabel(forecast.carbon.primaryDrivers[0]), tonnes(forecast.carbon.bySource[forecast.carbon.primaryDrivers[0]]))}${metricCard(L("Scenario target", "Objectif du scénario"), pct(({ balanced: .15, rescue: .08, growth: .20 })[state.scenarioId]), L("reduction per case while retaining 80% of starting care", "de réduction par cas en conservant 80 % des soins initiaux"))}</div>
+      <div class="dashboard-grid compact-four">${metricCard(L("Carbon footprint", "Empreinte carbone"), tonnes(forecast.carbon.total), `${delta > 0 ? "+" : ""}${tonnes(delta)} ${L("vs start", "par rapport au départ")}`, delta <= 0 ? "good" : "warn")}${metricCard(L("Per treated case", "Par cas traité"), kilograms(forecast.carbon.perCase), `${pct(reduction)} ${L("change", "d’évolution")}`, reduction > 0 ? "good" : "warn")}${metricCard(L("Largest source", "Source principale"), sourceLabel(forecast.carbon.primaryDrivers[0]), tonnes(forecast.carbon.bySource[forecast.carbon.primaryDrivers[0]]))}${metricCard(L("Scenario target", "Objectif du scénario"), pct(({ balanced: .15, rescue: .08, growth: .20 })[state.scenarioId]), L("reduction per case while retaining 80% of starting care", "de réduction par cas en conservant 80 % des soins initiaux"))}</div>
       <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Where the footprint comes from", "Origine de l’empreinte"))}</h2><p>${escapeHtml(L("Select one source to see only the relevant choices.", "Sélectionnez une source pour ne voir que les choix pertinents."))}</p></div></div><div class="source-list">${sources.map((id) => { const value = forecast.carbon.bySource[id]; const share = forecast.carbon.total ? value / forecast.carbon.total : 0; return `<article><div><strong>${escapeHtml(sourceLabel(id))}</strong><span>${tonnes(value)} · ${pct(share)}</span></div>${meter(share, id === forecast.carbon.primaryDrivers[0] ? "warn" : "good")}<button class="button secondary" data-open-drawer="sustainability" data-context="${id}">${escapeHtml(L("See options", "Voir les options"))}</button></article>`; }).join("")}</div></section>
       <details class="card-section methodology"><summary>${escapeHtml(L("How is this calculated?", "Comment ce calcul est-il réalisé ?"))}</summary><p>${escapeHtml(L("The model combines building electricity and heating, volatile anaesthetic, waste treatment, and client travel. Official conversion factors are kept separate from the clinic activity assumptions used to make the simulation playable.", "Le modèle combine l’électricité et le chauffage du bâtiment, l’anesthésique volatil, le traitement des déchets et les déplacements des clients. Les facteurs de conversion officiels sont séparés des hypothèses d’activité qui rendent la simulation jouable."))}</p><dl><div><dt>${escapeHtml(L("Model version", "Version du modèle"))}</dt><dd>${escapeHtml(D.carbonModel.version)}</dd></div>${Object.values(D.carbonModel.factorRegistry).map((factor) => `<div><dt>${escapeHtml(itemLabel(factor.detail))}</dt><dd>${preciseNumber(factor.value)} ${escapeHtml(factor.unit)} · ${escapeHtml(String(factor.year))}<br>${escapeHtml(factor.source)}</dd></div>`).join("")}<div><dt>${escapeHtml(L("Simulation assumptions", "Hypothèses de simulation"))}</dt><dd>${escapeHtml(L("Energy and waste per service, building demand, room demand, client-trip patterns, and selected treatment routes.", "Énergie et déchets par service, besoins du bâtiment et des salles, déplacements des clients et filières de traitement retenues."))}</dd></div><div><dt>${escapeHtml(L("Not included", "Non inclus"))}</dt><dd>${escapeHtml(L("Medicines and other supply chains, staff commuting, equipment manufacture, construction, and refrigerants.", "Médicaments et autres chaînes d’approvisionnement, trajets du personnel, fabrication des équipements, construction et fluides frigorigènes."))}</dd></div></dl><p class="source-links"><a href="https://vetsustain.org/resources/the-veterinary-carbon-calculator-getting-started" target="_blank" rel="noreferrer">Vet Sustain</a><a href="https://www.eea.europa.eu/en/analysis/indicators/greenhouse-gas-emission-intensity-of-1-1751032678/greenhouse-gas-emission-intensity-of-electricity-generation-country-level" target="_blank" rel="noreferrer">EEA</a><a href="https://www.gov.uk/government/publications/greenhouse-gas-reporting-conversion-factors-2025" target="_blank" rel="noreferrer">UK 2025 factors</a><a href="https://www.gov.uk/guidance/fluorinated-gases-f-gases" target="_blank" rel="noreferrer">UK F-gas table</a><a href="https://dailymed.nlm.nih.gov/dailymed/lookup.cfm?setid=d27da7db-5c2c-4b9f-bf14-a4d18d3e6d4e" target="_blank" rel="noreferrer">DailyMed</a><a href="https://www.england.nhs.uk/long-read/nhs-clinical-waste-strategy/" target="_blank" rel="noreferrer">NHS clinical waste</a><a href="https://ghgprotocol.org/corporate-standard-frequently-asked-questions" target="_blank" rel="noreferrer">GHG Protocol</a></p></details>
     </section>`;
+  }
+
+  // A missing skill is only actionable once a person is chosen, so the link carries the person too:
+  // one click should land on the thing you are about to buy, not on a list to scroll through.
+  function trainee(reason, clinic) {
+    const training = D.trainings[reason.id];
+    if (!reason.type.includes("Skill") || !training) return "";
+    const person = clinic.staff.find((item) => item.role === training.role && !(item.skills || []).includes(reason.id));
+    return person ? ` data-context="${escapeHtml(person.id)}"` : "";
+  }
+
+  // The item you came to buy goes first and is marked, so "Agir" lands on it instead of on the top
+  // of a list you then have to scan. Everything else keeps its order.
+  function focusFirst(entries) {
+    if (!ui.focusItem) return entries;
+    const wanted = entries.filter(([id]) => id === ui.focusItem);
+    return wanted.length ? [...wanted, ...entries.filter(([id]) => id !== ui.focusItem)] : entries;
+  }
+
+  function targetCard(id) {
+    return id === ui.focusItem ? ' data-target-card class="choice-card is-target"' : ' class="choice-card"';
   }
 
   function requirementList(service, clinic) {
     const missing = missingRequirements(service, clinic);
     if (!missing.length) return `<p class="ready-note">✓ ${escapeHtml(L("All requirements are ready.", "Toutes les conditions sont réunies."))}</p>`;
     const target = (reason) => reason.type === "missingRoom" ? "rooms" : reason.type === "missingEquipment" ? "equipment" : reason.type === "opening" ? "opening" : reason.type.includes("Skill") ? "training" : "services";
-    return `<div class="requirement-list"><strong>${escapeHtml(L("Missing requirements", "Conditions manquantes"))}</strong>${missing.map((reason) => `<div><span>○ ${escapeHtml(blockerText(reason))}</span><button class="text-button" data-open-drawer="${target(reason)}">${escapeHtml(L("Address this", "Agir"))} ›</button></div>`).join("")}</div>`;
+    return `<div class="requirement-list"><strong>${escapeHtml(L("Missing requirements", "Conditions manquantes"))}</strong>${missing.map((reason) => `<div><span>○ ${escapeHtml(blockerText(reason))}</span><button class="text-button" data-open-drawer="${target(reason)}" data-focus="${escapeHtml(reason.id || "")}"${trainee(reason, clinic)}>${escapeHtml(L("Address this", "Agir"))} ›</button></div>`).join("")}</div>`;
   }
 
   function renderConfirmation() {
@@ -2167,9 +2412,8 @@
     if (ui.confirm) return renderConfirmation();
     if (ui.drawer === "recruitment") return renderRecruitmentDrawer(planned);
     if (ui.drawer === "plan") {
-      const baseline = simulatePlan([]);
-      const rows = [[L("End treasury", "Trésorerie finale"), money(baseline.financial.treasury), money(forecast.financial.treasury)], [L("Net result", "Résultat net"), money(baseline.financial.netResult), money(forecast.financial.netResult)], [L("Cases served", "Cas traités"), number(baseline.operational.totalHonored), number(forecast.operational.totalHonored)], [L("Team workload", "Charge de l’équipe"), pct(baseline.operational.staffUse), pct(forecast.operational.staffUse)], [L("Carbon", "Carbone"), tonnes(baseline.carbon.total), tonnes(forecast.carbon.total)]];
-      return `<div class="mobile-plan-details"><div class="comparison-list">${rows.map(([label, base, plan]) => `<div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(base)}</span><em>→ ${escapeHtml(plan)}</em></div>`).join("")}</div><div class="plan-actions">${pendingActions().length ? pendingActions().map((action) => `<div class="plan-action"><span>${escapeHtml(actionLabel(action.payload))}</span><button data-remove-action="${escapeHtml(action.key)}" aria-label="${escapeHtml(t("common.remove"))}">×</button></div>`).join("") : `<p class="empty">${escapeHtml(t("forecast.noActions"))}</p>`}</div><button class="button primary pass-button" data-pass-year>${escapeHtml(t("app.pass"))}</button></div>`;
+      const rows = planRows(simulatePlan([]), forecast);
+      return `<div class="mobile-plan-details"><div class="comparison-list">${rows.map(([key, base, plan, type, outcome]) => `<div><strong>${escapeHtml(planRowLabel(key))}</strong><span>${escapeHtml(planValue(type, outcome, base))}</span><em>→ ${escapeHtml(planValue(type, outcome, plan))}</em></div>`).join("")}</div><div class="plan-actions">${pendingActions().length ? pendingActions().map((action) => `<div class="plan-action"><span>${escapeHtml(actionLabel(action.payload))}</span><button data-remove-action="${escapeHtml(action.key)}" aria-label="${escapeHtml(t("common.remove"))}">×</button></div>`).join("") : `<p class="empty">${escapeHtml(t("forecast.noActions"))}</p>`}</div><button class="button primary pass-button" data-pass-year>${escapeHtml(t("app.pass"))}</button></div>`;
     }
     if (ui.drawer === "person") return renderPersonDrawer(planned, forecast);
     if (ui.drawer === "setup") return renderSetupDrawer();
@@ -2180,19 +2424,23 @@
     if (ui.drawer === "capabilities") return renderCapabilitiesDrawer(planned);
     if (ui.drawer === "export") return renderExportDrawer();
     if (ui.drawer === "services") return renderServiceDrawer(planned, forecast);
-    if (ui.drawer === "rooms") return `<div class="drawer-cards">${Object.entries(D.rooms).map(([id, room]) => { const qty = planned.rooms[id]; const add = { kind: "room-add", targetId: id }; return `<article class="choice-card"><h3>${escapeHtml(itemLabel(room.name))} · ${qty}</h3><p>${money(room.fitout)} ${escapeHtml(L("once", "une fois"))} · ${money(room.annualRent)}/${escapeHtml(L("year", "an"))}</p>${consequencePreview(`room:${id}`, add)}<div class="button-row">${reviewButton(`room:${id}`, add, L("Fit out a room", "Aménager une salle"))}${qty > room.baseIncluded ? reviewButton(`room:${id}`, { kind: "room-close", targetId: id }, L("Close a room", "Fermer une salle")) : ""}</div></article>`; }).join("")}</div>`;
-    if (ui.drawer === "equipment") return `<div class="drawer-cards">${Object.entries(D.equipment).map(([id, item]) => { const counts = planned.equipment[id]; const buy = { kind: "equipment-acquire", targetId: id, mode: "buy" }; const lease = { kind: "equipment-acquire", targetId: id, mode: "lease" }; return `<article class="choice-card"><h3>${escapeHtml(itemLabel(item.name))}</h3><p>${escapeHtml(L("Owned", "Acheté"))}: ${counts.owned} · ${escapeHtml(L("Leased", "Loué"))}: ${counts.leased}</p><small>${money(item.purchase)} ${escapeHtml(L("buy once", "achat unique"))} · ${money(item.purchase * item.maintenanceRate)}/${escapeHtml(L("year upkeep if owned", "an d’entretien si acheté"))} · ${money(item.lease)}/${escapeHtml(L("year lease", "an de location"))}</small><div class="choice-subgrid"><div>${consequencePreview(`equipment:${id}:buy`, buy)}${reviewButton(`equipment:${id}:buy`, buy, L("Buy", "Acheter"))}</div><div>${consequencePreview(`equipment:${id}:lease`, lease)}${reviewButton(`equipment:${id}:lease`, lease, L("Lease", "Louer"))}</div></div><div class="button-row">${counts.owned ? reviewButton(`equipment:${id}:buy`, { kind: "equipment-remove", targetId: id, mode: "buy" }, L("Sell one", "Vendre une unité")) : ""}${counts.leased ? reviewButton(`equipment:${id}:lease`, { kind: "equipment-remove", targetId: id, mode: "lease" }, L("Return one", "Restituer une unité")) : ""}</div></article>`; }).join("")}</div>`;
+    if (ui.drawer === "rooms") return `<div class="drawer-cards">${focusFirst(Object.entries(D.rooms)).map(([id, room]) => { const qty = planned.rooms[id]; const add = { kind: "room-add", targetId: id }; return `<article${targetCard(id)}><h3>${escapeHtml(itemLabel(room.name))} · ${qty}</h3><p>${money(room.fitout)} ${escapeHtml(L("once", "une fois"))} · ${money(room.annualRent)}/${escapeHtml(L("year", "an"))}</p>${consequencePreview(`room:${id}`, add)}<div class="button-row">${reviewButton(`room:${id}`, add, L("Fit out a room", "Aménager une salle"))}${qty > room.baseIncluded ? reviewButton(`room:${id}`, { kind: "room-close", targetId: id }, L("Close a room", "Fermer une salle")) : ""}</div></article>`; }).join("")}</div>`;
+    if (ui.drawer === "equipment") return `<div class="drawer-cards">${focusFirst(Object.entries(D.equipment)).map(([id, item]) => { const counts = planned.equipment[id]; const buy = { kind: "equipment-acquire", targetId: id, mode: "buy" }; const lease = { kind: "equipment-acquire", targetId: id, mode: "lease" }; return `<article${targetCard(id)}><h3>${escapeHtml(itemLabel(item.name))}</h3><p>${escapeHtml(L("Owned", "Acheté"))}: ${counts.owned} · ${escapeHtml(L("Leased", "Loué"))}: ${counts.leased}</p><small>${money(item.purchase)} ${escapeHtml(L("buy once", "achat unique"))} · ${money(item.purchase * item.maintenanceRate)}/${escapeHtml(L("year upkeep if owned", "an d’entretien si acheté"))} · ${money(item.lease)}/${escapeHtml(L("year lease", "an de location"))}</small><div class="choice-subgrid"><div>${consequencePreview(`equipment:${id}:buy`, buy)}${reviewButton(`equipment:${id}:buy`, buy, L("Buy", "Acheter"))}</div><div>${consequencePreview(`equipment:${id}:lease`, lease, { note: false })}${reviewButton(`equipment:${id}:lease`, lease, L("Lease", "Louer"))}</div></div><div class="button-row">${counts.owned ? reviewButton(`equipment:${id}:buy`, { kind: "equipment-remove", targetId: id, mode: "buy" }, L("Sell one", "Vendre une unité")) : ""}${counts.leased ? reviewButton(`equipment:${id}:lease`, { kind: "equipment-remove", targetId: id, mode: "lease" }, L("Return one", "Restituer une unité")) : ""}</div></article>`; }).join("")}</div>`;
     if (ui.drawer === "training") return renderTrainingDrawer(planned);
-    if (ui.drawer === "opening") return `<div class="drawer-cards">${Object.entries(D.openingPeriods).map(([id, period]) => { const active = planned.operations.openingPeriods[id]; const payload = { kind: "opening-period", targetId: id, value: !active }; return optionCard(itemLabel(period.name), `${number(period.hours)} ${L("available room/equipment hours; no staff hours added", "heures de salle/équipement disponibles ; aucune heure de personnel ajoutée")}`, `opening:${id}`, payload, `${money(period.cost)}/${L("year", "an")}`); }).join("")}</div>`;
+    if (ui.drawer === "opening") return `<div class="drawer-cards">${focusFirst(Object.entries(D.openingPeriods)).map(([id, period]) => { const active = planned.operations.openingPeriods[id]; const payload = { kind: "opening-period", targetId: id, value: !active }; return optionCard(itemLabel(period.name), `${number(period.hours)} ${L("available room/equipment hours; no staff hours added", "heures de salle/équipement disponibles ; aucune heure de personnel ajoutée")}`, `opening:${id}`, payload, `${money(period.cost)}/${L("year", "an")}`, id); }).join("")}</div>`;
     if (ui.drawer === "dropoff") { const payload = { kind: "dropoff", value: !planned.operations.dropoff }; return optionCard(L("Drop-off workflow", "Parcours de dépôt"), L("Animals are left for the day: vaccination, preventive care, lab and pharmacy use 30% less room time and 10% less vet time (10% more support time), and clients value the convenience (+1 trust). Worth it when a room is full. Needs two support staff.", "Les animaux sont déposés pour la journée : vaccination, prévention, laboratoire et pharmacie utilisent 30 % de temps de salle et 10 % de temps vétérinaire en moins (10 % de soutien en plus), et les clients apprécient la commodité (+1 de confiance). Utile quand une salle est saturée. Deux personnes de soutien sont nécessaires."), "operations:dropoff", payload, `${money(4000)}/${L("year", "an")}`); }
     if (ui.drawer === "stock") return `<div class="drawer-cards">${Object.entries(D.stockStrategies).map(([id, choice]) => { const change = Math.round((choice.multiplier - 1) * 100); const spending = change === 0 ? L("No change in supply spending", "Aucun changement des dépenses de fournitures") : change > 0 ? L(`${change}% more supply spending`, `${change} % de dépenses de fournitures en plus`) : L(`${Math.abs(change)}% less supply spending`, `${Math.abs(change)} % de dépenses de fournitures en moins`); return optionCard(itemLabel(choice.name), `${spending} · ${L(`about ${pct(choice.stockoutRate || 0)} of cases in pharmacy, surgery, orthopedics, hospital, dentistry, vaccination and preventive care lost to stock-outs`, `environ ${pct(choice.stockoutRate || 0)} des cas en pharmacie, chirurgie, orthopédie, hospitalisation, dentisterie, vaccination et prévention perdus par rupture de stock`)}`, "operations:stock", { kind: "stock-strategy", targetId: id }, `${number(choice.supportHours)} ${L("support hours", "heures de soutien")} · ${money(choice.cost)}/${L("year", "an")}`); }).join("")}</div>`;
+    // These four were fully built — costs, effects, a reducer, an action label, a click handler —
+    // and no screen ever rendered a button for them. They are the only direct answer to "how do I
+    // change staff climate or client trust?", so without them the two indicators are read-only.
+    if (ui.drawer === "relations") return `<p>${escapeHtml(L("Staff climate changes absence and resignations. Client trust changes how many requests arrive. Both also move on their own with how much of the demand you serve.", "Le climat d’équipe modifie l’absentéisme et les démissions. La confiance des clients modifie le nombre de demandes reçues. Les deux évoluent aussi d’elles-mêmes selon la part de la demande que vous traitez."))}</p><div class="drawer-cards">${Object.entries(D.socialActions).map(([id, action]) => optionCard(itemLabel(action.name), itemLabel(action.note), `social:${id}`, { kind: "social-action", targetId: id }, `${money(action.cost)} ${L("once", "une fois")}${action.supportHours ? ` · ${number(action.supportHours)} ${L("support hours", "heures de soutien")}` : ""}`, id)).join("")}</div>`;
     if (ui.drawer === "hr") return `<p>${escapeHtml(L("Staff climate changes absence and resignations: below 50 people are absent more, below 30 someone resigns at year end, and below 45 anyone paid under 95% of their benchmark resigns. Resignation protection counts as extra climate for those checks.", "Le climat de l’équipe modifie l’absence et les démissions : sous 50 les absences augmentent, sous 30 une personne démissionne en fin d’année, et sous 45 toute personne payée sous 95 % de sa référence démissionne. La protection contre les départs compte comme du climat en plus pour ces seuils."))}</p><div class="drawer-cards">${Object.entries(D.hrStrategies).map(([id, choice]) => optionCard(itemLabel(choice.name), `${pct(choice.absenteeism)} ${L("expected work time lost to absence", "de temps de travail susceptible d’être perdu pour absence")} · ${L("staff climate", "climat de travail")} ${signed(choice.climate)} · ${L("resignation protection", "protection contre les départs")} +${choice.retention || 0}`, "hr:strategy", { kind: "hr-strategy", targetId: id }, `${money(choice.cost)}/${L("year", "an")}`)).join("")}</div>`;
     if (ui.drawer === "pricing") return `<p>${escapeHtml(L("Price sensitivity shows how strongly requests may change when the price changes. Only open services are listed: open a service first to price it.", "La sensibilité au prix indique dans quelle mesure les demandes peuvent changer lorsque le prix évolue. Seuls les services ouverts sont listés : ouvrez d’abord un service pour fixer son prix."))}</p><div class="price-editor">${D.services.filter((service) => planned.services[service.id].active).map((service) => { const current = ui.decisionDrafts[`price:${service.id}`] ?? planned.services[service.id].price; return `<article><div><strong>${escapeHtml(serviceName(service.id))}</strong><span>${escapeHtml(L("Price sensitivity", "Sensibilité au prix"))}: ${escapeHtml(priceSensitivity(service.elasticity))}</span><span>${escapeHtml(L("Money left after direct supplies", "Argent restant après les fournitures directes"))}: ${money(current * (1 - service.variableCost))} · ${escapeHtml(L(`supplies ${pct(service.variableCost)}`, `fournitures ${pct(service.variableCost)}`))}</span></div><label><span>${escapeHtml(L("Price", "Prix"))}</span><input type="number" min="1" max="5000" value="${current}" data-draft-price="${service.id}" data-draft-key="price:${service.id}"></label><button class="button primary" data-review-price="${service.id}">${escapeHtml(L("Review price", "Examiner le prix"))}</button></article>`; }).join("")}</div>`;
-    if (ui.drawer === "finance") { const loan = planned.finance.loan; return loan ? `${optionCard(L("Repay loan early", "Rembourser l’emprunt par anticipation"), `${money(loan.remaining)} ${L("remaining principal", "de capital restant")}`, "finance:loan", { kind: "repay-loan" })}` : `<div class="drawer-cards">${[50000, 100000].map((amount) => optionCard(L("Five-year loan", "Emprunt sur cinq ans"), L("6% interest on remaining principal; one outstanding loan at a time.", "Intérêt de 6 % sur le capital restant ; un seul emprunt à la fois."), "finance:loan", { kind: "loan", value: amount }, money(amount))).join("")}</div>`; }
+    if (ui.drawer === "finance") { const loan = planned.finance.loan; return loan ? `${optionCard(L("Repay loan early", "Rembourser l’emprunt par anticipation"), `${money(loan.remaining)} ${L("remaining principal", "de capital restant")}`, "finance:loan", { kind: "repay-loan" })}` : `<div class="drawer-cards">${[30000, 50000, 100000].map((amount) => optionCard(L("Five-year loan", "Emprunt sur cinq ans"), L("6% interest on remaining principal; one outstanding loan at a time.", "Intérêt de 6 % sur le capital restant ; un seul emprunt à la fois."), "finance:loan", { kind: "loan", value: amount }, money(amount))).join("")}</div>`; }
     if (ui.drawer === "market") return `<div class="drawer-cards">${Object.entries(D.segments).map(([id, segment]) => optionCard(itemLabel(segment.name), segmentAppetite(segment), "market:focus", { kind: "market-focus", targetId: id })).join("")}</div>`;
     if (ui.drawer === "location") return `<div class="drawer-cards">${Object.entries(D.locations).map(([id, location]) => { const moving = id !== planned.location.sectorId; const note = moving && planned.location.parking ? ` ${L("Moving removes the current parking.", "Le déménagement supprime le parking actuel.")}` : ""; return optionCard(itemLabel(location.name), itemLabel(location.description) + note, "location:sector", { kind: "location", targetId: id }, `${moving ? `${money(location.moveCost)} ${L("once to move", "une fois pour déménager")} · ` : ""}${money(location.rent)}/${L("year", "an")} · ${decimal(location.averageRoundTripKm, 0)} km ${L("average return trip", "aller-retour moyen")}`); }).join("")}${optionCard(planned.location.parking ? L("Remove parking", "Supprimer le parking") : L("Add parking", "Ajouter un parking"), L("Parking improves access and some demand, but increases the modelled share of car travel.", "Le parking améliore l’accès et une partie de la demande, mais augmente la part modélisée des déplacements en voiture."), "location:parking", { kind: "parking", value: !planned.location.parking }, planned.location.parking ? "" : `${money(D.locations[planned.location.sectorId].parkingCost)} ${L("once", "une fois")} · ${money(D.locations[planned.location.sectorId].parkingMaintenance)}/${L("year", "an")}`)}</div>`;
     if (ui.drawer === "marketing") {
-      if (!ui.drawerContext) return `<div class="drawer-menu">${Object.keys(D.marketingStrategies).map((id) => `<button data-drawer-context="${id}"><strong>${escapeHtml(strategyLabel(id))}</strong><span>${escapeHtml(itemLabel(D.marketingStrategies[id][planned.marketing[id]].name))}</span><em>›</em></button>`).join("")}</div>`;
+      if (!ui.drawerContext || !D.marketingStrategies[ui.drawerContext]) return `<div class="drawer-menu">${Object.keys(D.marketingStrategies).map((id) => `<button data-drawer-context="${id}"><strong>${escapeHtml(strategyLabel(id))}</strong><span>${escapeHtml(itemLabel(D.marketingStrategies[id][planned.marketing[id]].name))}</span><em>›</em></button>`).join("")}</div>`;
       return `<button class="text-button" data-drawer-context="">‹ ${escapeHtml(L("Market strategies", "Stratégies de marché"))}</button><div class="drawer-cards">${Object.entries(D.marketingStrategies[ui.drawerContext]).map(([id, choice]) => optionCard(itemLabel(choice.name), `${choice.demand ? signed(choice.demand, "percent") + " " + L("demand", "demande") : L("Demand unchanged", "Demande inchangée")}${choice.willingness ? ` · ${signed(choice.willingness, "percent")} ${L("price clients accept", "de prix accepté par les clients")}` : ""}`, `marketing:${ui.drawerContext}`, { kind: "marketing-strategy", strategy: ui.drawerContext, targetId: id }, `${money(choice.cost)}/${L("year", "an")} · ${number(choice.supportHours || 0)} ${L("support hours", "heures de soutien")}`)).join("")}</div>`;
     }
     if (ui.drawer === "sustainability") return renderSustainabilityOptions(planned);
@@ -2213,14 +2461,19 @@
     return `<button class="text-button" data-drawer-context="">‹ ${escapeHtml(L("Sources", "Sources"))}</button>${optionCard(itemLabel(access.name), L("Reduces modelled client-travel emissions by 8%, raises trust by 2, and demand by 1%.", "Réduit de 8 % les émissions modélisées des déplacements, augmente la confiance de 2 et la demande de 1 %."), "sustainability:access", { kind: "sustainability", targetId: "accessPlan", value: !planned.sustainability.accessPlan }, `${money(access.annual)}/${L("year", "an")} · ${number(access.supportHours)} ${L("support hours", "heures de soutien")}`)}`;
   }
 
-  function drawerTitle() {
-    const titles = { person: L("Team member", "Membre de l’équipe"), setup: L("Game setup", "Paramétrage de la partie"), plan: L("Current plan", "Plan actuel"), recruitment: L("Post a vacancy", "Publier une offre"), staffPerson: L("Manage pay", "Gérer le salaire"), staffExit: L("Let someone go", "Se séparer d’une personne"), staffAllocation: L("Change time allocation", "Modifier l’affectation du temps"), hoursByService: L("Hours by service", "Heures par service"), export: L("Export report", "Exporter le rapport"), services: L("Explore services", "Explorer les services"), rooms: L("Manage rooms", "Gérer les salles"), equipment: L("Manage equipment", "Gérer l’équipement"), training: L("Plan training", "Planifier une formation"), capabilities: L("Who can do what", "Qui peut faire quoi"), opening: L("Opening schedule", "Horaires d’ouverture"), dropoff: L("Drop-off workflow", "Parcours de dépôt"), stock: L("Stock strategy", "Stratégie de stock"), hr: L("HR strategy", "Stratégie RH"), pricing: L("Service prices", "Prix des services"), finance: L("Financing", "Financement"), market: L("Market focus", "Marché cible"), location: L("Location and parking", "Implantation et parking"), marketing: L("Market strategies", "Stratégies de marché"), sustainability: L("Transition options", "Options de transition") };
-    return titles[ui.drawer] || "";
+  function drawerTitles() {
+    const titles = { relations: L("Team and clients", "Équipe et clients"), person: L("Team member", "Membre de l’équipe"), setup: L("Game setup", "Paramétrage de la partie"), plan: L("Current plan", "Plan actuel"), recruitment: L("Post a vacancy", "Publier une offre"), staffPerson: L("Manage pay", "Gérer le salaire"), staffExit: L("Let someone go", "Se séparer d’une personne"), staffAllocation: L("Change time allocation", "Modifier l’affectation du temps"), hoursByService: L("Hours by service", "Heures par service"), export: L("Export report", "Exporter le rapport"), services: L("Explore services", "Explorer les services"), rooms: L("Manage rooms", "Gérer les salles"), equipment: L("Manage equipment", "Gérer l’équipement"), training: L("Plan training", "Planifier une formation"), capabilities: L("Who can do what", "Qui peut faire quoi"), opening: L("Opening schedule", "Horaires d’ouverture"), dropoff: L("Drop-off workflow", "Parcours de dépôt"), stock: L("Stock strategy", "Stratégie de stock"), hr: L("HR strategy", "Stratégie RH"), pricing: L("Service prices", "Prix des services"), finance: L("Financing", "Financement"), market: L("Market focus", "Marché cible"), location: L("Location and parking", "Implantation et parking"), marketing: L("Market strategies", "Stratégies de marché"), sustainability: L("Transition options", "Options de transition") };
+    return titles;
   }
+
+  function drawerTitle() {
+    return drawerTitles()[ui.drawer] || "";
+  }
+
 
   function renderDrawer(planned, forecast) {
     if (!ui.drawer) return "";
-    return `<div class="drawer-backdrop" data-close-drawer><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div class="drawer-head"><div><span class="breadcrumb">${escapeHtml(drawerBreadcrumb(planned))}</span>${ui.confirm ? "" : `<h2 id="drawer-title">${escapeHtml(drawerTitle())}</h2>`}</div><button data-close-drawer aria-label="${escapeHtml(t("app.close"))}">×</button></div><div class="drawer-body">${renderDrawerBody(planned, forecast)}</div></aside></div>`;
+    return `<div class="drawer-backdrop" data-close-drawer><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div class="drawer-head"><div><button class="breadcrumb" data-close-drawer>${escapeHtml(drawerBreadcrumb(planned))}</button>${ui.confirm ? "" : `<h2 id="drawer-title">${escapeHtml(drawerTitle())}</h2>`}</div><button data-close-drawer aria-label="${escapeHtml(t("app.close"))}">×</button></div><div class="drawer-body">${renderDrawerBody(planned, forecast)}</div></aside></div>`;
   }
 
   function renderWhyChanged(latest, previous) {
@@ -2230,17 +2483,20 @@
     const staffCost = (f) => (f.payroll || 0) + (f.socialCharges || 0) + (f.overtimeCost || 0);
     const f = latest.financial;
     const p = previous?.financial;
-    const moneyItems = top(p
-      ? [[L("Revenue", "Recettes"), f.revenue - p.revenue], [L("Staff costs incl. overtime", "Coûts du personnel, heures sup. comprises"), -(staffCost(f) - staffCost(p))], [L("Facilities", "Installations"), -(f.facilityCosts - p.facilityCosts)], [L("Supplies", "Fournitures"), -(f.variableCosts - p.variableCosts)], [L("Operations", "Opérations"), -(operating(f) - operating(p))], [L("One-time costs", "Coûts ponctuels"), -(f.oneTimeCosts - p.oneTimeCosts)]]
-      : [[L("Revenue", "Recettes"), f.revenue], [L("Staff costs incl. overtime", "Coûts du personnel, heures sup. comprises"), -staffCost(f)], [L("Facilities", "Installations"), -f.facilityCosts], [L("Supplies", "Fournitures"), -f.variableCosts], [L("Operations", "Opérations"), -operating(f)], [L("One-time costs", "Coûts ponctuels"), -f.oneTimeCosts]]
+    // The money rows are a closed set: revenue minus each cost bucket equals the headline. Cutting
+    // them to the three largest hid three lines — including variable costs, which is how that figure
+    // stayed invisible for so long — and left an arithmetic the reader could not check.
+    const allMoney = (entries) => entries.filter(([, value]) => Math.abs(value) >= .5).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+    const moneyItems = allMoney(p
+      ? [[L("Revenue", "Recettes"), f.revenue - p.revenue], [L("Payroll, charges and overtime", "Salaires, charges et heures supplémentaires"), -(staffCost(f) - staffCost(p))], [L("Facilities", "Installations"), -(f.facilityCosts - p.facilityCosts)], [L("Variable costs", "Coûts variables"), -(f.variableCosts - p.variableCosts)], [L("Operating costs", "Coûts d’exploitation"), -(operating(f) - operating(p))], [L("One-time costs", "Coûts ponctuels"), -(f.oneTimeCosts - p.oneTimeCosts)]]
+      : [[L("Revenue", "Recettes"), f.revenue], [L("Payroll, charges and overtime", "Salaires, charges et heures supplémentaires"), -staffCost(f)], [L("Facilities", "Installations"), -f.facilityCosts], [L("Variable costs", "Coûts variables"), -f.variableCosts], [L("Operating costs", "Coûts d’exploitation"), -operating(f)], [L("One-time costs", "Coûts ponctuels"), -f.oneTimeCosts]]
     ).map(([label, value]) => [label, signed(value, "money"), value]);
     const caseItems = (p
       ? latest.serviceResults.map((row) => [row, row.honored - (previous.serviceResults.find((item) => item.id === row.id)?.honored || 0)]).filter(([, delta]) => delta).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
       : latest.serviceResults.filter((row) => row.active).map((row) => [row, row.honored]).sort((a, b) => b[1] - a[1])
     ).slice(0, 3).map(([row, value]) => [`${serviceName(row.id)} — ${blockerText(row.bottleneck)}`, signed(value), value]);
     const variance = latest.operational.demandVariance;
-    if (Number.isFinite(variance) && Math.abs(variance) >= .005) caseItems.unshift([L("Demand vs forecast", "Demande par rapport à la prévision"), signed(variance, "percent"), variance]);
-    if (latest.operational.stockoutLost > 0) caseItems.push([L("Lost to stock-outs", "Perdus par rupture de stock"), signed(-latest.operational.stockoutLost), -1]);
+    if (latest.operational.stockoutLost > 0) caseItems.push([L("Lost to stock-outs", "Perdus par rupture de stock"), signed(-latest.operational.stockoutLost), -latest.operational.stockoutLost]);
     const climateLabels = { hr: L("HR strategy", "Stratégie RH"), openingHours: L("Extra opening hours", "Horaires étendus"), pay: L("Pay vs benchmark", "Salaire vs référence"), overtime: L("Overtime", "Heures supplémentaires"), workload: L("Workload level", "Niveau de charge"), departure: L("Someone was let go", "Départ imposé") };
     const trustLabels = { served: L("Share of requests served", "Part des demandes traitées"), communication: L("Client communication", "Communication client"), access: L("Low-carbon access plan", "Plan d’accès bas carbone"), pace: L("Service pace", "Rythme des services"), dropoff: L("Drop-off convenience", "Commodité du dépôt"), stockouts: L("Stock-outs", "Ruptures de stock") };
     const partItems = (parts, labels) => top(Object.entries(parts || {}).map(([id, value]) => [labels[id] || id, value])).map(([label, value]) => [label, points(value), value]);
@@ -2250,7 +2506,17 @@
       [L("Staff climate", "Climat de l’équipe"), number(latest.social.after.staffClimate), partItems(latest.social.climateParts, climateLabels)],
       [L("Client trust", "Confiance des clients"), number(latest.social.after.clientTrust), partItems(latest.social.trustParts, trustLabels)]
     ];
-    return `<section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Why each number changed", "Pourquoi chaque indicateur a changé"))}</h2><p>${escapeHtml(p ? L("Largest contributions compared with the previous year.", "Principales contributions par rapport à l’année précédente.") : L("Largest contributions this year.", "Principales contributions cette année."))}</p></div></div><div class="why-grid">${blocks.map(([title, value, items]) => `<article><h3>${escapeHtml(title)}</h3><strong>${escapeHtml(value)}</strong><ul>${items.length ? items.map(([label, shown, raw]) => `<li><span>${escapeHtml(label)}</span><em class="${raw >= 0 ? "good-text" : "bad-text"}">${escapeHtml(shown)}</em></li>`).join("") : `<li><span>${escapeHtml(L("No notable change", "Aucun changement notable"))}</span></li>`}</ul></article>`).join("")}</div></section>`;
+    return `<section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(p ? L("Why each number changed", "Pourquoi chaque indicateur a changé") : L("How the result is built", "Comment le résultat se forme"))}</h2><p>${escapeHtml(p ? L("Largest contributions compared with the previous year.", "Principales contributions par rapport à l’année précédente.") : L("Largest contributions this year.", "Principales contributions cette année."))}</p></div></div><div class="why-grid">${blocks.map(([title, value, items]) => `<article><h3>${escapeHtml(title)}</h3><strong>${escapeHtml(value)}</strong><ul>${items.length ? items.map(([label, shown, raw]) => `<li><span>${escapeHtml(label)}</span><em class="${raw >= 0 ? "good-text" : "bad-text"}">${escapeHtml(shown)}</em></li>`).join("") : `<li><span>${escapeHtml(L("No notable change", "Aucun changement notable"))}</span></li>`}</ul></article>`).join("")}</div></section>`;
+  }
+
+  // One year back, and only the most recent one — the snapshot is replaced every time a year is
+  // passed. It is deliberately in the students' hands: Wednesday is worked alone at home, where a
+  // ruined year otherwise costs the whole week. What stops it becoming trial-and-error is that it is
+  // recorded, not that it is locked: every undo lands in the decision log and in the setup record
+  // the instructor reads.
+  function undoButton() {
+    if (!state.undo) return "";
+    return `<button class="button secondary" data-undo-year>${escapeHtml(L(`← Undo Year ${state.undo.year}`, `← Revenir à l’année ${state.undo.year}`))}</button>`;
   }
 
   function renderPlayableResults() {
@@ -2262,7 +2528,7 @@
     const field = fields[clamp(ui.reflectionStep, 0, fields.length - 1)];
     const carbon = latest.carbon;
     const changes = [
-      { label: L("Financial result", "Résultat financier"), value: money(latest.financial.netResult), good: latest.financial.netResult >= 0 },
+      { label: L("Net result", "Résultat net"), value: money(latest.financial.netResult), good: latest.financial.netResult >= 0 },
       { label: L("Cases served", "Cas traités"), value: `${number(latest.operational.totalHonored)} / ${number(latest.operational.totalDemand)}`, good: latest.operational.honoredRate >= .82 },
       // Judged on the rounded figure the card actually shows: a half-point drift that rounds to the
       // same number must not carry a warning badge, or the badge contradicts the value beside it.
@@ -2275,13 +2541,13 @@
     const costDrivers = [
       [L("Payroll and charges", "Salaires et charges"), latest.financial.payroll + latest.financial.socialCharges],
       [L("Facilities", "Installations"), latest.financial.facilityCosts],
-      [L("External purchases", "Achats externes"), latest.financial.variableCosts],
-      [L("Operations", "Opérations"), latest.financial.openingCosts + latest.financial.dropoffCost + latest.financial.stockCost + latest.financial.hrCost + latest.financial.marketingCost + (latest.financial.sustainabilityCost || 0) + latest.financial.admin],
+      [L("Variable costs", "Coûts variables"), latest.financial.variableCosts],
+      [L("Operating costs", "Coûts d’exploitation"), latest.financial.openingCosts + latest.financial.dropoffCost + latest.financial.stockCost + latest.financial.hrCost + latest.financial.marketingCost + (latest.financial.sustainabilityCost || 0) + latest.financial.admin],
       ...(latest.financial.loanInterest > 0 ? [[L("Loan interest", "Intérêts d’emprunt"), latest.financial.loanInterest]] : []),
-      [L("One-time investments", "Investissements ponctuels"), latest.financial.oneTimeCosts]
+      [L("One-time costs", "Coûts ponctuels"), latest.financial.oneTimeCosts]
     ].sort((a, b) => b[1] - a[1]);
     const mainCarbon = carbon?.primaryDrivers[0];
-    const causeRows = `<article><span>${escapeHtml(L("Main service constraint", "Contrainte principale des services"))}</span><strong>${escapeHtml(blockerText(latest.operational.mainConstraint))}</strong><em>${escapeHtml(L("Explains unmet requests or weak revenue", "Explique les demandes non traitées ou les revenus insuffisants"))}</em></article><article><span>${escapeHtml(L("Largest cost", "Coût principal"))}</span><strong>${escapeHtml(costDrivers[0][0])}: ${money(costDrivers[0][1])}</strong><em>${escapeHtml(L("Largest annual financial pressure", "Principale pression financière annuelle"))}</em></article>${carbon ? `<article><span>${escapeHtml(L("Largest carbon source", "Principale source de carbone"))}</span><strong>${escapeHtml(sourceLabel(mainCarbon))}: ${tonnes(carbon.bySource[mainCarbon])}</strong><em>${escapeHtml(mainCarbon === "building" ? L("Opening hours, rooms, and energy choices", "Horaires, salles et choix énergétiques") : mainCarbon === "clinical" ? L("Anaesthetic use in eligible procedures", "Gaz anesthésiques des actes concernés") : mainCarbon === "waste" ? L("Waste produced by treated cases", "Déchets produits par les cas traités") : L("Client numbers, location, and parking", "Nombre de clients, implantation et parking"))}</em></article>` : ""}`;
+    const causeRows = `<article><span>${escapeHtml(L("Main constraint", "Contrainte principale"))}</span><strong>${escapeHtml(blockerText(latest.operational.mainConstraint))}</strong><em>${escapeHtml(L("Explains unmet requests or weak revenue", "Explique les demandes non traitées ou les recettes insuffisantes"))}</em></article><article><span>${escapeHtml(L("Largest cost", "Coût principal"))}</span><strong>${escapeHtml(costDrivers[0][0])}: ${money(costDrivers[0][1])}</strong><em>${escapeHtml(L("Largest annual financial pressure", "Principale pression financière annuelle"))}</em></article>${carbon ? `<article><span>${escapeHtml(L("Largest carbon source", "Principale source de carbone"))}</span><strong>${escapeHtml(sourceLabel(mainCarbon))}: ${tonnes(carbon.bySource[mainCarbon])}</strong><em>${escapeHtml(mainCarbon === "building" ? L("Opening hours, rooms, and energy choices", "Horaires, salles et choix énergétiques") : mainCarbon === "clinical" ? L("Anaesthetic use in eligible procedures", "Gaz anesthésiques des actes concernés") : mainCarbon === "waste" ? L("Waste produced by treated cases", "Déchets produits par les cas traités") : L("Client numbers, location, and parking", "Nombre de clients, implantation et parking"))}</em></article>` : ""}`;
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Year results", "Résultats de l’année"))}</h1><p>${escapeHtml(L("See the outcome, identify the causes, then record what the team learned.", "Observez le résultat, identifiez les causes, puis consignez les apprentissages de l’équipe."))}</p></div><div class="button-row"><strong>${escapeHtml(t("app.year", { year: latest.turn, target: state.rules.targetYear }))}</strong><button class="button primary" data-domain="overview">${escapeHtml(L(`Plan Year ${state.year} →`, `Planifier l’année ${state.year} →`))}</button></div></div>
       <div class="dashboard-grid compact-three">${changes.map((item) => metricCard(item.label, item.value, item.good ? L("Improved or on track", "Amélioration ou objectif atteint") : L("Needs attention", "À surveiller"), item.good ? "good" : "warn")).join("")}</div>
       <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("What drove the result", "Origine du résultat"))}</h2><p>${escapeHtml(L("Largest modelled contributors—not a judgement about the choices.", "Principales contributions modélisées — sans jugement sur les choix."))}</p></div></div><div class="cause-list">${causeRows}</div><h3>${escapeHtml(L("Actions taken", "Actions réalisées"))}</h3><div class="chips">${latest.actions?.length ? latest.actions.map((action) => `<span class="chip">${escapeHtml(actionLabel(action))}</span>`).join("") : `<span class="chip">${escapeHtml(t("results.noAction"))}</span>`}</div>${(latest.departures || []).length ? `<div class="recruitment-results">${latest.departures.map((item) => `<p class="bad-text">${escapeHtml(item.name)}: ${escapeHtml(departureText(item.reason))}</p>`).join("")}</div>` : ""}${latest.recruitment?.length ? `<div class="recruitment-results">${latest.recruitment.map((row) => `<p class="${row.accepted ? "good-text" : "bad-text"}">${escapeHtml(candidateById(row.candidateId)?.name || row.candidateId)}: ${escapeHtml(row.accepted ? t("staff.accepted") : t("staff.refused"))}</p>`).join("")}</div>` : ""}</section>
@@ -2289,7 +2555,7 @@
       <section class="card-section reflection-step"><div class="panel-heading"><div><h2>${escapeHtml(L("Team reflection", "Réflexion de l’équipe"))}</h2><p>${ui.reflectionStep + 1}/${fields.length}</p></div></div><label><span>${escapeHtml(t(`results.${field}`))}</span><textarea data-reflection="${field}" data-year="${latest.turn}">${escapeHtml(reflection[field] || "")}</textarea></label><div class="button-row"><button class="button secondary" data-reflection-prev ${ui.reflectionStep === 0 ? "disabled" : ""}>‹ ${escapeHtml(L("Previous", "Précédent"))}</button><button class="button primary" data-save-reflection="${latest.turn}">${escapeHtml(t("results.saveReflection"))}</button><button class="button secondary" data-reflection-next ${ui.reflectionStep === fields.length - 1 ? "disabled" : ""}>${escapeHtml(L("Next", "Suivant"))} ›</button></div></section>
       ${renderSetupRecord()}
       <section class="card-section"><div class="panel-heading"><h2>${escapeHtml(L("Earlier years", "Années précédentes"))}</h2></div><div class="history-accordions">${state.history.slice().reverse().map((report) => `<details ${report.turn === latest.turn ? "open" : ""}><summary><strong>${escapeHtml(t("app.year", { year: report.turn, target: state.rules.targetYear }))}</strong><span>${money(report.financial.netResult)} · ${number(report.operational.totalHonored)} ${escapeHtml(t("common.cases"))}${report.carbon ? ` · ${tonnes(report.carbon.total)}` : ""}</span></summary><p>${escapeHtml(blockerText(report.operational.mainConstraint))}</p></details>`).join("")}</div></section>
-      <div class="next-year"><button class="button primary" data-domain="overview">${escapeHtml(L(`Plan Year ${state.year} →`, `Planifier l’année ${state.year} →`))}</button></div>
+      <div class="next-year">${undoButton()}<button class="button primary" data-domain="overview">${escapeHtml(L(`Plan Year ${state.year} →`, `Planifier l’année ${state.year} →`))}</button></div>
     </section>`;
   }
 
@@ -2305,7 +2571,14 @@
     const goals = goalChecks(latest, state);
     const passed = goals.filter((goal) => goal.ok).length;
     const failed = state.endState.type === "failure";
-    return `<div class="modal-backdrop"><section class="modal end-modal" role="dialog" aria-modal="true" aria-labelledby="end-title"><div class="end-symbol ${failed ? "bad" : "good"}" aria-hidden="true">${failed ? "!" : "✓"}</div><h2 id="end-title">${escapeHtml(t(failed ? "end.failureTitle" : "end.successTitle"))}</h2><p>${escapeHtml(t(failed ? "end.failureText" : "end.successText"))}</p><strong>${escapeHtml(t("end.score", { passed, total: goals.length }))}</strong><div class="goal-summary">${goals.map((goal) => `<span class="${goal.ok ? "good" : "bad"}">${goal.ok ? "✓" : "○"} ${escapeHtml(itemLabel(goal.label))}</span>`).join("")}</div><div class="button-row"><button class="button primary" data-continue>${escapeHtml(t("app.continue"))}</button><button class="button secondary" data-export>${escapeHtml(t("app.export"))}</button><button class="button danger" data-reset>${escapeHtml(t("app.restart"))}</button></div></section></div>`;
+    const strained = state.endState.type === "strained";
+    const tone = failed ? "bad" : strained ? "warn" : "good";
+    const symbol = failed ? "!" : strained ? "△" : "✓";
+    const titleKey = failed ? "end.failureTitle" : strained ? "end.strainedTitle" : "end.successTitle";
+    const textKey = failed ? "end.failureText" : strained ? "end.strainedText" : "end.successText";
+    // The symbol is decorative; the verdict has to reach a screen reader as text, and the treasury
+    // that produced it was shown nowhere at all.
+    return `<div class="modal-backdrop"><section class="modal end-modal" role="dialog" aria-modal="true" aria-labelledby="end-title"><div class="end-symbol ${tone}" aria-hidden="true">${symbol}</div><h2 id="end-title">${escapeHtml(t(titleKey))}</h2><p>${escapeHtml(t(textKey))}</p><p class="end-treasury ${tone}"><strong>${escapeHtml(t("end.endTreasury"))}: ${money(latest.financial.treasury)}</strong></p><strong>${escapeHtml(t("end.score", { passed, total: goals.length }))}</strong><div class="goal-summary">${goals.map((goal) => `<span class="${goal.ok ? "good" : "bad"}">${goal.ok ? "✓" : "○"} ${escapeHtml(itemLabel(goal.label))}</span>`).join("")}</div><div class="button-row"><button class="button primary" data-continue>${escapeHtml(t("app.continue"))}</button><button class="button secondary" data-export>${escapeHtml(t("app.export"))}</button><button class="button danger" data-reset>${escapeHtml(t("app.restart"))}</button></div></section></div>`;
   }
 
   function renderDomain(planned, forecast) {
@@ -2333,6 +2606,13 @@
         const body = drawer.querySelector(".drawer-body");
         if (body) body.scrollTop = restore.scrollTop;
         if (restore.selector) drawer.querySelector(restore.selector)?.focus();
+      }, 0);
+    } else if (drawer && ui.focusItem && drawer.querySelector("[data-target-card]")) {
+      ui.autoFocusDrawer = false;
+      window.setTimeout(() => {
+        const card = drawer.querySelector("[data-target-card]");
+        card?.scrollIntoView({ block: "nearest" });
+        (card?.querySelector("[data-add-key], [data-review-allocation], button.button") || card?.querySelector("button"))?.focus();
       }, 0);
     } else if (drawer && ui.autoFocusDrawer) {
       ui.autoFocusDrawer = false;
@@ -2431,14 +2711,14 @@
       const snapshotStaff = report.clinicSnapshot?.staff || [];
       const staffTable = staffRows.length ? reportTable([L("Person", "Personne"), L("Available", "Disponibles"), L("Assigned", "Affecté"), L("Used", "Utilisées"), L("Overtime", "Heures sup."), L("Idle", "Inoccupées"), L("Unused", "Inutilisées"), L("Blocked", "Bloquées"), L("Workload", "Charge"), L("Allocations", "Affectations")], staffRows.map((row) => { const person = snapshotStaff.find((item) => item.id === row.id); return [escapeHtml(person?.name || row.id), number(row.availableHours), pct(row.assignedShare ?? 1), number(row.usedHours), number(row.overtimeHours || 0), number(row.idleHours || 0), number(row.unusedHours), number(row.blockedHours), pct(row.workload), escapeHtml((row.assignments || []).map((assignment) => `${serviceName(assignment.serviceId)} ${Math.round(assignment.share * 100)}%`).join(" · "))]; })) : `<p class="notice">${escapeHtml(L("Detailed staff allocation was not recorded for this migrated year.", "L’affectation détaillée du personnel n’a pas été enregistrée pour cette année migrée."))}</p>`;
       const serviceRows = report.serviceResults || [];
-      const services = serviceRows.length ? reportTable([L("Service", "Service"), L("Requests", "Demandes"), L("Served", "Traités"), L("Price", "Prix"), L("Revenue", "Recettes"), L("Direct costs", "Coûts directs"), L("Blocker", "Blocage")], serviceRows.filter((row) => row.active).map((row) => [escapeHtml(serviceName(row.id)), number(row.demand), number(row.honored), money(row.price), money(row.revenue), money(row.variableCosts), escapeHtml(blockerText(row.bottleneck))])) : `<p class="notice">${escapeHtml(L("Detailed service results were not recorded for this migrated year.", "Les résultats détaillés des services n’ont pas été enregistrés pour cette année migrée."))}</p>`;
+      const services = serviceRows.length ? reportTable([L("Service", "Service"), L("Requests", "Demandes"), L("Served", "Traités"), L("Price", "Prix"), L("Revenue", "Recettes"), L("Variable costs", "Coûts variables"), L("Blocker", "Blocage")], serviceRows.filter((row) => row.active).map((row) => [escapeHtml(serviceName(row.id)), number(row.demand), number(row.honored), money(row.price), money(row.revenue), money(row.variableCosts), escapeHtml(blockerText(row.bottleneck))])) : `<p class="notice">${escapeHtml(L("Detailed service results were not recorded for this migrated year.", "Les résultats détaillés des services n’ont pas été enregistrés pour cette année migrée."))}</p>`;
       const hours = hourRows.length ? reportTable([L("Service", "Service"), L("Role", "Fonction"), L("Assigned", "Affectées"), L("Needed", "Nécessaires"), L("Used", "Utilisées"), L("Shortage", "Manque")], hourRows.map((row) => [escapeHtml(serviceName(row.serviceId)), escapeHtml(row.role === "vet" ? L("Veterinarian", "Vétérinaire") : L("Support", "Soutien")), number(row.assignedHours), number(row.neededHours), number(row.usedHours), number(row.shortageHours)])) : "";
       const actions = (report.actions || []).length ? `<ul>${report.actions.map((action) => `<li>${escapeHtml(actionLabel(action))}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No action", "Aucune action"))}</p>`;
-      const carbon = report.carbon ? `<div class="summary-grid"><p><span>${escapeHtml(L("Total footprint", "Empreinte totale"))}</span><strong>${tonnes(report.carbon.total)}</strong></p><p><span>${escapeHtml(L("Per treated case", "Par cas traité"))}</span><strong>${kilograms(report.carbon.perCase)}</strong></p>${Object.entries(report.carbon.bySource).map(([id, value]) => `<p><span>${escapeHtml(sourceLabel(id))}</span><strong>${tonnes(value)}</strong></p>`).join("")}</div>` : `<p>${escapeHtml(L("Carbon detail unavailable for this migrated year.", "Détail carbone indisponible pour cette année migrée."))}</p>`;
+      const carbon = report.carbon ? `<div class="summary-grid"><p><span>${escapeHtml(L("Carbon footprint", "Empreinte carbone"))}</span><strong>${tonnes(report.carbon.total)}</strong></p><p><span>${escapeHtml(L("Per treated case", "Par cas traité"))}</span><strong>${kilograms(report.carbon.perCase)}</strong></p>${Object.entries(report.carbon.bySource).map(([id, value]) => `<p><span>${escapeHtml(sourceLabel(id))}</span><strong>${tonnes(value)}</strong></p>`).join("")}</div>` : `<p>${escapeHtml(L("Carbon detail unavailable for this migrated year.", "Détail carbone indisponible pour cette année migrée."))}</p>`;
       const hasHourTotals = Number.isFinite(report.operational.startVetHours) && Number.isFinite(report.operational.startSupportHours);
       const previousCarbon = reportIndex ? state.history[reportIndex - 1].carbon?.total : state.carbonBaseline?.total;
       const carbonChange = report.carbon && Number.isFinite(previousCarbon) ? report.carbon.total - previousCarbon : null;
-      return `<section class="year"><h2>${escapeHtml(L("Year", "Année"))} ${report.turn}</h2><div class="summary-grid"><p><span>${escapeHtml(L("Revenue", "Recettes"))}</span><strong>${money(report.financial.revenue)}</strong></p><p><span>${escapeHtml(L("Direct costs", "Coûts directs"))}</span><strong>${money(report.financial.variableCosts)}</strong></p><p><span>${escapeHtml(L("Payroll and charges", "Salaires et charges"))}</span><strong>${money((report.financial.payroll || 0) + (report.financial.socialCharges || 0))}</strong></p><p><span>${escapeHtml(L("Overtime pay and charges", "Heures supplémentaires et charges"))}</span><strong>${money(report.financial.overtimeCost || 0)}</strong></p><p><span>${escapeHtml(L("Facilities", "Installations"))}</span><strong>${money(report.financial.facilityCosts)}</strong></p><p><span>${escapeHtml(L("Operating costs", "Coûts d’exploitation"))}</span><strong>${money((report.financial.openingCosts || 0) + (report.financial.dropoffCost || 0) + (report.financial.stockCost || 0) + (report.financial.hrCost || 0) + (report.financial.marketingCost || 0) + (report.financial.sustainabilityCost || 0) + (report.financial.admin || 0))}</strong></p>${report.financial.loanInterest > 0 ? `<p><span>${escapeHtml(L("Loan interest", "Intérêts d’emprunt"))}</span><strong>${money(report.financial.loanInterest)}</strong></p>` : ""}<p><span>${escapeHtml(L("One-time costs", "Coûts ponctuels"))}</span><strong>${money(report.financial.oneTimeCosts)}</strong></p><p><span>${escapeHtml(L("Tax", "Impôt"))}</span><strong>${money(report.financial.tax)}</strong></p><p><span>${escapeHtml(L("Net result", "Résultat net"))}</span><strong>${money(report.financial.netResult)}</strong></p><p><span>${escapeHtml(L("End treasury", "Trésorerie finale"))}</span><strong>${money(report.financial.treasury)}</strong></p></div><h3>${escapeHtml(L("Actions and recruitment", "Actions et recrutement"))}</h3>${actions}${(report.recruitment || []).map((row) => `<p>${escapeHtml(candidateById(row.candidateId)?.name || row.candidateId)} — ${escapeHtml(row.accepted ? L("accepted", "accepté") : L("refused", "refusé"))}</p>`).join("")}<h3>${escapeHtml(L("Services", "Services"))}</h3>${services}<h3>${escapeHtml(L("Staff hours", "Heures du personnel"))}</h3>${hasHourTotals ? `<p>${escapeHtml(L("Veterinary hours available / used", "Heures vétérinaires disponibles / utilisées"))}: ${number(report.operational.startVetHours)} / ${number(report.operational.startVetHours - report.operational.remainingVetHours)} · ${escapeHtml(L("Support hours available / used", "Heures de soutien disponibles / utilisées"))}: ${number(report.operational.startSupportHours)} / ${number(report.operational.startSupportHours - report.operational.remainingSupportHours)}</p>` : `<p class="notice">${escapeHtml(L("Detailed hour totals were not recorded for this migrated year.", "Les totaux d’heures détaillés n’ont pas été enregistrés pour cette année migrée."))}</p>`}${staffTable}${hours}<h3>${escapeHtml(L("People and clients", "Équipe et clients"))}</h3><p>${escapeHtml(L("Staff climate", "Climat de l’équipe"))}: ${number(report.social?.after?.staffClimate || 0)} · ${escapeHtml(L("Client trust", "Confiance des clients"))}: ${number(report.social?.after?.clientTrust || 0)}</p><h3>${escapeHtml(L("Carbon footprint", "Empreinte carbone"))}</h3>${carbon}${carbonChange === null ? "" : `<p><strong>${escapeHtml(L("Annual change", "Évolution annuelle"))}:</strong> ${carbonChange > 0 ? "+" : ""}${tonnes(carbonChange)}</p>`}<h3>${escapeHtml(L("Team reflections", "Réflexions de l’équipe"))}</h3>${reflectionFields.map((field) => `<div class="reflection"><strong>${escapeHtml(t(`results.${field}`))}</strong><p>${escapeHtml(reflection[field] || L("No response", "Aucune réponse"))}</p></div>`).join("")}</section>`;
+      return `<section class="year"><h2>${escapeHtml(L("Year", "Année"))} ${report.turn}</h2><div class="summary-grid"><p><span>${escapeHtml(L("Revenue", "Recettes"))}</span><strong>${money(report.financial.revenue)}</strong></p><p><span>${escapeHtml(L("Variable costs", "Coûts variables"))}</span><strong>${money(report.financial.variableCosts)}</strong></p><p><span>${escapeHtml(L("Payroll and charges", "Salaires et charges"))}</span><strong>${money((report.financial.payroll || 0) + (report.financial.socialCharges || 0))}</strong></p><p><span>${escapeHtml(L("Overtime", "Heures supplémentaires"))}</span><strong>${money(report.financial.overtimeCost || 0)}</strong></p><p><span>${escapeHtml(L("Facilities", "Installations"))}</span><strong>${money(report.financial.facilityCosts)}</strong></p><p><span>${escapeHtml(L("Operating costs", "Coûts d’exploitation"))}</span><strong>${money((report.financial.openingCosts || 0) + (report.financial.dropoffCost || 0) + (report.financial.stockCost || 0) + (report.financial.hrCost || 0) + (report.financial.marketingCost || 0) + (report.financial.sustainabilityCost || 0) + (report.financial.admin || 0))}</strong></p>${report.financial.loanInterest > 0 ? `<p><span>${escapeHtml(L("Loan interest", "Intérêts d’emprunt"))}</span><strong>${money(report.financial.loanInterest)}</strong></p>` : ""}<p><span>${escapeHtml(L("One-time costs", "Coûts ponctuels"))}</span><strong>${money(report.financial.oneTimeCosts)}</strong></p><p><span>${escapeHtml(L("Tax", "Impôt"))}</span><strong>${money(report.financial.tax)}</strong></p><p><span>${escapeHtml(L("Net result", "Résultat net"))}</span><strong>${money(report.financial.netResult)}</strong></p><p><span>${escapeHtml(L("End treasury", "Trésorerie finale"))}</span><strong>${money(report.financial.treasury)}</strong></p></div><h3>${escapeHtml(L("Actions and recruitment", "Actions et recrutement"))}</h3>${actions}${(report.recruitment || []).map((row) => `<p>${escapeHtml(candidateById(row.candidateId)?.name || row.candidateId)} — ${escapeHtml(row.accepted ? L("accepted", "accepté") : L("refused", "refusé"))}</p>`).join("")}<h3>${escapeHtml(L("Services", "Services"))}</h3>${services}<h3>${escapeHtml(L("Staff hours", "Heures du personnel"))}</h3>${hasHourTotals ? `<p>${escapeHtml(L("Veterinary hours available / used", "Heures vétérinaires disponibles / utilisées"))}: ${number(report.operational.startVetHours)} / ${number(report.operational.startVetHours - report.operational.remainingVetHours)} · ${escapeHtml(L("Support hours available / used", "Heures de soutien disponibles / utilisées"))}: ${number(report.operational.startSupportHours)} / ${number(report.operational.startSupportHours - report.operational.remainingSupportHours)}</p>` : `<p class="notice">${escapeHtml(L("Detailed hour totals were not recorded for this migrated year.", "Les totaux d’heures détaillés n’ont pas été enregistrés pour cette année migrée."))}</p>`}${staffTable}${hours}<h3>${escapeHtml(L("People and clients", "Équipe et clients"))}</h3><p>${escapeHtml(L("Staff climate", "Climat de l’équipe"))}: ${number(report.social?.after?.staffClimate || 0)} · ${escapeHtml(L("Client trust", "Confiance des clients"))}: ${number(report.social?.after?.clientTrust || 0)}</p><h3>${escapeHtml(L("Carbon footprint", "Empreinte carbone"))}</h3>${carbon}${carbonChange === null ? "" : `<p><strong>${escapeHtml(L("Annual change", "Évolution annuelle"))}:</strong> ${carbonChange > 0 ? "+" : ""}${tonnes(carbonChange)}</p>`}<h3>${escapeHtml(L("Team reflections", "Réflexions de l’équipe"))}</h3>${reflectionFields.map((field) => `<div class="reflection"><strong>${escapeHtml(t(`results.${field}`))}</strong><p>${escapeHtml(reflection[field] || L("No response", "Aucune réponse"))}</p></div>`).join("")}</section>`;
     }).join("");
     return `<!doctype html><html lang="${state.language}"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{font-family:Arial,sans-serif;color:#17201d;margin:32px;line-height:1.4}header{border-bottom:3px solid #146c5a;margin-bottom:24px}.print{position:fixed;right:24px;top:18px;padding:10px 16px}.summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.summary-grid p{border:1px solid #ccd8d4;padding:10px;margin:0}.summary-grid span{display:block;font-size:12px}.summary-grid strong{font-size:16px}table{width:100%;border-collapse:collapse;margin:10px 0 20px;font-size:12px}th,td{text-align:left;border:1px solid #ccd8d4;padding:7px;vertical-align:top}th{background:#eef5f2}.year{break-before:page}.reflection{border-left:3px solid #7c9f96;padding-left:12px}.notice{font-style:italic}@media(max-width:700px){.summary-grid{grid-template-columns:1fr}table{font-size:10px}}@media print{body{margin:10mm}.print{display:none}.year:first-of-type{break-before:auto}}</style></head><body><button class="print" onclick="window.print()">${escapeHtml(L("Print / Save as PDF", "Imprimer / Enregistrer en PDF"))}</button><header><h1>${escapeHtml(title)}</h1><p><strong>${escapeHtml(L("Scenario", "Scénario"))}:</strong> ${escapeHtml(itemLabel(D.scenarios[state.scenarioId].name))}<br><strong>${escapeHtml(L("Team code", "Code d’équipe"))}:</strong> ${escapeHtml(teamCode)}<br><strong>${escapeHtml(L("Exported", "Exporté"))}:</strong> ${escapeHtml(new Intl.DateTimeFormat(locale(), { dateStyle: "long", timeStyle: "short" }).format(new Date()))}</p></header><section><h2>${escapeHtml(L("Rules and goals", "Règles et objectifs"))}</h2><p>${escapeHtml(L("Action limit", "Limite d’actions"))}: ${escapeHtml(state.rules.unlimited ? L("Unlimited", "Illimitée") : state.rules.actionLimit)} · ${escapeHtml(L("Target year", "Année cible"))}: ${state.rules.targetYear} · ${escapeHtml(L("Bankruptcy threshold", "Seuil de faillite"))}: ${money(state.rules.bankruptcyThreshold)}</p><ul>${goals.map((goal) => `<li>${goal.ok ? "✓" : "○"} ${escapeHtml(itemLabel(goal.label))}: ${escapeHtml(goal.display)}</li>`).join("")}</ul><h2>${escapeHtml(L("Game setup", "Paramétrage de la partie"))}</h2>${reportTable([L("Setting", "Paramètre"), L("Value", "Valeur")], setupSummaryRows().map(([label, value]) => [escapeHtml(label), escapeHtml(value)]))}${setupLines.length ? `<ul>${setupLines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No setting changes or cash adjustments.", "Aucun changement de paramètre ni ajustement de trésorerie."))}</p>`}<h2>${escapeHtml(L("Starting versus current clinic", "Clinique de départ et actuelle"))}</h2>${reportTable([L("Measure", "Mesure"), L("Starting", "Départ"), L("Current", "Actuel")], [[escapeHtml(L("Treasury", "Trésorerie")), money(start.treasury), money(state.treasury)], [escapeHtml(L("Clients", "Clients")), number(start.clients), number(state.clients)], [escapeHtml(L("Reputation", "Réputation")), number(start.reputation), number(state.reputation)], [escapeHtml(L("Staff", "Personnel")), number(start.staff.length), number(state.staff.length)], [escapeHtml(L("Active services", "Services actifs")), number(Object.values(start.services).filter((service) => service.active).length), number(Object.values(state.services).filter((service) => service.active).length)], [escapeHtml(L("Carbon footprint", "Empreinte carbone")), state.carbonBaseline ? tonnes(state.carbonBaseline.total) : "—", state.history.at(-1)?.carbon ? tonnes(state.history.at(-1).carbon.total) : "—"]])}</section>${yearSections || `<p>${escapeHtml(L("No completed year yet.", "Aucune année terminée."))}</p>`}<footer><p>${escapeHtml(L("Carbon method", "Méthode carbone"))}: ${escapeHtml(D.carbonModel.version)}. ${escapeHtml(L("Boundary: building electricity and heating, anaesthetic gases, waste treatment, and client car travel. Service activity values are simulation assumptions.", "Périmètre : électricité et chauffage du bâtiment, gaz anesthésiques, traitement des déchets et déplacements automobiles des clients. Les valeurs d’activité des services sont des hypothèses de simulation."))}</p></footer></body></html>`;
   }
@@ -2457,7 +2737,17 @@
 
   function resetScenario(scenarioId = state.scenarioId) {
     const language = state.language;
-    state = initialState(scenarioId, language, state.setup);
+    const changingScenario = scenarioId !== state.scenarioId;
+    // What the instructor set follows the team across a restart: the rules of play, the forecast
+    // precision, the class code (the demand seed — the same class must meet the same luck again),
+    // and the team code, without which the export stops being attributable.
+    // The starting cash does not follow into a *different* scenario: each scenario's opening
+    // position is part of its design, and clearing customTreasury makes line 129 restore it.
+    const carriedSetup = changingScenario ? { ...state.setup, customTreasury: false } : state.setup;
+    const carriedRules = { ...state.rules };
+    const teamCode = state.playerTeam?.teamCode || "";
+    state = initialState(scenarioId, language, carriedSetup, carriedRules);
+    state.playerTeam = { teamCode };
     ui.allocationDrafts = {};
     ui.decisionDrafts = {};
     ui.settingsDraft = null;
@@ -2467,35 +2757,65 @@
     render();
   }
 
+  // Four copies of "close" had drifted apart — one forgot the selected service, none of them put
+  // the student back where they started, and each one pushed a history entry, so Back re-opened the
+  // drawer that had just been closed. One function now, and it replaces the entry instead of adding
+  // one: closing is a return, not a step forward.
+  // The confirmation screen takes over the whole drawer but had no history entry, so browser Back
+  // from it left the drawer entirely instead of returning to the choices — while the in-app Cancel
+  // button did the right thing. A duplicate entry at the same URL gives Back something to pop; the
+  // popstate handler below turns that pop into "back to choices".
+  function pushConfirmStep() {
+    if (typeof location === "undefined" || !window.history?.pushState) return;
+    window.history.pushState({ confirm: true }, "", location.hash || routeFor());
+  }
+
+  function closeDrawer() {
+    const focus = ui.lastFocus;
+    const stack = [...(ui.originStack || [])];
+    const origin = stack.pop() || null;
+    ui.originStack = stack;
+    ui.returnLabel = origin ? ui.returnLabel : null;
+    ui.focusItem = null;
+    if (origin) {
+      applyRoute(parseRoute(origin));
+    } else {
+      ui.drawer = null;
+      ui.drawerContext = null;
+      ui.selectedServiceId = null;
+    }
+    ui.confirm = null;
+    ui.replaceRoute = true;
+    saveState();
+    render();
+    window.setTimeout(() => {
+      if (!focus) return;
+      const selector = `[data-open-drawer="${CSS.escape(focus.drawer)}"]${focus.context ? `[data-context="${CSS.escape(focus.context)}"]` : ""}`;
+      document.querySelector(selector)?.focus();
+    }, 0);
+  }
+
   document.addEventListener("click", (event) => {
     if (event.target.classList?.contains("drawer-backdrop")) {
-      const focus = ui.lastFocus;
-      ui.drawer = null; ui.drawerContext = null; ui.selectedServiceId = null; ui.confirm = null;
-      render();
-      window.setTimeout(() => {
-        if (!focus) return;
-        const selector = `[data-open-drawer="${CSS.escape(focus.drawer)}"]${focus.context ? `[data-context="${CSS.escape(focus.context)}"]` : ""}`;
-        document.querySelector(selector)?.focus();
-      }, 0);
+      closeDrawer();
       return;
     }
     const button = event.target.closest("button");
     if (!button) return;
-    if (button.dataset.domain) { saveVisibleReflection(); state.domain = button.dataset.domain; ui.drawer = null; ui.confirm = null; saveState(); render(); return; }
+    if (button.dataset.domain) { saveVisibleReflection(); state.domain = button.dataset.domain; ui.drawer = null; ui.drawerContext = null; ui.selectedServiceId = null; ui.confirm = null; ui.originStack = []; saveState(); render(); return; }
     if (button.dataset.openDrawer) {
+      // On a drawer-to-drawer jump the breadcrumb IS the close button, so it must name where
+      // closing lands. From a room opened by "Address this" it read "Care & facilities" while
+      // closing returned to the service — confirming the wrong mental model exactly when it
+      // needed correcting.
+      ui.returnLabel = ui.drawer ? (ui.drawer === "services" && ui.selectedServiceId ? serviceName(ui.selectedServiceId) : drawerTitleFor(ui.drawer)) : null;
+      ui.focusItem = button.dataset.focus || null;
       saveVisibleReflection();
       openDrawer(button.dataset.openDrawer, button.dataset.context || null, button.dataset.service || button.dataset.tab || null);
       return;
     }
     if (button.dataset.closeDrawer !== undefined) {
-      const focus = ui.lastFocus;
-      ui.drawer = null; ui.drawerContext = null; ui.selectedServiceId = null; ui.confirm = null;
-      render();
-      window.setTimeout(() => {
-        if (!focus) return;
-        const selector = `[data-open-drawer="${CSS.escape(focus.drawer)}"]${focus.context ? `[data-context="${CSS.escape(focus.context)}"]` : ""}`;
-        document.querySelector(selector)?.focus();
-      }, 0);
+      closeDrawer();
       return;
     }
     if (button.dataset.drawerContext !== undefined) { ui.drawerContext = button.dataset.drawerContext || null; ui.selectedServiceId = null; ui.confirm = null; render(); return; }
@@ -2522,14 +2842,7 @@
     if (button.dataset.clearService !== undefined) { ui.selectedServiceId = null; render(); return; }
     if (button.dataset.dismissGuide !== undefined) { state.uiPreferences.beginnerGuideDismissed = true; ui.reopenBeginnerGuide = false; saveState(); render(); return; }
     if (button.dataset.reopenGuide !== undefined) { ui.reopenBeginnerGuide = true; state.helpOpen = false; state.domain = "overview"; saveState(); render(); return; }
-    if (button.dataset.reviewKey) {
-      const body = document.querySelector(".drawer-body");
-      ui.returnFocus = { scrollTop: body?.scrollTop || 0, selector: `[data-review-key="${CSS.escape(button.dataset.reviewKey)}"]` };
-      ui.confirm = { key: button.dataset.reviewKey, payload: JSON.parse(decodeURIComponent(button.dataset.reviewPayload)) };
-      render();
-      return;
-    }
-    if (button.dataset.cancelReview !== undefined) { ui.confirm = null; ui.restore = ui.returnFocus; render(); return; }
+    if (button.dataset.cancelReview !== undefined) { ui.confirm = null; ui.restore = ui.returnFocus; if (window.history?.state?.confirm) window.history.back(); else render(); return; }
     if (button.dataset.confirmReview !== undefined && ui.confirm) {
       const { key, payload } = ui.confirm;
       if (!state.pending[key] && pendingActions().length >= actionLimit()) {
@@ -2539,6 +2852,8 @@
       if (payload.kind === "staff-allocation") ui.allocationDrafts[payload.targetId] = clone(payload.value.allocations);
       ui.confirm = null;
       ui.restore = ui.returnFocus;
+      ui.replaceRoute = true;
+      if (window.history?.state?.confirm && window.history.replaceState) window.history.replaceState(null, "", location.hash || routeFor());
       queueAction(key, payload);
       toast(L(`Added to plan · ${pendingActions().length}/${state.rules.unlimited ? L("unlimited", "illimité") : state.rules.actionLimit}`, `Ajouté au plan · ${pendingActions().length}/${state.rules.unlimited ? "illimité" : state.rules.actionLimit}`), "good");
       return;
@@ -2593,6 +2908,7 @@
       const body = document.querySelector(".drawer-body");
       ui.returnFocus = { scrollTop: body?.scrollTop || 0, selector: `[data-review-allocation="${CSS.escape(person.id)}"]` };
       ui.confirm = { key: `staff-allocation:${person.id}`, payload: { kind: "staff-allocation", targetId: person.id, value: { allocations: clone(allocations) } } };
+      pushConfirmStep();
       render(); return;
     }
     if (button.dataset.adjustCash !== undefined) {
@@ -2656,6 +2972,7 @@
       const body = document.querySelector(".drawer-body");
       ui.returnFocus = { scrollTop: body?.scrollTop || 0, selector: `[data-review-hire="${CSS.escape(candidate.id)}"]` };
       ui.confirm = { key: `hire:${candidate.id}`, payload: { kind: "hire", targetId: candidate.id, value: { role: ui.vacancy.role, desiredSkills: ui.vacancy.skills, salaryBudget: ui.vacancy.budget, offeredSalary } } };
+      pushConfirmStep();
       render();
       return;
     }
@@ -2664,6 +2981,7 @@
       const body = document.querySelector(".drawer-body");
       ui.returnFocus = { scrollTop: body?.scrollTop || 0, selector: `[data-review-salary="${CSS.escape(button.dataset.reviewSalary)}"]` };
       ui.confirm = { key: `salary:${button.dataset.reviewSalary}`, payload: { kind: "salary", targetId: button.dataset.reviewSalary, value: offered } };
+      pushConfirmStep();
       render();
       return;
     }
@@ -2673,6 +2991,7 @@
       const body = document.querySelector(".drawer-body");
       ui.returnFocus = { scrollTop: body?.scrollTop || 0, selector: `[data-review-price="${CSS.escape(id)}"]` };
       ui.confirm = { key: `service:${id}:price`, payload: { kind: "price", targetId: id, value } };
+      pushConfirmStep();
       render();
       return;
     }
@@ -2686,6 +3005,7 @@
     if (button.dataset.export !== undefined) { saveVisibleReflection(); ui.lastFocus = { drawer: "export", context: "" }; ui.drawer = "export"; ui.drawerContext = null; ui.confirm = null; ui.autoFocusDrawer = true; render(); return; }
     if (button.dataset.downloadJson !== undefined) { downloadJson(); return; }
     if (button.dataset.printReport !== undefined) { printReport(); return; }
+    if (button.dataset.undoYear !== undefined) { const year = state.undo?.year; if (year && window.confirm(t("toast.undoConfirm", { year }))) { if (undoYear()) toast(t("toast.yearUndone", { year }), "good"); } return; }
     if (button.dataset.reset !== undefined) { if (window.confirm(t("toast.resetConfirm"))) resetScenario(); return; }
     if (button.dataset.scenario) { const id = button.dataset.scenario; if (window.confirm(t("toast.scenarioConfirm", { scenario: itemLabel(D.scenarios[id].name) }))) resetScenario(id); return; }
     if (button.dataset.continue !== undefined) { state.endState = null; state.sandboxMode = true; saveState(); render(); return; }
@@ -2752,6 +3072,10 @@
 
   window.addEventListener?.("popstate", () => {
     if (typeof location === "undefined") return;
+    // Back from a confirmation means "back to the choices", not "leave the drawer".
+    if (ui.confirm) { ui.confirm = null; ui.restore = ui.returnFocus; render(); return; }
+    // The browser's own Back leaves the chain, so the in-app step-back stack starts over.
+    ui.originStack = [];
     applyRoute(parseRoute(location.hash));
     render();
   });
@@ -2762,14 +3086,7 @@
     if (!drawer) return;
     if (event.key === "Escape") {
       event.preventDefault();
-      const focus = ui.lastFocus;
-      ui.drawer = null; ui.drawerContext = null; ui.confirm = null;
-      render();
-      window.setTimeout(() => {
-        if (!focus) return;
-        const selector = `[data-open-drawer="${CSS.escape(focus.drawer)}"]${focus.context ? `[data-context="${CSS.escape(focus.context)}"]` : ""}`;
-        document.querySelector(selector)?.focus();
-      }, 0);
+      closeDrawer();
       return;
     }
     if (event.key !== "Tab") return;
@@ -2781,7 +3098,7 @@
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   });
 
-  globalThis.ClinicTest = { initialState, hydrate, adjustCash, parseRoute, routeFor, openDrawer, applyAction, simulateYear, simulatePlan, queueAction, removeAction, resolveTurn, pendingActions, forecastRecord, calculateCarbon, missingRequirements, projectedDemand, actionLabel, goalChecks, getBeginnerSignals, emptyEffects, combineEffects, clone, validAllocations, allocationRemainder, stockServices: STOCK_SERVICES, buildExportPayload, buildPrintableReportHtml, data: D, getState: () => clone(state), renderState: (next) => { state = hydrate(next); ui.selectedServiceId = null; ui.settingsDraft = null; render(); return document.querySelector("#app").innerHTML; }, renderUiForTest: (changes) => { ui = { ...ui, ...changes }; render(); return document.querySelector("#app").innerHTML; } };
+  globalThis.ClinicTest = { initialState, hydrate, adjustCash, parseRoute, routeFor, applyRoute, openDrawer, closeDrawer, planRowLabel, planRows, applyAction, simulateYear, simulatePlan, queueAction, removeAction, resolveTurn, undoYear, resetScenario, pendingActions, forecastRecord, calculateCarbon, missingRequirements, requirementList, projectedDemand, actionLabel, goalChecks, getBeginnerSignals, emptyEffects, combineEffects, clone, validAllocations, allocationRemainder, stockServices: STOCK_SERVICES, buildExportPayload, buildPrintableReportHtml, data: D, getState: () => clone(state), renderState: (next) => { state = hydrate(next); ui.selectedServiceId = null; ui.settingsDraft = null; render(); return document.querySelector("#app").innerHTML; }, renderUiForTest: (changes) => { ui = { ...ui, ...changes }; render(); return document.querySelector("#app").innerHTML; } };
   if (typeof location !== "undefined" && location.hash) applyRoute(parseRoute(location.hash));
   render();
 })();
