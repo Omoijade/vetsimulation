@@ -146,6 +146,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .plan-actions { display: grid; gap: 7px; margin: 14px 0; }
 .plan-action { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: #fff; font-size: 12px; }
 .plan-action button { flex: 0 0 27px; width: 27px; height: 27px; border: 0; border-radius: 50%; color: var(--bad); background: var(--bad-soft); font-size: 18px; }
+.plan-action.free-action { border-style: dashed; background: var(--surface, #fbfbfb); }
+.plan-action small { display: block; color: var(--muted); font-weight: 400; font-size: 11px; }
+.panel-note { margin: 10px 0 0; padding: 9px 11px; border-left: 3px solid var(--line); color: var(--muted); font-size: 12.5px; line-height: 1.45; }
 .pass-button { width: 100%; min-height: 44px; }
 .plan-footer { position: sticky; bottom: -16px; padding-top: 10px; padding-bottom: 1px; background: #f9fbfd; }
 .empty { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }

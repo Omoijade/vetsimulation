@@ -1032,6 +1032,56 @@ RIDERS.forEach(([drawer, payload, expected]) => {
 // Leasing recurs; buying is once plus upkeep. Same action kind, two different commitments.
 if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", mode: "lease" }) === riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", mode: "buy" })) throw new Error("Leasing and buying must not claim the same duration");
 
+// Moving hours the clinic already pays for is not one of the year's few decisions. A clinic with
+// two vets and two support staff needs four reallocations before anything is decided; charging them
+// against a three-action limit made the whole middle of the game unreachable.
+{
+  const limited = ClinicTest.initialState("balanced", "en");
+  limited.rules.actionLimit = 3;
+  limited.rules.unlimited = false;
+  ClinicTest.renderState(limited);
+  const realloc = (id, share) => ({ kind: "staff-allocation", targetId: id, value: { allocations: [{ serviceId: "consult", share }] } });
+  ["a", "b", "c", "d", "e"].forEach((id, index) => ClinicTest.queueAction(`staff-allocation:${id}`, realloc(id, .5 + index / 20)));
+  const reallocations = ClinicTest.pendingActions().filter((action) => action.payload.kind === "staff-allocation").length;
+  if (reallocations !== 5) throw new Error(`Reallocating hours must never hit the action limit; only ${reallocations} of 5 were accepted`);
+  ["consult", "vaccination", "lab", "surgery"].forEach((id) => ClinicTest.queueAction(`price:${id}`, { kind: "price", targetId: id, value: 51 }));
+  const priced = ClinicTest.pendingActions().filter((action) => action.payload.kind === "price").length;
+  if (priced !== 3) throw new Error(`The action limit must still bind for real commitments: ${priced} prices queued under a limit of 3`);
+  const header = ClinicTest.renderState(ClinicTest.getState());
+  if (!header.includes(">3/3<")) throw new Error("The header counter must show only the actions that count against the limit");
+}
+
+// Cases carried per person: within one role the people on a service split exactly the cases that
+// service honoured — no more, no fewer. Across roles they must NOT add up, because a surgery is one
+// case carried by two people, and the team panel has to say so rather than let someone sum them.
+{
+  const growth = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("growth", "en")));
+  const report = ClinicTest.simulateYear(ClinicTest.clone(growth), growth, ClinicTest.emptyEffects(), []);
+  const perRole = {};
+  report.operational.staffRows.forEach((row) => row.assignments.forEach((assignment) => {
+    const key = `${row.role}|${assignment.serviceId}`;
+    perRole[key] = (perRole[key] || 0) + assignment.usedHours;
+  }));
+  let checked = 0;
+  report.serviceResults.filter((result) => result.honored > 0).forEach((result) => {
+    ["vet", "support"].forEach((role) => {
+      const pool = perRole[`${role}|${result.id}`] || 0;
+      if (pool <= 1) return;
+      const split = report.operational.staffRows.filter((row) => row.role === role)
+        .reduce((sum, row) => sum + (ClinicTest.casesCarried(report, row.id).lines.find((line) => line.serviceId === result.id)?.cases || 0), 0);
+      checked += 1;
+      if (Math.abs(split - result.honored) > .01) throw new Error(`Cases carried must split a service exactly within a role: ${result.id}/${role} gives ${split} against ${result.honored} honoured`);
+    });
+  });
+  if (checked < 3) throw new Error(`The cases-carried split was only checked on ${checked} service/role pairs; the scenario is not exercising it`);
+  const shared = ClinicData.services.filter((service) => service.vetShare > 0 && service.supportShare > 0 && growth.services[service.id].active);
+  if (!shared.length) throw new Error("The growth scenario should open at least one service needing both roles");
+  growth.domain = "team";
+  const teamHtml = ClinicTest.renderState(growth);
+  if (!teamHtml.includes("<span>Cases carried</span><strong>")) throw new Error("The team panel must show, on each person's card, how many cases their hours carried");
+  if (!teamHtml.includes("do not add up across the team")) throw new Error("Showing cases per person without saying they overlap invites a total that is wrong by every shared case");
+}
+
 require("./tests.js");
 
 for (const item of resultItems) console.log(item.textContent);
