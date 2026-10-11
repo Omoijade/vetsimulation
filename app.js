@@ -863,6 +863,44 @@
     return { type: "demand" };
   }
 
+  // A student who only watches an outcome learns little; one who committed to an expectation and
+  // was contradicted has nowhere to hide. The plan panel already forecasts the coming year, so
+  // predicting THAT would be reading a row. The question is about the year after: it is displayed
+  // nowhere, and answering it means reasoning about effects that land late — a service opening at
+  // 60% of its demand, an investment that only works the following year, a new hire still settling.
+  function constraintKey(reason) {
+    return `${reason?.type || "none"}:${reason?.id || ""}`;
+  }
+
+  function predictionOptions(planned, forecast) {
+    const seen = new Map();
+    const add = (reason) => { const key = constraintKey(reason); if (reason && reason.type && reason.type !== "none" && !seen.has(key)) seen.set(key, reason); };
+    add({ type: "demandMet" });
+    add({ type: "vetHours" });
+    add({ type: "supportHours" });
+    (forecast.serviceResults || []).filter((row) => row.active).forEach((row) => add(row.bottleneck));
+    (forecast.operational.facilityRows || []).filter((row) => row.capacity > 0).forEach((row) => add({ type: row.kind === "room" ? "roomFull" : "equipmentFull", id: row.id }));
+    add({ type: "revenue" });
+    return [...seen.entries()].map(([key, reason]) => ({ key, label: blockerText(reason) }));
+  }
+
+  // The clinic's answer is a ranking, not a fact: the constraint that left the most requests
+  // unserved wins, often narrowly. Rebuilt here from the service results so the student can see the
+  // ranking, the margin, and where their own answer came in — an answer whose runner-up is two
+  // requests behind is an answer worth arguing with.
+  function constraintBreakdown(report) {
+    const rows = new Map();
+    (report.serviceResults || []).filter((row) => row.active).forEach((row) => {
+      const key = constraintKey(row.bottleneck);
+      if (!rows.has(key)) rows.set(key, { key, reason: row.bottleneck, unserved: 0, services: [] });
+      const entry = rows.get(key);
+      const missed = Math.max(0, row.demand - row.honored);
+      entry.unserved += missed;
+      if (missed > 0) entry.services.push({ id: row.id, unserved: missed });
+    });
+    return [...rows.values()].sort((a, b) => b.unserved - a.unserved).map((entry) => ({ ...entry, services: entry.services.sort((a, b) => b.unserved - a.unserved) }));
+  }
+
   function dominantConstraint(unmet) {
     const entries = Object.entries(unmet).sort((a, b) => b[1].count - a[1].count);
     return entries[0]?.[1].reason || { type: "none" };
@@ -1252,6 +1290,17 @@
     actions.forEach((action) => combineEffects(effects, applyAction(state, action, true)));
     const report = simulateYear(state, before, effects, actions, { actual: true });
     report.forecastShown = forecastRecord(shownPlan, shownBaseline, report);
+    // Adjudicate BEFORE the new prediction replaces the old one: the student answers for year T+1
+    // while passing year T, so at the moment year T resolves the pending slot still holds the
+    // prediction made a year ago. No score is attached — the pairing is the whole of the teaching.
+    if (state.prediction && state.prediction.forYear === report.turn) {
+      const actual = constraintKey(report.operational.mainConstraint);
+      report.prediction = { predicted: state.prediction.constraint, actual, match: state.prediction.constraint === actual };
+      logDecision("prediction-resolved", `${state.prediction.constraint}→${actual}`);
+    }
+    state.prediction = ui.predictionDraft ? { forYear: report.turn + 1, constraint: ui.predictionDraft } : null;
+    if (ui.predictionDraft) logDecision("prediction", `year:${report.turn + 1}:${ui.predictionDraft}`);
+    ui.predictionDraft = null;
     state.treasury = report.financial.treasury;
     state.clients = report.next.clients;
     state.reputation = report.next.reputation;
@@ -1714,7 +1763,7 @@
     planned.staff.filter((person) => closedAssignments(person, planned).length).forEach((person) => warnings.push(L(`${person.name} has hours on closed services.`, `${person.name} a des heures sur des services fermés.`)));
     if (forecast.financial.treasury < state.rules.bankruptcyThreshold) warnings.push(L("The forecast treasury falls below the bankruptcy threshold.", "La trésorerie prévue passe sous le seuil de faillite."));
     const unused = Number.isFinite(left) && left > 0 ? `<p class="no-effect">${escapeHtml(L(`${left} action${left > 1 ? "s" : ""} unused this year.`, `${left} action${left > 1 ? "s" : ""} non utilisée${left > 1 ? "s" : ""} cette année.`))}</p>` : "";
-    return `<div class="modal-backdrop"><section class="modal pass-check" role="dialog" aria-modal="true" aria-labelledby="pass-title"><div class="modal-head"><h2 id="pass-title">${escapeHtml(L(`Ready to pass Year ${state.year}?`, `Prêt à passer l’année ${state.year} ?`))}</h2><button data-cancel-pass aria-label="${escapeHtml(t("app.close"))}">×</button></div><h3>${escapeHtml(L("Planned actions", "Actions prévues"))}</h3>${actions.length ? `<ul>${actions.map((action) => `<li>${escapeHtml(actionLabel(action.payload))}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No actions planned.", "Aucune action prévue."))}</p>`}${unused}${warnings.length ? `<h3>${escapeHtml(L("Warnings still showing", "Alertes encore visibles"))}</h3><ul class="pass-warnings">${warnings.slice(0, 6).map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>` : `<p class="good-text">${escapeHtml(L("No outstanding warnings.", "Aucune alerte en cours."))}</p>`}<div class="button-row"><button class="button secondary" data-cancel-pass>${escapeHtml(L("Go back", "Retour"))}</button><button class="button primary" data-confirm-pass>${escapeHtml(L(`Pass Year ${state.year}`, `Passer l’année ${state.year}`))}</button></div></section></div>`;
+    return `<div class="modal-backdrop"><section class="modal pass-check" role="dialog" aria-modal="true" aria-labelledby="pass-title"><div class="modal-head"><h2 id="pass-title">${escapeHtml(L(`Ready to pass Year ${state.year}?`, `Prêt à passer l’année ${state.year} ?`))}</h2><button data-cancel-pass aria-label="${escapeHtml(t("app.close"))}">×</button></div><h3>${escapeHtml(L("Planned actions", "Actions prévues"))}</h3>${actions.length ? `<ul>${actions.map((action) => `<li>${escapeHtml(actionLabel(action.payload))}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No actions planned.", "Aucune action prévue."))}</p>`}${unused}${warnings.length ? `<h3>${escapeHtml(L("Warnings still showing", "Alertes encore visibles"))}</h3><ul class="pass-warnings">${warnings.slice(0, 6).map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>` : `<p class="good-text">${escapeHtml(L("No outstanding warnings.", "Aucune alerte en cours."))}</p>`}<div class="prediction-ask"><label><span>${escapeHtml(L(`After this year, what do you expect to limit the clinic in Year ${state.year + 1}?`, `Après cette année, qu’attendez-vous comme limite de la clinique en année ${state.year + 1} ?`))}</span><select data-prediction><option value="">${escapeHtml(L("Skip — no prediction", "Passer — pas de prédiction"))}</option>${predictionOptions(planned, forecast).map((option) => `<option value="${escapeHtml(option.key)}" ${ui.predictionDraft === option.key ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></label><small>${escapeHtml(L("Nothing is scored. The clinic will answer at the end of that year.", "Rien n’est noté. La clinique répondra à la fin de cette année-là."))}</small></div><div class="button-row"><button class="button secondary" data-cancel-pass>${escapeHtml(L("Go back", "Retour"))}</button><button class="button primary" data-confirm-pass>${escapeHtml(L(`Pass Year ${state.year}`, `Passer l’année ${state.year}`))}</button></div></section></div>`;
   }
 
   // One place per person: time, pay, training, and letting go.
@@ -1786,6 +1835,65 @@
     ];
   }
 
+  // How a problem is framed decides what counts as an improvement. The same plan, judged on four
+  // points of view the model already computes, can improve on one and damage another — and nothing
+  // in the figures themselves says which view to take. That choice is the student's, and it is the
+  // one thing in this software they can be asked to defend. Each frame returns the figure that
+  // decided it, so the verdict can be argued with rather than accepted.
+  function planFrames(baseline, forecast) {
+    const unmetBase = Math.max(0, baseline.operational.totalDemand - baseline.operational.totalHonored) + unmetRequests(baseline);
+    const unmetPlan = Math.max(0, forecast.operational.totalDemand - forecast.operational.totalHonored) + unmetRequests(forecast);
+    const frames = [
+      {
+        id: "money",
+        label: L("The accounts", "Les comptes"),
+        question: L("Does the clinic end the year better off?", "La clinique finit-elle l’année mieux lotie ?"),
+        delta: forecast.financial.netResult - baseline.financial.netResult,
+        reading: (delta) => L(`Net result ${money(baseline.financial.netResult)} → ${money(forecast.financial.netResult)}`, `Résultat net ${money(baseline.financial.netResult)} → ${money(forecast.financial.netResult)}`)
+      },
+      {
+        id: "access",
+        label: L("Access to care", "L’accès aux soins"),
+        question: L("Do more animals get treated?", "Soigne-t-on davantage d’animaux ?"),
+        delta: forecast.operational.totalHonored - baseline.operational.totalHonored,
+        reading: () => L(`${number(forecast.operational.totalHonored)} cases served · ${number(unmetPlan)} requests unanswered, against ${number(unmetBase)}`, `${number(forecast.operational.totalHonored)} cas traités · ${number(unmetPlan)} demandes sans réponse, contre ${number(unmetBase)}`)
+      },
+      {
+        id: "team",
+        label: L("The people who do the work", "Les gens qui font le travail"),
+        question: L("Is the team able to sustain it?", "L’équipe peut-elle tenir ?"),
+        delta: forecast.social.after.staffClimate - baseline.social.after.staffClimate,
+        reading: () => L(`Staff climate ${number(baseline.social.after.staffClimate)} → ${number(forecast.social.after.staffClimate)}${forecast.financial.overtimeHours > 0 ? ` · ${number(forecast.financial.overtimeHours)} overtime hours` : ""}`, `Climat de l’équipe ${number(baseline.social.after.staffClimate)} → ${number(forecast.social.after.staffClimate)}${forecast.financial.overtimeHours > 0 ? ` · ${number(forecast.financial.overtimeHours)} h supplémentaires` : ""}`)
+      },
+      {
+        id: "carbon",
+        label: L("What it leaves behind", "Ce que cela laisse derrière"),
+        question: L("What does the year cost the climate?", "Que coûte l’année au climat ?"),
+        delta: baseline.carbon.total - forecast.carbon.total,
+        reading: () => L(`Carbon ${tonnes(baseline.carbon.total)} → ${tonnes(forecast.carbon.total)}`, `Carbone ${tonnes(baseline.carbon.total)} → ${tonnes(forecast.carbon.total)}`)
+      }
+    ];
+    return frames.map((frame) => {
+      const moved = Math.abs(frame.delta) > (frame.id === "carbon" ? .05 : frame.id === "money" ? 1 : .5);
+      return { ...frame, verdict: !moved ? "flat" : frame.delta > 0 ? "better" : "worse", detail: frame.reading(frame.delta) };
+    });
+  }
+
+  function renderPlanFrames(baseline, forecast) {
+    const frames = planFrames(baseline, forecast);
+    const moved = frames.filter((frame) => frame.verdict !== "flat");
+    if (!moved.length) return "";
+    const split = moved.some((frame) => frame.verdict === "better") && moved.some((frame) => frame.verdict === "worse");
+    const mark = { better: "↑", worse: "↓", flat: "=" };
+    return `<section class="plan-frames ${split ? "split" : ""}">
+      <h3>${escapeHtml(L("Better or worse — seen from where?", "Mieux ou moins bien — vu d’où ?"))}</h3>
+      ${frames.map((frame) => `<div class="frame-row ${frame.verdict}"><strong>${escapeHtml(frame.label)}</strong><span class="frame-mark" aria-hidden="true">${mark[frame.verdict]}</span><em>${escapeHtml(frame.detail)}</em></div>`).join("")}
+      <p class="frame-note">${escapeHtml(split
+        ? L("These points of view disagree about this plan. No figure here decides between them: choosing which one counts is the decision, and it is yours to defend.", "Ces points de vue ne disent pas la même chose de ce plan. Aucun chiffre ici ne tranche entre eux : choisir celui qui compte, c’est cela la décision, et c’est à vous de la défendre.")
+        : L("These points of view agree about this plan. They will not always — try a plan that makes one of them worse.", "Ces points de vue s’accordent sur ce plan. Ce ne sera pas toujours le cas : essayez un plan qui en dégrade un."))}</p>
+    </section>`;
+  }
+
   function planRowLabel(key) {
     return key === "carbon.total" ? L("Carbon footprint", "Empreinte carbone") : t(key);
   }
@@ -1805,6 +1913,7 @@
         ${rows.map(([key, base, plan, type, outcome]) => `<div class="forecast-row"><strong>${escapeHtml(planRowLabel(key))}</strong><span>${escapeHtml(planValue(type, outcome, base))}</span><span>${escapeHtml(planValue(type, outcome, plan))}</span><em>${escapeHtml(planValue(type, outcome, plan - base, { signed: true }))}</em></div>`).join("")}
         <div class="forecast-row constraint"><strong>${escapeHtml(t("forecast.constraint"))}</strong><span>${escapeHtml(blockerText(baseline.operational.mainConstraint))}</span><span>${escapeHtml(blockerText(forecast.operational.mainConstraint))}</span><em>${baseline.operational.mainConstraint.type === forecast.operational.mainConstraint.type ? "=" : "↻"}</em></div>
       </div>
+      ${renderPlanFrames(baseline, forecast)}
       <div class="plan-actions">
         ${pendingActions().length ? pendingActions().map((action) => `<div class="plan-action${isFreeAction(action.payload) ? " free-action" : ""}"><span>${escapeHtml(actionLabel(action.payload))}${isFreeAction(action.payload) ? ` <small>${escapeHtml(L("does not use an action", "ne consomme pas d’action"))}</small>` : ""}</span><button data-remove-action="${escapeHtml(action.key)}" aria-label="${escapeHtml(t("common.remove"))}">×</button></div>`).join("") : `<p class="empty">${escapeHtml(t("forecast.noActions"))}</p>`}
       </div>
@@ -2594,9 +2703,31 @@
       [L("One-time costs", "Coûts ponctuels"), latest.financial.oneTimeCosts]
     ].sort((a, b) => b[1] - a[1]);
     const mainCarbon = carbon?.primaryDrivers[0];
+    // A verdict that only says "you were wrong" trains deference to the model, which is the habit
+    // this course exists to break. So it hands back what the clinic was counting, where the
+    // student's own answer came in, and how close the ranking was — and it says plainly that
+    // disagreeing with the model on grounds the model does not count is a finding, not an error.
+    const verdict = latest.prediction ? (() => {
+      const label = (key) => { const [type, id] = String(key).split(":"); return blockerText({ type, id: id || undefined }); };
+      const ranking = constraintBreakdown(latest);
+      const top = ranking[0];
+      const runnerUp = ranking.find((row) => row.key !== latest.prediction.actual && row.unserved > 0);
+      const mine = ranking.find((row) => row.key === latest.prediction.predicted);
+      const basis = top && top.services.length
+        ? L(`Because ${top.services.map((row) => `${serviceName(row.id)} (${number(row.unserved)} requests unserved)`).join(", ")} ran out of it before anything else.`, `Parce que ${top.services.map((row) => `${serviceName(row.id)} (${number(row.unserved)} demandes non traitées)`).join(", ")} en a manqué avant toute autre chose.`)
+        : L("No service ran short this year: everything the clinic offers was served.", "Aucun service n’a manqué cette année : tout ce que la clinique propose a été traité.");
+      const yours = latest.prediction.match ? "" : mine && mine.unserved > 0
+        ? L(`Your answer was real but smaller: ${label(latest.prediction.predicted)} left ${number(mine.unserved)} requests unserved, against ${number(top?.unserved || 0)}.`, `Votre réponse était réelle mais plus petite : ${label(latest.prediction.predicted)} a laissé ${number(mine.unserved)} demandes non traitées, contre ${number(top?.unserved || 0)}.`)
+        : L(`No service was held back by ${label(latest.prediction.predicted)} this year.`, `Aucun service n’a été retenu par ${label(latest.prediction.predicted)} cette année.`);
+      const margin = runnerUp && top && top.unserved > 0
+        ? L(`The answer is a ranking, not a verdict: ${label(runnerUp.key)} came second with ${number(runnerUp.unserved)} unserved. Change the year a little and the clinic answers differently.`, `La réponse est un classement, pas un verdict : ${label(runnerUp.key)} arrive deuxième avec ${number(runnerUp.unserved)} demandes non traitées. Modifiez un peu l’année et la clinique répond autrement.`)
+        : "";
+      return `<section class="card-section prediction-verdict ${latest.prediction.match ? "matched" : "missed"}"><div class="panel-heading"><h2>${escapeHtml(L("What you expected, and what the clinic counted", "Ce que vous attendiez, et ce que la clinique a compté"))}</h2></div><div class="comparison-list"><div><strong>${escapeHtml(L("You predicted", "Vous aviez prédit"))}</strong><span>${escapeHtml(label(latest.prediction.predicted))}</span><em>→ ${escapeHtml(label(latest.prediction.actual))}</em></div></div><p><strong>${escapeHtml(L("Why the clinic answers this", "Pourquoi la clinique répond cela"))}</strong> ${escapeHtml(basis)}</p>${yours ? `<p>${escapeHtml(yours)}</p>` : ""}${margin ? `<p>${escapeHtml(margin)}</p>` : ""}<p class="arguable">${escapeHtml(L("The clinic counts requests, hours, rooms and equipment. It does not count what a case asks of the person treating it, what a refused client tells a neighbour, or what the work is for. If your reasoning rested on something in that second list, you are not wrong — you have found an edge of the model. Write it down with the figure that exposed it.", "La clinique compte des demandes, des heures, des salles et de l’équipement. Elle ne compte pas ce qu’un cas exige de la personne qui le traite, ce qu’un client refusé raconte autour de lui, ni ce à quoi sert le travail. Si votre raisonnement portait sur cette seconde liste, vous n’avez pas tort — vous avez trouvé une limite du modèle. Écrivez-la, avec le chiffre qui l’a révélée."))}</p><p class="no-effect">${escapeHtml(L("Nothing here is scored.", "Rien ici n’est noté."))}</p></section>`;
+    })() : "";
     const causeRows = `<article><span>${escapeHtml(L("Main constraint", "Contrainte principale"))}</span><strong>${escapeHtml(blockerText(latest.operational.mainConstraint))}</strong><em>${escapeHtml(L("Explains unmet requests or weak revenue", "Explique les demandes non traitées ou les recettes insuffisantes"))}</em></article><article><span>${escapeHtml(L("Largest cost", "Coût principal"))}</span><strong>${escapeHtml(costDrivers[0][0])}: ${money(costDrivers[0][1])}</strong><em>${escapeHtml(L("Largest annual financial pressure", "Principale pression financière annuelle"))}</em></article>${carbon ? `<article><span>${escapeHtml(L("Largest carbon source", "Principale source de carbone"))}</span><strong>${escapeHtml(sourceLabel(mainCarbon))}: ${tonnes(carbon.bySource[mainCarbon])}</strong><em>${escapeHtml(mainCarbon === "building" ? L("Opening hours, rooms, and energy choices", "Horaires, salles et choix énergétiques") : mainCarbon === "clinical" ? L("Anaesthetic use in eligible procedures", "Gaz anesthésiques des actes concernés") : mainCarbon === "waste" ? L("Waste produced by treated cases", "Déchets produits par les cas traités") : L("Client numbers, location, and parking", "Nombre de clients, implantation et parking"))}</em></article>` : ""}`;
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Year results", "Résultats de l’année"))}</h1><p>${escapeHtml(L("See the outcome, identify the causes, then record what the team learned.", "Observez le résultat, identifiez les causes, puis consignez les apprentissages de l’équipe."))}</p></div><div class="button-row"><strong>${escapeHtml(t("app.year", { year: latest.turn, target: state.rules.targetYear }))}</strong><button class="button primary" data-domain="overview">${escapeHtml(L(`Plan Year ${state.year} →`, `Planifier l’année ${state.year} →`))}</button></div></div>
       <div class="dashboard-grid compact-three">${changes.map((item) => metricCard(item.label, item.value, item.good ? L("Improved or on track", "Amélioration ou objectif atteint") : L("Needs attention", "À surveiller"), item.good ? "good" : "warn")).join("")}</div>
+      ${verdict}
       <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("What drove the result", "Origine du résultat"))}</h2><p>${escapeHtml(L("Largest modelled contributors—not a judgement about the choices.", "Principales contributions modélisées — sans jugement sur les choix."))}</p></div></div><div class="cause-list">${causeRows}</div><h3>${escapeHtml(L("Actions taken", "Actions réalisées"))}</h3><div class="chips">${latest.actions?.length ? latest.actions.map((action) => `<span class="chip">${escapeHtml(actionLabel(action))}</span>`).join("") : `<span class="chip">${escapeHtml(t("results.noAction"))}</span>`}</div>${(latest.departures || []).length ? `<div class="recruitment-results">${latest.departures.map((item) => `<p class="bad-text">${escapeHtml(item.name)}: ${escapeHtml(departureText(item.reason))}</p>`).join("")}</div>` : ""}${latest.recruitment?.length ? `<div class="recruitment-results">${latest.recruitment.map((row) => `<p class="${row.accepted ? "good-text" : "bad-text"}">${escapeHtml(candidateById(row.candidateId)?.name || row.candidateId)}: ${escapeHtml(row.accepted ? t("staff.accepted") : t("staff.refused"))}</p>`).join("")}</div>` : ""}</section>
       ${renderWhyChanged(latest, previous)}
       <section class="card-section reflection-step"><div class="panel-heading"><div><h2>${escapeHtml(L("Team reflection", "Réflexion de l’équipe"))}</h2><p>${ui.reflectionStep + 1}/${fields.length}</p></div></div><label><span>${escapeHtml(t(`results.${field}`))}</span><textarea data-reflection="${field}" data-year="${latest.turn}">${escapeHtml(reflection[field] || "")}</textarea></label><div class="button-row"><button class="button secondary" data-reflection-prev ${ui.reflectionStep === 0 ? "disabled" : ""}>‹ ${escapeHtml(L("Previous", "Précédent"))}</button><button class="button primary" data-save-reflection="${latest.turn}">${escapeHtml(t("results.saveReflection"))}</button><button class="button secondary" data-reflection-next ${ui.reflectionStep === fields.length - 1 ? "disabled" : ""}>${escapeHtml(L("Next", "Suivant"))} ›</button></div></section>
@@ -2712,6 +2843,8 @@
         carbon: report.carbon || null,
         constraintId: report.operational.mainConstraint,
         constraintLabel: blockerText(report.operational.mainConstraint),
+        predictedConstraint: report.prediction?.predicted || null,
+        predictionMatched: report.prediction ? report.prediction.match : null,
         forecastShown: clone(report.forecastShown || null),
         reflection: state.reflections[report.turn] || {},
         financial: clone(report.financial),
@@ -3082,6 +3215,7 @@
 
   document.addEventListener("change", (event) => {
     const input = event.target;
+    if (input.dataset.prediction !== undefined) { ui.predictionDraft = input.value || null; return; }
     if (input.dataset.vacancyRole !== undefined) {
       const allowed = input.value === "vet" ? ["general", "ultrasound", "dentistry", "orthopedics"] : ["preventive", "surgery", "lab", "imaging", "emergency", "inpatient", "pharmacy", "animalCare"];
       ui.vacancy = { ...ui.vacancy, role: input.value, skills: ui.vacancy.skills.filter((skill) => allowed.includes(skill)) };
@@ -3145,7 +3279,7 @@
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   });
 
-  globalThis.ClinicTest = { initialState, hydrate, casesCarried, countedActions, isFreeAction, adjustCash, parseRoute, routeFor, applyRoute, openDrawer, closeDrawer, planRowLabel, planRows, applyAction, simulateYear, simulatePlan, queueAction, removeAction, resolveTurn, undoYear, resetScenario, pendingActions, forecastRecord, calculateCarbon, missingRequirements, requirementList, projectedDemand, actionLabel, goalChecks, getBeginnerSignals, emptyEffects, combineEffects, clone, validAllocations, allocationRemainder, stockServices: STOCK_SERVICES, buildExportPayload, buildPrintableReportHtml, data: D, getState: () => clone(state), renderState: (next) => { state = hydrate(next); ui.selectedServiceId = null; ui.settingsDraft = null; render(); return document.querySelector("#app").innerHTML; }, renderUiForTest: (changes) => { ui = { ...ui, ...changes }; render(); return document.querySelector("#app").innerHTML; } };
+  globalThis.ClinicTest = { initialState, hydrate, casesCarried, countedActions, isFreeAction, predictionOptions, constraintKey, constraintBreakdown, planFrames, adjustCash, parseRoute, routeFor, applyRoute, openDrawer, closeDrawer, planRowLabel, planRows, applyAction, simulateYear, simulatePlan, queueAction, removeAction, resolveTurn, undoYear, resetScenario, pendingActions, forecastRecord, calculateCarbon, missingRequirements, requirementList, projectedDemand, actionLabel, goalChecks, getBeginnerSignals, emptyEffects, combineEffects, clone, validAllocations, allocationRemainder, stockServices: STOCK_SERVICES, buildExportPayload, buildPrintableReportHtml, data: D, getState: () => clone(state), renderState: (next) => { state = hydrate(next); ui.selectedServiceId = null; ui.settingsDraft = null; render(); return document.querySelector("#app").innerHTML; }, renderUiForTest: (changes) => { ui = { ...ui, ...changes }; render(); return document.querySelector("#app").innerHTML; } };
   if (typeof location !== "undefined" && location.hash) applyRoute(parseRoute(location.hash));
   render();
 })();

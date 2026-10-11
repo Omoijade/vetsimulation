@@ -114,3 +114,13 @@ Four fields exist so a completed game can be analysed afterwards without a separ
 Cette simulation bilingue permet à une équipe de gérer une clinique vétérinaire au fil de tours annuels. Elle fonctionne sans serveur, conserve la progression dans le navigateur et propose quatorze services, trois scénarios, des décisions opérationnelles, humaines, financières et commerciales, ainsi qu’un registre de réflexion par année.
 
 Le sélecteur `FR | EN` traduit l’interface, l’aide, les décisions planifiées, l’historique et l’export sans réinitialiser la partie. Chaque membre de l’équipe peut répartir son temps entre un et trois services ; les heures disponibles, utilisées, inutilisées et bloquées restent visibles et se réconcilient avec la capacité des services. L’export propose à la fois un JSON analytique et un rapport détaillé imprimable ou enregistrable en PDF. La durabilité est intégrée comme une dimension de gestion : l’interface affiche l’empreinte opérationnelle modélisée, son intensité par cas, sa source principale et les conséquences financières, humaines et opérationnelles des décisions de transition.
+
+## Vérification
+
+```bash
+node headless-tests.js        # le logiciel : comportements garantis
+node outils/verifier-chiffres.js   # le carnet contre le logiciel : chiffres, libellés, structure
+node outils/verifier-calculs.js    # les calculatrices contre le modèle, et la jouabilité des situations
+```
+
+Lire le **code de sortie**, pas le compte affiché. Les trois doivent rendre 0.
