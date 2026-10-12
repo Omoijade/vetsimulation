@@ -197,6 +197,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .empty { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
 
 .dashboard-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+/* Says which year the cards below belong to, and whether they are a forecast or an outcome. */
+.grille-note { margin: 0 0 -4px; color: var(--muted); font-size: 12px; font-weight: 700; }
 .metric-card { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
 .metric-card > span { display: block; color: var(--muted); font-size: 13px; font-weight: 700; }
 .metric-card > strong { display: block; margin-top: 7px; overflow-wrap: anywhere; font-size: 22px; letter-spacing: -.025em; }
@@ -455,7 +457,13 @@ textarea { min-height: 112px; padding: 10px; resize: vertical; line-height: 1.45
 .allocation-rows article > div:first-child { display: grid; gap: 3px; min-width: 0; }
 .allocation-rows small { color: var(--muted); font-size: 12px; }
 .qualification-warning { color: var(--warn); font-size: 12px; font-weight: 800; }
-.stepper { display: grid; grid-template-columns: 40px 58px 40px 36px; align-items: center; gap: 5px; }
+.stepper { display: grid; grid-template-columns: 40px minmax(74px, auto) 40px 36px; align-items: center; gap: 5px; }
+/* Hours are the only unit on a row, so the figure between the buttons is the field itself. A
+   percentage here could not add up: three rows of a third printed 33% each against a total of 100%. */
+.pas-heures { display: flex; align-items: baseline; justify-content: center; gap: 3px; }
+.pas-heures input { width: 100%; min-width: 0; min-height: 40px; padding: 6px 7px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font-size: 14px; font-weight: 850; text-align: right; }
+.pas-heures input:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
+.pas-heures em { color: var(--muted); font-size: 12px; font-style: normal; font-weight: 700; }
 .stepper button { min-width: 36px; min-height: 40px; border: 1px solid var(--line); border-radius: 8px; color: var(--primary); background: #fff; font-size: 20px; font-weight: 800; }
 .stepper output { text-align: center; font-size: 14px; font-weight: 850; }
 .stepper .remove-allocation { color: var(--bad); }
@@ -497,6 +505,12 @@ textarea { min-height: 112px; padding: 10px; resize: vertical; line-height: 1.45
 
 .allocation-total.idle { background: var(--warn-soft); }
 .allocation-total.overtime { background: var(--bad-soft); }
+.allocation-total .total-heures { color: var(--muted); font-size: 12px; font-weight: 700; }
+/* The bar runs to 130%, the overtime ceiling, so full-time sits at 100/130 of its width. Without
+   the mark a bar three quarters full reads as three quarters booked. */
+.allocation-total.marque-cent .meter { position: relative; overflow: visible; }
+.allocation-total.marque-cent .meter i { border-radius: 99px; }
+.allocation-total.marque-cent .meter::after { content: ""; position: absolute; top: -3px; bottom: -3px; left: 76.92%; width: 2px; border-radius: 2px; background: var(--text); opacity: .45; }
 .hours-flow { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .staff-zone { margin: 0; font-size: 12px; font-weight: 700; }
 .staff-zone.good { color: var(--good); }

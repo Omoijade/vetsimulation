@@ -110,8 +110,13 @@ if (!paceService.includes("Pace: time per appointment") || !paceService.includes
 if (!paceService.includes("Vet time per case") || !paceService.includes("Support time per case")) throw new Error("Service detail must show the vet and support time separately");
 if (/>Time per case</.test(paceService)) throw new Error("The blended time-per-case stat should be gone");
 const overtimeDraft = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: "vet-founder", confirm: null, allocationDrafts: { "vet-founder": [{ serviceId: "consult", share: .9 }, { serviceId: "preventive", share: .3 }] } });
-if (!overtimeDraft.includes("120% assigned") || !overtimeDraft.includes("overtime hours")) throw new Error("Above 100% the meter must say how many overtime hours are allowed");
-if (!/Forecast worked: 0 h/.test(overtimeDraft)) throw new Error("The meter must also say how many overtime hours will actually be worked, not just how many are allowed");
+// Above 100% the caption used to print two numbers of overtime hours in one breath: the hours an
+// over-allocation would buy if every one were worked, and the hours the model forecasts. The larger
+// was the fiction. One number, and it is the forecast.
+const overtimeCaption = (overtimeDraft.match(/<div class="allocation-total[^"]*"><strong>([^<]*)<\/strong>/) || ["", ""])[1];
+if (!overtimeCaption.includes("120% assigned") || !overtimeCaption.includes("maximum 130%")) throw new Error(`Above 100% the caption must give the assignment and the ceiling: "${overtimeCaption}"`);
+if (!/overtime forecast: 0 h/.test(overtimeCaption)) throw new Error(`The caption must give the overtime the model forecasts: "${overtimeCaption}"`);
+if ((overtimeCaption.match(/[\d][\d,. \u00a0\u202f]* h\b/g) || []).length !== 1) throw new Error(`The caption must name one number of overtime hours, not a hypothetical beside a forecast: "${overtimeCaption}"`);
 if (overtimeDraft.includes("Overtime cost")) throw new Error("With no overtime actually worked, the cost row is 0 to 0 and should stay hidden");
 {
   // With a capacity-constrained person the hours really are worked, and then the cost must appear.
@@ -262,12 +267,12 @@ if (ClinicTest.allocationRemainder([{ share: 1 }], 0) !== 0) throw new Error("A 
 // The hours grid used to read the SAVED allocation, so it printed the same four figures whatever
 // the student was dragging — and contradicted the workload line three rows below it. It must move
 // with the draft, and the cells must add up at every share, overtime included.
-function hoursGridCells(share, mutate) {
+function hoursGridCells(share, mutate, who = "support-maya", service = "vaccination") {
   const setup = ClinicTest.initialState("balanced", "en");
-  setup.services.vaccination.active = true;
+  setup.services[service].active = true;
   if (mutate) mutate(setup);
   ClinicTest.renderState(setup);
-  const html = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: "support-maya", confirm: null, allocationDrafts: { "support-maya": [{ serviceId: "vaccination", share }] } });
+  const html = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: who, confirm: null, allocationDrafts: { [who]: [{ serviceId: service, share }] } });
   const grid = html.match(/<div class="mini-hours">([\s\S]*?)<\/div><div class="allocation-total/);
   if (!grid) throw new Error("The allocation drawer must render an hours grid");
   const cells = {};
@@ -277,14 +282,28 @@ function hoursGridCells(share, mutate) {
 const lightDraft = hoursGridCells(.2);
 const heavyDraft = hoursGridCells(1);
 if (lightDraft["Hours used"] === heavyDraft["Hours used"]) throw new Error("The hours grid must follow the draft, not the saved allocation");
-// available + overtime = used + unused + blocked, at every share. The model's own unusedHours falls
-// back to assigned hours above 100%, which is what made these cells stop adding up.
-[[.2, null], [.65, null], [1, null], [1.3, null], [.65, (s) => { s.staff.find((p) => p.id === "support-maya").capacity = 300; }], [1.3, (s) => { s.staff.find((p) => p.id === "support-maya").capacity = 300; }]].forEach(([share, mutate]) => {
-  const c = hoursGridCells(share, mutate);
+// Every paid hour is either worked or unused: used + unused = available + overtime, at every share
+// and whether or not hours are blocked. Blocked hours are a reason some went unworked, never a
+// second deduction — subtracting them twice reported 0 unused hours for a vet with 569 h assigned
+// to a service she is not trained for, while the clinic paid for all 569.
+const petite = (s) => { s.staff.find((p) => p.id === "support-maya").capacity = 300; };
+[[.2, null, "support-maya", "vaccination"], [.65, null, "support-maya", "vaccination"], [1, null, "support-maya", "vaccination"],
+ [1.3, null, "support-maya", "vaccination"], [.65, petite, "support-maya", "vaccination"], [1.3, petite, "support-maya", "vaccination"],
+ [.4, null, "vet-founder", "dentistry"], [1, null, "vet-founder", "dentistry"]].forEach(([share, mutate, who, service]) => {
+  const c = hoursGridCells(share, mutate, who, service);
   const left = c["Available hours"] + (c["Overtime hours"] || 0);
-  const right = c["Hours used"] + c["Unused hours"] + c["Blocked hours"];
-  if (Math.abs(left - right) > 1) throw new Error(`The hours grid must reconcile at ${Math.round(share * 100)}%: ${left} vs ${right}`);
+  const right = c["Hours used"] + c["Unused hours"];
+  // Exactly, not within an hour: these are the figures on screen, and a student adds them up.
+  if (left !== right) throw new Error(`${who}'s hours must reconcile at ${Math.round(share * 100)}% on ${service}: available+overtime ${left} against used+unused ${right}`);
+  if ((c["Overtime hours"] || 0) >= 1 && c["Unused hours"] >= 1) throw new Error(`${who} cannot be paid for idle hours and overtime at once at ${Math.round(share * 100)}%`);
 });
+// The blocked case, stated on its own so it cannot be lost in the loop above: hours assigned to a
+// service someone is not trained for are paid, unworked, and must be counted as unused.
+{
+  const bloque = hoursGridCells(1, null, "vet-founder", "dentistry");
+  if (!(bloque["Blocked by a missing skill"] > 1)) throw new Error("This check needs a person assigned to a service they cannot deliver");
+  if (bloque["Unused hours"] < bloque["Blocked by a missing skill"] - 1) throw new Error(`${bloque["Blocked by a missing skill"]} h are blocked and paid, yet only ${bloque["Unused hours"]} h are reported unused`);
+}
 // The sentence above the grid and the grid itself must never describe different clinics. The
 // meter used to talk about the assignment ("35% unassigned", "fully booked") while the hours told
 // a different story underneath it — three-quarters idle, or every hour blocked.
@@ -310,7 +329,7 @@ const shrink = (setup) => { setup.staff.find((person) => person.id === "support-
 // Overtime the model will actually work has to reach the sentence, not only the allowance.
 {
   const { meter, cells } = meterAndGrid(1.3, shrink);
-  if (!meter.includes(`Forecast worked: ${cells["Overtime hours"]} h`)) throw new Error(`The meter must name the overtime actually worked (${cells["Overtime hours"]} h): "${meter}"`);
+  if (!meter.includes(`overtime forecast: ${cells["Overtime hours"]} h`)) throw new Error(`The meter must name the overtime actually worked (${cells["Overtime hours"]} h): "${meter}"`);
 }
 
 // Worked overtime belongs where the hours are, not only inside a sentence.
@@ -1213,6 +1232,38 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
   if (!totalRow) throw new Error("The service ledger has no total row to check against the clinic");
   if (Math.abs(euros(totalRow[2]) - report.financial.revenue) > 1) throw new Error(`The table's total revenue reads ${euros(totalRow[2])} against the clinic's ${Math.round(report.financial.revenue)}`);
   if (Math.abs(euros(totalRow[3]) - report.financial.variableCosts) > 1) throw new Error(`The table's total variable costs read ${euros(totalRow[3])} against the clinic's ${Math.round(report.financial.variableCosts)}`);
+  // A table a student is asked to add up has to add up. Rounding each cell on its own left the
+  // services at 32 721 € against a total of 32 720 €, on every stock strategy that moves costs.
+  ["basic", "coordinated", "optimized"].forEach((strategie) => {
+    const essai = ClinicTest.initialState("balanced", "en");
+    essai.operations.stockStrategy = strategie;
+    ClinicTest.renderState(essai);
+    ["vaccination", "preventive", "lab"].forEach((id, index) => ClinicTest.queueAction("s" + index, { kind: "toggle-service", targetId: id, value: true }));
+    ClinicTest.resolveTurn();
+    const bilan = ClinicTest.getState().history[0];
+    const page = ClinicTest.renderUiForTest({ drawer: "serviceLedger" });
+    const lus = [...page.matchAll(/<div role="row"[^>]*>([\s\S]*?)<\/div>\s*(?=<div role="row"|<\/div>)/g)]
+      .map((m) => [...m[1].matchAll(/<(?:span|strong)>([^<]*)<\/(?:span|strong)>/g)].map((c) => c[1].trim()));
+    const chiffre = (txt) => Number(String(txt).replace(/[^\d-]/g, "")) || 0;
+    const entete = lus.find((row) => /^Service$/.test(row[0]));
+    const bas = lus.find((row) => /^Total$/.test(row[0]));
+    const corps = lus.filter((row) => row !== entete && row !== bas && row[0]);
+    [[2, "revenue", bilan.financial.revenue], [3, "variable costs", bilan.financial.variableCosts]].forEach(([colonne, quoi, duModele]) => {
+      const somme = corps.reduce((sum, row) => sum + chiffre(row[colonne]), 0);
+      if (somme !== chiffre(bas[colonne])) throw new Error(`On ${strategie} stock the ${quoi} column adds up to ${somme} against a total of ${chiffre(bas[colonne])}`);
+      if (Math.abs(chiffre(bas[colonne]) - duModele) > 1) throw new Error(`On ${strategie} stock the ${quoi} total reads ${chiffre(bas[colonne])} against the clinic's ${Math.round(duModele)}`);
+    });
+    // The stock line is a real difference, not a plug: it disappears when the multiplier is 1.
+    const ligneStock = corps.find((row) => /Stock strategy/.test(row[0]));
+    const multiplicateur = ClinicData.stockStrategies[strategie].multiplier;
+    if (multiplicateur === 1 && ligneStock) throw new Error("With no stock multiplier there is nothing to adjust, and the line must not be there at 0 €");
+    if (multiplicateur !== 1 && !ligneStock) throw new Error(`On ${strategie} stock the whole-clinic adjustment is missing, so the services do not explain the total`);
+    if (ligneStock && Math.sign(chiffre(ligneStock[3])) !== Math.sign(multiplicateur - 1)) throw new Error(`On ${strategie} stock the adjustment runs the wrong way`);
+  });
+  ClinicTest.renderState(led);
+  ["vaccination", "preventive", "lab"].forEach((id, index) => ClinicTest.queueAction("s" + index, { kind: "toggle-service", targetId: id, value: true }));
+  ClinicTest.resolveTurn();
+
   rows.filter((row) => row.vetDuration > 0 && row.supportDuration > 0).forEach((row) => {
     const ligne = cells.find((cellule) => cellule[0] === serviceNameFor(row.id));
     if (!ligne) return;
@@ -1252,9 +1303,11 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
   if (actionsAt < 0 || (framesAt >= 0 && framesAt < actionsAt)) throw new Error("The planned actions are the panel's only control; nothing may come between them and the forecast");
 }
 
-// The hours field must live where the hours are read, not inside the stepper. The stepper is a
-// four-column grid: a fifth child was crushed to 34px around a 56px input, which is how a working
-// control can still be unusable.
+// The hours field is the figure between the two step buttons, because hours are the only unit on a
+// row: a percentage there could not add up — three rows of a third printed 33% each against a total
+// of 100%. What has to be guarded is not where the field sits but whether its grid track can hold
+// it. A fifth child of a four-column grid was once crushed to 34px around a 56px input, which is
+// how a working control can still be unusable.
 {
   const alloc = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("balanced", "en")));
   ClinicTest.renderState(alloc);
@@ -1262,12 +1315,94 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
   const html = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: sup.id });
   const steppers = [...html.matchAll(/<div class="stepper"[\s\S]*?<\/div>/g)].map((m) => m[0]);
   if (!steppers.length) throw new Error("The allocation editor rendered no stepper");
+  const pistes = ((css.match(/\.stepper \{[^}]*grid-template-columns:([^;]*);/) || [])[1] || "").trim().split(/\s+(?![^(]*\))/).filter(Boolean);
+  if (pistes.length !== 4) throw new Error(`The stepper declares ${pistes.length} grid tracks; its children will not land where they are sized`);
+  const pisteDuChamp = pistes[1];
+  const largeurFixe = Number((pisteDuChamp.match(/^(\d+)px$/) || [])[1] || 0);
+  if (largeurFixe && largeurFixe < 70) throw new Error(`The hours field's grid track is ${largeurFixe}px: a four-digit number of hours does not fit`);
   steppers.forEach((st) => {
-    if (/data-allocation-hours/.test(st)) throw new Error("The hours field is back inside the stepper, whose grid has four fixed columns — it will be crushed");
-    const enfants = (st.match(/<(button|output)\b/g) || []).length;
-    if (enfants !== 4) throw new Error(`The stepper must hold exactly its four controls; found ${enfants}`);
+    const enfants = (st.match(/<(button|output|span)\b/g) || []).length;
+    if (enfants !== 4) throw new Error(`The stepper must hold exactly as many children as it declares tracks (4); found ${enfants}`);
+    if (!/<span class="pas-heures"><input[^>]*data-allocation-hours=/.test(st)) throw new Error("The figure between the step buttons must be the hours field itself, so the number a student reads is the number they can change");
   });
+  if ((html.match(/<output>/g) || []).length) throw new Error("A per-row percentage cannot be shown beside hours: rounded row percentages do not sum to the rounded total");
+  // The panel re-renders on every keystroke so the total, the bar and the live impact follow what is
+  // being typed. That only works if the caret survives the re-render — and a type="number" input
+  // does not support selection at all, so focus() dropped the caret to position zero and the next
+  // digit went in at the front: 937 typed at a human pace arrived as 739.
+  const champHeures = (html.match(/<input[^>]*data-allocation-hours="0"[^>]*>/) || [])[0] || "";
+  if (!champHeures) throw new Error("The allocation row has no hours field");
+  if (/type="number"/.test(champHeures)) throw new Error("A number input cannot carry a caret through a re-render, so digits typed into it land at the front");
+  if (!/inputmode="numeric"/.test(champHeures)) throw new Error("The hours field must still raise a numeric keypad on a phone");
   if (!/data-allocation-hours/.test(html)) throw new Error("The hours field disappeared: percentages alone cannot hit a chosen number of hours");
+
+  // --- The two ways to set a share must agree, to the hour ------------------------------------
+  // A step used to re-round the whole share onto the 5% grid, so a typed 90 h became 142 h on one
+  // press of + — a 52 h jump where the button promises 5% of 1 421, which is 71 h.
+  const vetAlloc = ClinicTest.getState().staff.find((person) => person.role === "vet");
+  const DISPO = ClinicTest.availableHoursFor(vetAlloc.id);
+  if (!(DISPO > 1000)) throw new Error(`The founding vet should have her contracted hours; got ${DISPO}`);
+  const heures = (share) => Math.round(share * DISPO);
+  const pas = Math.round(DISPO * .05);
+  const tape90 = ClinicTest.shareFromHours(90, 0, DISPO);
+  if (heures(tape90) !== 90) throw new Error(`Typing 90 hours must set 90 hours; set ${heures(tape90)}`);
+  if (heures(ClinicTest.stepShare(tape90, 5, 0, DISPO)) !== 90 + pas) throw new Error(`A +5% step on a typed 90 h must add ${pas} h and reach ${90 + pas} h; reached ${heures(ClinicTest.stepShare(tape90, 5, 0, DISPO))} h`);
+  if (heures(ClinicTest.stepShare(tape90, -5, 0, DISPO)) !== Math.max(0, 90 - pas)) throw new Error("A −5% step must subtract the same hours a +5% step adds");
+
+  // One ceiling for both controls. The buttons floored theirs onto the 5% grid, so a row holding a
+  // typed share lowered the reachable maximum from 130% to 120% while typing still reached 123.67%.
+  const autresTape = ClinicTest.shareFromHours(90, 0, DISPO);
+  const parBouton = ClinicTest.stepShare(1.2, 5, autresTape, DISPO);
+  const parFrappe = ClinicTest.shareFromHours(DISPO * 2, autresTape, DISPO);
+  if (heures(parBouton) !== heures(parFrappe)) throw new Error(`The step button reaches ${heures(parBouton)} h where typing reaches ${heures(parFrappe)} h: one ceiling, or the two controls disagree`);
+  if (Math.abs(parBouton + autresTape - 1.3) * DISPO > 1) throw new Error(`Both controls must reach the 130% ceiling; reached ${Math.round((parBouton + autresTape) * 100)}%`);
+
+  // Every share either control produces stands for a whole number of hours, which is what makes
+  // the hours on the rows add up to the hours on the total line.
+  for (let h = 0; h <= Math.round(DISPO * 1.3); h += 11) {
+    [0, 90 / DISPO, 1 / 3, .5].forEach((autres) => {
+      [ClinicTest.shareFromHours(h, autres, DISPO), ClinicTest.stepShare(h / DISPO, 5, autres, DISPO), ClinicTest.stepShare(h / DISPO, -5, autres, DISPO)].forEach((part) => {
+        if (Math.abs(part * DISPO - Math.round(part * DISPO)) > 1e-6) throw new Error(`A share of ${part} is ${part * DISPO} hours, which is not a whole hour`);
+      });
+    });
+  }
+
+  // --- The rows add up to the total, on screen -------------------------------------------------
+  {
+    const trois = ClinicTest.initialState("balanced", "en");
+    ["vaccination", "dentistry"].forEach((id) => { trois.services[id].active = true; });
+    ClinicTest.renderState(trois);
+    const tiers = ClinicTest.shareFromHours(Math.round(DISPO / 3), 0, DISPO);
+    const page = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: vetAlloc.id, confirm: null,
+      allocationDrafts: { [vetAlloc.id]: ["consult", "vaccination", "dentistry"].map((serviceId) => ({ serviceId, share: tiers })) } });
+    const lignes = [...page.matchAll(/value="(\d+)" data-allocation-hours="\d+"/g)].map((m) => Number(m[1]));
+    if (lignes.length !== 3) throw new Error(`Expected three allocation rows; found ${lignes.length}`);
+    const ligneTotal = (page.match(/<span class="total-heures">([^<]*)<\/span>/) || ["", ""])[1];
+    const affiche = Number((ligneTotal.match(/^([\d,.\u00a0\u202f ]+) h/) || ["", "0"])[1].replace(/[^\d]/g, ""));
+    const somme = lignes.reduce((a, b) => a + b, 0);
+    if (somme !== affiche) throw new Error(`The rows show ${lignes.join(" + ")} = ${somme} h and the total shows ${affiche} h: the column does not close ("${ligneTotal}")`);
+    // The total line is the sum of the rows by construction, so that alone proves nothing. This is
+    // the check with teeth: the hours on the rows must also be the hours the model is holding. Three
+    // unsnapped thirds give 474 + 474 + 474 = 1 422 against a share worth 1 421.
+    const duModele = Math.round(tiers * 3 * DISPO);
+    if (somme !== duModele) throw new Error(`The rows add up to ${somme} h while the shares behind them are worth ${duModele} h`);
+    ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+  }
+
+  // --- One tone vocabulary, and nothing idle painted green ------------------------------------
+  if (ClinicTest.workloadTone(0) === "good") throw new Error("A person who worked none of their paid hours must not read as healthy");
+  if (ClinicTest.workloadTone(1.3) !== "bad" || ClinicTest.workloadTone(1) !== "good") throw new Error("Overtime is a problem and full use is not");
+  if (ClinicTest.assignedTone(1) !== "good" || ClinicTest.assignedTone(1.3) !== "bad" || ClinicTest.assignedTone(.5) !== "warn") throw new Error("The assignment tone must read 100% as settled, over as overtime and under as unfinished");
+  // The two bars draw different quantities, so they must not both claim a state the other denies.
+  {
+    const equipe = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "team" });
+    const cartes = [...equipe.matchAll(/<div class="meter" aria-hidden="true"><i class="([a-z]*)" style="width:([\d.]+)%/g)].map((m) => ({ tone: m[1], width: Number(m[2]) }));
+    if (!cartes.length) throw new Error("The team page drew no workload bars");
+    const maya = ClinicTest.getState().staff.find((person) => person.role === "support");
+    const ligne = ClinicTest.simulatePlan([]).operational.staffRows.find((row) => row.id === maya.id);
+    if (!(ligne.workload < .01)) throw new Error("This guard assumes the support worker starts on closed services");
+    if (cartes.some((carte) => carte.width < 1 && carte.tone === "good")) throw new Error("An empty bar is painted as a good outcome");
+  }
 
   // A field you can type into and then cannot validate is worse than no field. validAllocations
   // only accepted multiples of 5% — an interface assumption from when buttons were the only way
@@ -1295,6 +1430,165 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
     if (ouvert === ferme) throw new Error(`ui.${cle} changes nothing: the panel will snap shut on the next re-render`);
     if (!new RegExp(`data-pli="${cle}"[^>]*\\bopen\\b`).test(ouvert)) throw new Error(`ui.${cle} does not re-render the block open`);
   });
+}
+
+// Unused hours are what the clinic pays for and nobody works: available minus used, and nothing
+// else. Two wrong readings have shipped. The first counted them against the larger of available and
+// assigned, so allocating someone to 130% made the clinic's idle hours GO UP — 1 945 h reported
+// where 1 518 were real. The second subtracted blocked hours a second time, so a vet with 569 h on
+// a service she is not trained for reported 0 unused hours while the clinic paid for all 569.
+// Both were once "checked" by an assertion that compared the formula to itself. This one states
+// what the figure means and leaves the arithmetic to the model.
+{
+  const over = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("balanced", "en")));
+  ClinicTest.renderState(over);
+  ClinicTest.queueAction("s", { kind: "toggle-service", targetId: "vaccination", value: true });
+  const sup = ClinicTest.getState().staff.find((p) => p.role === "support");
+  const vetBloque = ClinicTest.getState().staff.find((p) => p.role === "vet");
+  let teste = 0;
+  let vuBloque = 0;
+  const cas = [
+    ...[0.5, 1, 1.15, 1.3].map((share) => ({ who: sup.id, allocations: [{ serviceId: "vaccination", share }], nom: `${sup.id} at ${share * 100}%` })),
+    // and a case with blocked hours, which none of the shares above produce
+    { who: vetBloque.id, allocations: [{ serviceId: "consult", share: .6 }, { serviceId: "dentistry", share: .4 }], nom: "a vet assigned to a service she cannot deliver" }
+  ];
+  cas.forEach(({ who, allocations, nom }) => {
+    ClinicTest.queueAction("a", { kind: "staff-allocation", targetId: who, value: { allocations } });
+    const forecast = ClinicTest.simulatePlan(ClinicTest.pendingActions());
+    forecast.operational.staffRows.forEach((row) => {
+      teste += 1;
+      if (row.blockedHours > 1) vuBloque += 1;
+      if (row.unusedHours > row.availableHours + 1) throw new Error(`With ${nom}, ${row.id} reports ${Math.round(row.unusedHours)} unused hours out of ${Math.round(row.availableHours)} available — an hour the clinic does not have cannot be idle`);
+      // Every paid hour is either worked or not worked. Nothing else may be taken off.
+      const gauche = row.availableHours + row.overtimeHours;
+      const droite = row.usedHours + row.unusedHours;
+      if (Math.abs(gauche - droite) > 1) throw new Error(`With ${nom}, ${row.id}'s hours do not account for themselves: available+overtime ${Math.round(gauche)} against used+unused ${Math.round(droite)}`);
+      if (row.overtimeHours > 1 && row.unusedHours > 1) throw new Error(`With ${nom}, ${row.id} is paid for ${Math.round(row.unusedHours)} idle hours and ${Math.round(row.overtimeHours)} of overtime at the same time`);
+      // Hours blocked by a missing skill are paid and produce nothing, so they are unused hours.
+      if (row.overtimeHours < 1 && row.unusedHours < row.blockedHours - 1) throw new Error(`With ${nom}, ${row.id} has ${Math.round(row.blockedHours)} h blocked and paid but only ${Math.round(row.unusedHours)} h reported unused`);
+    });
+  });
+  if (teste < 10) throw new Error(`Only ${teste} staff rows were checked; the loop is not exercising the cases`);
+  if (!vuBloque) throw new Error("No case produced blocked hours, so the double-deduction defect would go unseen");
+
+  // One number on three surfaces. The model, the team page card and the allocation grid each used
+  // to work it out for themselves, and printed different figures for the same person.
+  // Blocked hours have to be in play, or a card that deducts them twice agrees with the model by
+  // accident: the two readings only differ when something is blocked.
+  ClinicTest.queueAction("d", { kind: "toggle-service", targetId: "dentistry", value: true });
+  ClinicTest.queueAction("a", { kind: "staff-allocation", targetId: vetBloque.id, value: { allocations: [{ serviceId: "consult", share: .6 }, { serviceId: "dentistry", share: .4 }] } });
+  const forecast = ClinicTest.simulatePlan(ClinicTest.pendingActions());
+  if (!(forecast.operational.staffRows.some((row) => row.blockedHours > 1))) throw new Error("This check needs blocked hours to tell the two readings apart");
+  const page = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "team" });
+  const carte = page.match(/Unused team hours<\/span><strong>([^<]*)</);
+  if (!carte) throw new Error("The team page no longer shows unused team hours");
+  const affiche = Number(carte[1].replace(/[^\d-]/g, ""));
+  const somme = Math.round(forecast.operational.staffRows.reduce((sum, row) => sum + row.unusedHours, 0));
+  if (Math.abs(affiche - somme) > 1) throw new Error(`The team card shows ${affiche} unused hours against the model's ${somme}`);
+  // The grid draws the draft, so the figure to compare it against is the model run on that same
+  // draft — not on the saved allocation, which would agree by luck whenever hours are not the
+  // binding constraint. 30% differs from the saved 100%, so this exercises the draft path.
+  [.3, 1, 1.3].forEach((share) => {
+    const cellule = hoursGridCells(share, null, sup.id, "vaccination");
+    const applique = ClinicTest.initialState("balanced", "en");
+    applique.services.vaccination.active = true;
+    applique.staff.find((person) => person.id === sup.id).allocations = [{ serviceId: "vaccination", share }];
+    const ligne = ClinicTest.simulateYear(ClinicTest.clone(applique), applique, ClinicTest.emptyEffects(), []).operational.staffRows.find((row) => row.id === sup.id);
+    if (Math.abs(cellule["Unused hours"] - Math.round(ligne.unusedHours)) > 1) throw new Error(`At ${Math.round(share * 100)}% the allocation grid shows ${cellule["Unused hours"]} unused hours against the model's ${Math.round(ligne.unusedHours)}`);
+    if (Math.abs(cellule["Hours used"] - Math.round(ligne.usedHours)) > 1) throw new Error(`At ${Math.round(share * 100)}% the allocation grid shows ${cellule["Hours used"]} hours used against the model's ${Math.round(ligne.usedHours)}`);
+  });
+}
+
+// One quantity, one value, on every page that shows it. Four pairs disagreed: the overview banded
+// the net result to the game's forecast precision while Business printed it exact, the team page
+// printed the workload exact against the overview's band, and the same for cases served on Care and
+// the carbon footprint on Sustainability. Under ranges precision a student reading two pages read
+// two different clinics. Checked on the rendered strings, because that is what they read.
+{
+  const paires = [
+    ["Net result", ["overview", "business"]],
+    ["Team workload", ["overview", "team"]],
+    ["Carbon footprint", ["overview", "sustainability"]],
+    ["Cases served", ["overview", "care"]]
+  ];
+  const valeur = (html, label) => {
+    const m = html.match(new RegExp("<span>" + label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "<\\/span><strong>([^<]*)<"));
+    return m ? m[1] : null;
+  };
+  ["exact", "ranges"].forEach((precision) => {
+    const base = ClinicTest.initialState("balanced", "en");
+    base.setup.forecastPrecision = precision;
+    const pages = {};
+    ["overview", "care", "team", "business", "sustainability"].forEach((domain) => { pages[domain] = ClinicTest.renderState({ ...base, domain }); });
+    paires.forEach(([label, domaines]) => {
+      const lus = domaines.map((domain) => valeur(pages[domain], label));
+      if (lus.some((item) => item === null)) throw new Error(`"${label}" is missing from ${domaines[lus.findIndex((item) => item === null)]} under ${precision} precision`);
+      // The overview prints cases served over the requests; compare the figure, not the ratio.
+      const figures = lus.map((item) => item.split(" / ")[0]);
+      if (new Set(figures).size !== 1) throw new Error(`Under ${precision} precision "${label}" reads ${domaines.map((domain, i) => `${domain} ${figures[i]}`).join(" and ")}: one quantity cannot have two values`);
+    });
+    // and every grid of forecast cards says which year it belongs to and that it is a forecast
+    ["overview", "care", "team", "business", "sustainability"].forEach((domain) => {
+      const note = (pages[domain].match(/<p class="grille-note">([^<]*)</) || [])[1] || "";
+      if (!/Forecast for Year \d/.test(note)) throw new Error(`The ${domain} cards do not say they are a forecast for a named year: "${note}"`);
+    });
+  });
+  // The same label on the results page belongs to the year already played, and must say so.
+  {
+    const joue = ClinicTest.initialState("balanced", "en");
+    ClinicTest.renderState(joue);
+    ClinicTest.resolveTurn();
+    const resultats = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "results" });
+    const note = (resultats.match(/<p class="grille-note">([^<]*)</) || [])[1] || "";
+    if (!/Year \d, as played/.test(note)) throw new Error(`The results cards must name the year they report and say it is played, not forecast: "${note}"`);
+    if (/Forecast for Year/.test(note)) throw new Error("The results page is reporting a forecast");
+  }
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// "Other duties" took hours out of a support worker's day and nothing said what took them. The note
+// that names them had no guard and was wrong: it listed the clinic's reservations against one
+// person's share, so with two support workers it announced 30 h of other duties and then named a
+// single 60 h cause, and it left out the hours reserved by decisions already in the plan. The
+// breakdown now comes from the model, where the reservation is made.
+{
+  const combinaisons = [
+    ["coordinated stock", (clinic) => { clinic.operations.stockStrategy = "coordinated"; }],
+    ["optimized stock and internal monitoring", (clinic) => { clinic.operations.stockStrategy = "optimized"; clinic.marketing.monitoring = "internal"; }],
+    ["two support workers", (clinic) => { clinic.operations.stockStrategy = "coordinated"; const un = clinic.staff.find((p) => p.role === "support"); clinic.staff.push({ ...ClinicTest.clone(un), id: "support-two", name: "Second", hiredYear: 0 }); }],
+    ["two support workers, four reservations", (clinic) => { clinic.operations.stockStrategy = "optimized"; clinic.marketing.geomarketing = "internal"; clinic.sustainability.accessPlan = true; const un = clinic.staff.find((p) => p.role === "support"); clinic.staff.push({ ...ClinicTest.clone(un), id: "support-two", name: "Second", hiredYear: 0 }); }]
+  ];
+  combinaisons.forEach(([nom, mutate]) => {
+    const clinic = ClinicTest.initialState("balanced", "en");
+    mutate(clinic);
+    ClinicTest.renderState(clinic);
+    const sup = ClinicTest.getState().staff.find((person) => person.role === "support");
+    const ligne = ClinicTest.simulatePlan([]).operational.staffRows.find((row) => row.id === sup.id);
+    const parts = ligne.nonClinicalParts || [];
+    const sommeParts = parts.reduce((sum, part) => sum + part.hours, 0);
+    if (Math.abs(sommeParts - ligne.nonClinicalHours) > .01) throw new Error(`With ${nom}, the named reservations come to ${Math.round(sommeParts)} h against ${Math.round(ligne.nonClinicalHours)} h of other duties`);
+    const html = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: sup.id, confirm: null });
+    const note = (html.match(/<p class="reservation-note">([\s\S]*?)<\/p>/) || [])[1];
+    if (!note) throw new Error(`With ${nom}, the hours taken by other duties are not named anywhere`);
+    const annonce = Number((note.match(/The ([\d,.\u00a0\u202f ]+) h of other duties/) || ["", "0"])[1].replace(/[^\d]/g, ""));
+    const items = [...note.matchAll(/>([^<·]+) · ([\d,.\u00a0\u202f ]+) h ›</g)].map((m) => Number(m[2].replace(/[^\d]/g, "")));
+    if (!items.length) throw new Error(`With ${nom}, the note names no cause`);
+    const somme = items.reduce((sum, value) => sum + value, 0);
+    if (Math.abs(annonce - somme) > 1) throw new Error(`With ${nom}, the note announces ${annonce} h of other duties and names causes adding up to ${somme} h`);
+  });
+  // Hours reserved by a decision already in the plan belong in the breakdown, and used not to be.
+  {
+    const clinic = ClinicTest.initialState("balanced", "en");
+    ClinicTest.renderState(clinic);
+    const avant = ClinicTest.simulatePlan([]).operational.staffRows.find((row) => row.role === "support");
+    const effets = ClinicTest.emptyEffects();
+    effets.supportReserved = 150;
+    const apres = ClinicTest.simulateYear(ClinicTest.clone(clinic), clinic, effets, []).operational.staffRows.find((row) => row.role === "support");
+    if (!(apres.nonClinicalHours > avant.nonClinicalHours + 100)) throw new Error("A plan that reserves support hours must show up in that person's other duties");
+    const somme = (apres.nonClinicalParts || []).reduce((sum, part) => sum + part.hours, 0);
+    if (Math.abs(somme - apres.nonClinicalHours) > .01) throw new Error(`Hours reserved by the plan are missing from the breakdown: ${Math.round(somme)} named against ${Math.round(apres.nonClinicalHours)} taken`);
+  }
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
 }
 
 require("./tests.js");

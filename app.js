@@ -101,7 +101,34 @@
     return allocations.reduce((sum, row) => sum + Number(row.share || 0), 0);
   }
 
-  // Unassigned paid share left for one row: 5% steps cannot land on an exact 100% of a person's
+  // One ceiling for every control that writes a share. The step buttons used to floor it to the
+  // 5% grid: a row holding a typed share (90 h of 1 421 is 6.33%) dropped the reachable maximum
+  // from 130% to 120% while the hours field still allowed 123.67%.
+  function allocationCeiling(others) {
+    return Math.max(0, MAX_ALLOCATION - others);
+  }
+
+  // Every share a student sets stands for a whole number of hours, so the hours on the rows add up
+  // to the hours on the total. Without this, two rows of 33.33% each display 474 h beside a total
+  // of 947 h, and the column does not close.
+  function snapShareToHours(share, availableHours) {
+    return availableHours > 0 ? Math.max(0, Math.round(share * availableHours)) / availableHours : 0;
+  }
+
+  // The two ways a student sets a share, with the same ceiling and the same hour quantum, so a
+  // typed figure and a stepped figure cannot drift apart. A step adds its own size: re-rounding the
+  // base to the 5% grid turned a typed 90 h into 142 h on one press of +.
+  function stepShare(share, deltaPercent, others, availableHours) {
+    return snapShareToHours(clamp(Number(share || 0) + Number(deltaPercent || 0) / 100, 0, allocationCeiling(others)), availableHours);
+  }
+
+  function shareFromHours(hours, others, availableHours) {
+    if (!(availableHours > 0)) return 0;
+    const wanted = Math.max(0, Math.round(Number(hours) || 0)) / availableHours;
+    return snapShareToHours(clamp(wanted, 0, allocationCeiling(others)), availableHours);
+  }
+
+  // Unassigned paid share left for one row: steps cannot land on an exact 100% of a person's
   // hours, so this returns the precise remainder. It targets 100%, never the overtime ceiling.
   function allocationRemainder(allocations, index) {
     const others = allocationTotal(allocations) - (allocations[index]?.share || 0);
@@ -392,9 +419,12 @@
     render();
   }
 
-  function rememberDrawer(selector = null) {
+  // `champ` carries a text field across the re-render: what was typed and where the caret was. A
+  // field rewritten from state without it loses the caret to position zero, and the next digit goes
+  // in at the front — 937 typed one key at a time arrived as 739.
+  function rememberDrawer(selector = null, champ = null) {
     const body = document.querySelector(".drawer-body");
-    ui.restore = { scrollTop: body?.scrollTop || 0, selector };
+    ui.restore = { scrollTop: body?.scrollTop || 0, selector, champ };
   }
 
   function removeAction(key) {
@@ -669,7 +699,20 @@
     const geo = D.marketingStrategies.geomarketing[clinic.marketing.geomarketing];
     const waste = D.sustainability.wasteStrategies[clinic.sustainability.wasteStrategy];
     const access = clinic.sustainability.accessPlan ? D.sustainability.interventions.accessPlan : { supportHours: 0 };
-    const reservedSupport = stock.supportHours + monitoring.supportHours + geo.supportHours + waste.supportHours + access.supportHours + effects.supportReserved;
+    // Named where they are taken, so the drawer that shows a person's "other duties" can say what
+    // took them instead of working the list out again. The render layer's own copy listed the
+    // clinic-wide figures against one person's share — with two support workers it announced 30 h
+    // of other duties and then named a single 60 h cause — and left out the hours reserved by
+    // decisions already in the plan.
+    const reservationParts = [
+      { id: "stock", hours: stock.supportHours || 0 },
+      { id: "monitoring", hours: monitoring.supportHours || 0 },
+      { id: "geomarketing", hours: geo.supportHours || 0 },
+      { id: "waste", hours: waste.supportHours || 0 },
+      { id: "accessPlan", hours: access.supportHours || 0 },
+      { id: "planned", hours: effects.supportReserved || 0 }
+    ].filter((part) => part.hours > 0);
+    const reservedSupport = reservationParts.reduce((sum, part) => sum + part.hours, 0);
     const rawSupport = preliminary.filter((row) => row.person.role === "support").reduce((sum, row) => sum + row.beforeDuties, 0);
     const supportScale = rawSupport ? clamp((rawSupport - reservedSupport) / rawSupport, 0, 1) : 0;
     let totalVet = 0;
@@ -677,6 +720,11 @@
     const staffRows = preliminary.map((row) => {
       const { person } = row;
       const nonClinicalHours = person.role === "support" ? row.beforeDuties * (1 - supportScale) : 0;
+      // This person's share of each reservation. The parts sum to their other duties by
+      // construction, whatever the number of support workers and whether or not the reservation
+      // exceeds the hours the clinic has.
+      const partFactor = reservedSupport > 0 ? nonClinicalHours / reservedSupport : 0;
+      const nonClinicalParts = partFactor > 0 ? reservationParts.map((part) => ({ id: part.id, hours: part.hours * partFactor })) : [];
       const availableHours = Math.max(0, row.beforeDuties - nonClinicalHours);
       const allocations = normalizeAllocations(person);
       const assignedShare = allocationTotal(allocations);
@@ -701,14 +749,11 @@
         onboardingHours: row.onboardingHours,
         trainingHours: row.trainingHours,
         nonClinicalHours,
+        nonClinicalParts,
         availableHours,
-        usable: availableHours,
-        salaryMultiplier: salaryCapacityMultiplier(person),
         hourlyRate: person.salary / Math.max(1, row.contractedHours),
         assignedShare,
         assignedHours: availableHours * assignedShare,
-        idleHours: availableHours * Math.max(0, 1 - assignedShare),
-        overtimeAssignedHours: availableHours * Math.max(0, assignedShare - 1),
         assignments,
         blockedHours: assignments.reduce((sum, assignment) => sum + assignment.blockedHours, 0),
         usedHours: 0,
@@ -1071,14 +1116,17 @@
         const pool = staffRow.role === "vet" ? resources.startVetByService[assignment.serviceId] : resources.startSupportByService[assignment.serviceId];
         const serviceUsed = (staffRow.role === "vet" ? result?.vetUsed : result?.supportUsed) || 0;
         assignment.usedHours = assignment.qualified && pool > 0 ? serviceUsed * assignment.effectiveHours / pool : 0;
-        assignment.unusedHours = Math.max(0, assignment.assignedHours - assignment.blockedHours - assignment.usedHours);
         assignment.blocker = assignment.qualified ? null : { type: staffRow.role === "vet" ? "missingVetSkill" : "missingSupportSkill", id: (staffRow.role === "vet" ? service.vetSkills : service.supportSkills).find((skill) => !clinic.staff.find((person) => person.id === staffRow.id)?.skills.includes(skill)) };
       });
       staffRow.usedHours = staffRow.assignments.reduce((sum, assignment) => sum + assignment.usedHours, 0);
       // Overtime is paid only for hours actually worked beyond available time.
       staffRow.overtimeHours = Math.max(0, staffRow.usedHours - staffRow.availableHours);
       staffRow.overtimePay = staffRow.overtimeHours * staffRow.hourlyRate * OVERTIME_PREMIUM;
-      staffRow.unusedHours = Math.max(0, Math.max(staffRow.availableHours, staffRow.assignedHours) - staffRow.usedHours - staffRow.blockedHours);
+      // Hours the clinic pays for and nobody works. There is one definition and this is it: five
+      // others existed, agreeing only when nothing was blocked, and one of them counted an
+      // over-allocation as free time — 1 945 idle hours reported where 1 518 were real. Blocked
+      // hours are a reason some of these went unworked, never a second deduction from them.
+      staffRow.unusedHours = Math.max(0, staffRow.availableHours - staffRow.usedHours);
       staffRow.workload = staffRow.availableHours ? staffRow.usedHours / staffRow.availableHours : 0;
     });
     const overtimeHours = resources.staffRows.reduce((sum, row) => sum + row.overtimeHours, 0);
@@ -1611,6 +1659,18 @@
     return number(value);
   }
 
+  // Five pages show cards for the year that has not been played, and the results page shows cards
+  // for the year that has. "Résultat net" was the label on both, so one name answered to two
+  // numbers and nothing on screen said which was which. In exact precision — the default — not even
+  // the word "forecast" appeared.
+  function forecastGridNote() {
+    return `<p class="grille-note">${escapeHtml(L(`Forecast for Year ${state.year} — the plan as it stands, not a result`, `Prévision pour l’année ${state.year} — le plan en l’état, pas un résultat`))}</p>`;
+  }
+
+  function resolvedGridNote(turn) {
+    return `<p class="grille-note">${escapeHtml(L(`Year ${turn}, as played`, `Année ${turn}, telle que jouée`))}</p>`;
+  }
+
   function metricCard(label, value, note = "", tone = "", lien = null) {
     return `<article class="metric-card ${tone}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>${note ? `<em>${escapeHtml(note)}</em>` : ""}${lien ? `<button class="text-button" data-open-drawer="${lien.drawer}">${escapeHtml(lien.label)} ›</button>` : ""}</article>`;
   }
@@ -1849,28 +1909,28 @@
         label: L("The accounts", "Les comptes"),
         question: L("Does the clinic end the year better off?", "La clinique finit-elle l’année mieux lotie ?"),
         delta: forecast.financial.netResult - baseline.financial.netResult,
-        reading: (delta) => L(`Net result ${money(baseline.financial.netResult)} → ${money(forecast.financial.netResult)}`, `Résultat net ${money(baseline.financial.netResult)} → ${money(forecast.financial.netResult)}`)
+        reading: () => L(`Net result ${forecastText(baseline.financial.netResult, "money")} → ${forecastText(forecast.financial.netResult, "money")}`, `Résultat net ${forecastText(baseline.financial.netResult, "money")} → ${forecastText(forecast.financial.netResult, "money")}`)
       },
       {
         id: "access",
         label: L("Access to care", "L’accès aux soins"),
         question: L("Do more animals get treated?", "Soigne-t-on davantage d’animaux ?"),
         delta: forecast.operational.totalHonored - baseline.operational.totalHonored,
-        reading: () => L(`${number(forecast.operational.totalHonored)} cases served · ${number(unmetPlan)} requests unanswered, against ${number(unmetBase)}`, `${number(forecast.operational.totalHonored)} cas traités · ${number(unmetPlan)} demandes sans réponse, contre ${number(unmetBase)}`)
+        reading: () => L(`${forecastText(forecast.operational.totalHonored, "number")} cases served · ${forecastText(unmetPlan, "number")} requests unanswered, against ${forecastText(unmetBase, "number")}`, `${forecastText(forecast.operational.totalHonored, "number")} cas traités · ${forecastText(unmetPlan, "number")} demandes sans réponse, contre ${forecastText(unmetBase, "number")}`)
       },
       {
         id: "team",
         label: L("The people who do the work", "Les gens qui font le travail"),
         question: L("Is the team able to sustain it?", "L’équipe peut-elle tenir ?"),
         delta: forecast.social.after.staffClimate - baseline.social.after.staffClimate,
-        reading: () => L(`Staff climate ${number(baseline.social.after.staffClimate)} → ${number(forecast.social.after.staffClimate)}${forecast.financial.overtimeHours > 0 ? ` · ${number(forecast.financial.overtimeHours)} overtime hours` : ""}`, `Climat de l’équipe ${number(baseline.social.after.staffClimate)} → ${number(forecast.social.after.staffClimate)}${forecast.financial.overtimeHours > 0 ? ` · ${number(forecast.financial.overtimeHours)} h supplémentaires` : ""}`)
+        reading: () => L(`Staff climate ${forecastText(baseline.social.after.staffClimate, "number")} → ${forecastText(forecast.social.after.staffClimate, "number")}${forecast.financial.overtimeHours > 0 ? ` · ${forecastText(forecast.financial.overtimeHours, "number")} overtime hours` : ""}`, `Climat de l’équipe ${forecastText(baseline.social.after.staffClimate, "number")} → ${forecastText(forecast.social.after.staffClimate, "number")}${forecast.financial.overtimeHours > 0 ? ` · ${forecastText(forecast.financial.overtimeHours, "number")} h supplémentaires` : ""}`)
       },
       {
         id: "carbon",
         label: L("What it leaves behind", "Ce que cela laisse derrière"),
         question: L("What does the year cost the climate?", "Que coûte l’année au climat ?"),
         delta: baseline.carbon.total - forecast.carbon.total,
-        reading: () => L(`Carbon ${tonnes(baseline.carbon.total)} → ${tonnes(forecast.carbon.total)}`, `Carbone ${tonnes(baseline.carbon.total)} → ${tonnes(forecast.carbon.total)}`)
+        reading: () => L(`Carbon ${forecastText(baseline.carbon.total, "carbon")} → ${forecastText(forecast.carbon.total, "carbon")}`, `Carbone ${forecastText(baseline.carbon.total, "carbon")} → ${forecastText(forecast.carbon.total, "carbon")}`)
       }
     ];
     return frames.map((frame) => {
@@ -2198,11 +2258,12 @@
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Clinic overview", "Vue d’ensemble de la clinique"))}</h1><p>${escapeHtml(L("See the situation, choose one area, and check the consequences before acting.", "Observez la situation, choisissez un domaine et vérifiez les conséquences avant d’agir."))}</p></div></div>
       ${renderStartBanner()}
       ${showGuide ? `<section class="beginner-guide" aria-labelledby="beginner-guide-title"><div><span>${escapeHtml(L("Year 1 guide", "Guide de l’année 1"))}</span><h2 id="beginner-guide-title">${escapeHtml(L("Your first turn", "Votre premier tour"))}</h2></div><ol><li><strong>${escapeHtml(L("Read the clinic situation", "Comprenez la situation"))}</strong><span>${escapeHtml(L("Start with the signals below.", "Commencez par les signaux ci-dessous."))}</span></li><li><strong>${escapeHtml(L("Choose one priority", "Choisissez une priorité"))}</strong><span>${escapeHtml(L("Open only the area you want to improve.", "Ouvrez uniquement le domaine à améliorer."))}</span></li><li><strong>${escapeHtml(L("Compare before confirming", "Comparez avant de confirmer"))}</strong><span>${escapeHtml(L("Nothing is spent until you add a decision to the plan.", "Rien n’est dépensé avant l’ajout d’une décision au plan."))}</span></li></ol><button class="button secondary" data-dismiss-guide>${escapeHtml(L("Got it", "J’ai compris"))}</button></section>` : ""}
+      ${forecastGridNote()}
       <div class="dashboard-grid compact-three">
-        ${metricCard(L("Net result", "Résultat net"), forecastText(forecast.financial.netResult, "money"), forecastPrecision() === "exact" ? pct(forecast.financial.margin) : L("Forecast", "Prévision"), hideOutcomes ? "" : forecast.financial.netResult >= 0 ? "good" : "bad")}
-        ${metricCard(L("Cases served", "Cas traités"), hideOutcomes ? forecastText(0, "number") : `${forecastText(forecast.operational.totalHonored, "number")} / ${number(forecast.operational.totalDemand)}`, forecastPrecision() === "exact" ? `${pct(forecast.operational.honoredRate)} ${L("of open requests", "des demandes ouvertes")}${unmetRequests(forecast) ? ` · ${number(unmetRequests(forecast))} ${L("not offered", "non proposées")}` : ""}` : "", hideOutcomes ? "" : forecast.operational.honoredRate >= .82 ? "good" : "warn")}
+        ${metricCard(L("Net result", "Résultat net"), forecastText(forecast.financial.netResult, "money"), forecastText(forecast.financial.margin, "percent"), hideOutcomes ? "" : forecast.financial.netResult >= 0 ? "good" : "bad")}
+        ${metricCard(L("Cases served", "Cas traités"), hideOutcomes ? forecastText(0, "number") : forecastPrecision() === "exact" ? `${number(forecast.operational.totalHonored)} / ${number(forecast.operational.totalDemand)}` : forecastText(forecast.operational.totalHonored, "number"), forecastPrecision() === "exact" ? `${pct(forecast.operational.honoredRate)} ${L("of open requests", "des demandes ouvertes")}${unmetRequests(forecast) ? ` · ${number(unmetRequests(forecast))} ${L("not offered", "non proposées")}` : ""}` : "", hideOutcomes ? "" : forecast.operational.honoredRate >= .82 ? "good" : "warn")}
         ${metricCard(L("Team workload", "Charge de l’équipe"), forecastText(forecast.operational.staffUse, "percent"), "", forecast.operational.staffUse > .94 ? "bad" : "")}
-        ${metricCard(L("Carbon footprint", "Empreinte carbone"), tonnes(forecast.carbon.total), `${carbonDelta > 0 ? "+" : ""}${tonnes(carbonDelta)} ${L("vs start", "par rapport au départ")}`, carbonDelta <= 0 ? "good" : "warn")}
+        ${metricCard(L("Carbon footprint", "Empreinte carbone"), forecastText(forecast.carbon.total, "carbon"), `${forecastText(carbonDelta, "carbon", { signed: true })} ${L("vs start", "par rapport au départ")}`, carbonDelta <= 0 ? "good" : "warn")}
         ${metricCard(L("Staff climate", "Climat de l’équipe"), forecastText(forecast.social.after.staffClimate, "number"), "", hideOutcomes ? "" : forecast.social.after.staffClimate < 45 ? "bad" : forecast.social.after.staffClimate >= 60 ? "good" : "warn", { drawer: "relations", label: L("Act on this", "Agir là-dessus") })}
         ${metricCard(L("Client trust", "Confiance des clients"), forecastText(forecast.social.after.clientTrust, "number"), "", hideOutcomes ? "" : forecast.social.after.clientTrust < 45 ? "warn" : forecast.social.after.clientTrust >= 60 ? "good" : "", { drawer: "relations", label: L("Act on this", "Agir là-dessus") })}
       </div>
@@ -2222,7 +2283,8 @@
     const roomCount = Object.values(planned.rooms).reduce((sum, qty) => sum + qty, 0);
     const equipmentCount = Object.values(planned.equipment).reduce((sum, qty) => sum + qty.owned + qty.leased, 0);
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Care & facilities", "Soins et installations"))}</h1></div></div>
-      <div class="dashboard-grid compact-four">${metricCard(L("Active services", "Services actifs"), number(active.length), `${forecast.operational.readyServices} ${L("ready and staffed", "prêts et dotés en personnel")}`)}${metricCard(L("Cases served", "Cas traités"), number(forecast.operational.totalHonored), `${pct(forecast.operational.honoredRate)} ${L("of open requests", "des demandes ouvertes")}${unmetRequests(forecast) ? ` · ${number(unmetRequests(forecast))} ${L("not offered", "non proposées")}` : ""}`)}${metricCard(L("Rooms", "Salles"), number(roomCount))}${metricCard(L("Clinical equipment", "Équipement clinique"), number(equipmentCount))}</div>
+      ${forecastGridNote()}
+      <div class="dashboard-grid compact-four">${metricCard(L("Active services", "Services actifs"), number(active.length), `${forecast.operational.readyServices} ${L("ready and staffed", "prêts et dotés en personnel")}`)}${metricCard(L("Cases served", "Cas traités"), forecastText(forecast.operational.totalHonored, "number"), `${forecastText(forecast.operational.honoredRate, "percent")} ${L("of open requests", "des demandes ouvertes")}${unmetRequests(forecast) ? ` · ${number(unmetRequests(forecast))} ${L("not offered", "non proposées")}` : ""}`)}${metricCard(L("Rooms", "Salles"), number(roomCount))}${metricCard(L("Clinical equipment", "Équipement clinique"), number(equipmentCount))}</div>
       <section class="card-section split-actions"><article><h2>${escapeHtml(L("Rooms", "Salles"))}</h2><button class="button primary" data-open-drawer="rooms">${escapeHtml(L("Manage rooms", "Gérer les salles"))}</button></article><article><h2>${escapeHtml(L("Equipment", "Équipement"))}</h2><button class="button primary" data-open-drawer="equipment">${escapeHtml(L("Manage equipment", "Gérer l’équipement"))}</button></article></section><section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Current services", "Services actuels"))}</h2></div><span class="panel-links"><button class="text-button" data-toggle-closed>${escapeHtml(ui.showClosedServices ? L("Hide closed services", "Masquer les services fermés") : L("Show closed services", "Afficher les services fermés"))}</button><button class="button primary" data-open-drawer="services">${escapeHtml(L("Explore services", "Explorer les services"))}</button></span></div><div class="summary-list">${(ui.showClosedServices ? D.services : active).map((service) => { const row = forecast.serviceResults.find((item) => item.id === service.id); return `<article><div><strong>${escapeHtml(serviceName(service.id))}</strong><span>${escapeHtml(serviceStatusLabel(row))}</span></div><span>${row.active ? `${number(row.honored)} / ${number(row.demand)} ${escapeHtml(L("served", "traités"))}${row.rampUp ? ` · ${escapeHtml(L("first year · 60% of demand", "première année · 60 % de la demande"))}` : ""}` : `${number(row.demand)} ${escapeHtml(L("requests if opened", "demandes si ouvert"))}`}</span><em>${escapeHtml(row.active ? blockerText(row.bottleneck) : missingRequirements(service, planned).length ? L("Missing requirements", "Conditions manquantes") : L("Ready to open", "Prêt à ouvrir"))}</em><button class="text-button" data-open-drawer="services" data-service="${service.id}">${escapeHtml(L("Details", "Détails"))} ›</button></article>`; }).join("")}</div></section>
       ${renderFacilityUse(forecast)}
       
@@ -2245,9 +2307,10 @@
     const blocked = forecast.operational.staffRows.filter((row) => row.blockedHours > 0).sort((a, b) => b.blockedHours - a.blockedHours)[0];
     if (blocked) signals.push({ icon: "△", text: L(`${number(blocked.blockedHours)} hours are blocked until training or another requirement is ready.`, `${number(blocked.blockedHours)} heures sont bloquées jusqu’à ce qu’une formation ou une autre condition soit prête.`) });
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Team & operations", "Équipe et opérations"))}</h1><p>${escapeHtml(L("See the team first; reveal applicants and operational alternatives only when needed.", "Voyez d’abord l’équipe ; affichez les candidats et les options uniquement si nécessaire."))}</p></div><button class="button primary" data-open-drawer="recruitment">${escapeHtml(L("Post a vacancy", "Publier une offre"))}</button></div>
-      <div class="dashboard-grid compact-four">${metricCard(L("Veterinary hours available", "Heures vétérinaires disponibles"), number(vetHours))}${metricCard(L("Support hours available", "Heures de soutien disponibles"), number(supportHours))}${metricCard(L("Team workload", "Charge de l’équipe"), pct(forecast.operational.staffUse))}${metricCard(L("Unused team hours", "Heures d’équipe inutilisées"), number(unusedHours))}</div>
+      ${forecastGridNote()}
+      <div class="dashboard-grid compact-four">${metricCard(L("Veterinary hours available", "Heures vétérinaires disponibles"), number(vetHours))}${metricCard(L("Support hours available", "Heures de soutien disponibles"), number(supportHours))}${metricCard(L("Team workload", "Charge de l’équipe"), forecastText(forecast.operational.staffUse, "percent"))}${metricCard(L("Unused team hours", "Heures d’équipe inutilisées"), number(unusedHours))}</div>
       ${signals.length ? `<section class="hour-signals" aria-label="${escapeHtml(L("Hours needing attention", "Heures à surveiller"))}">${signals.slice(0, 3).map((signal) => `<p><span aria-hidden="true">${signal.icon}</span>${escapeHtml(signal.text)}</p>`).join("")}</section>` : ""}
-      <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Current team", "Équipe actuelle"))}</h2><span class="panel-links"><button class="text-button" data-open-drawer="capabilities">${escapeHtml(L("Who can do what", "Qui peut faire quoi"))} ›</button><button class="text-button" data-open-drawer="hoursByService">${escapeHtml(L("See hours by service", "Voir les heures par service"))} ›</button></span></div><button class="button secondary" data-open-drawer="training">${escapeHtml(L("Plan training", "Planifier une formation"))}</button><button class="button secondary" data-open-drawer="relations">${escapeHtml(L("Act on climate and trust", "Agir sur le climat et la confiance"))}</button></div>${(() => { const partage = D.services.filter((service) => service.vetShare > 0 && service.supportShare > 0 && planned.services[service.id].active).map((service) => serviceName(service.id)); if (!partage.length) return ""; return `<p class="panel-note">${escapeHtml(L(`A case needing both a vet and a support worker is carried by both: ${partage.join(", ")}. Cases carried do not add up across the team — the clinic treated ${number(forecast.operational.totalHonored)} cases in total.`, `Un cas qui demande à la fois un vétérinaire et du soutien est porté par les deux : ${partage.join(", ")}. Les cas portés ne s’additionnent donc pas d’une personne à l’autre — la clinique traite ${number(forecast.operational.totalHonored)} cas au total.`))}</p>`; })()}<div class="staff-grid">${planned.staff.map((person) => { const row = rows[person.id]; const summary = normalizeAllocations(person).map((allocation) => `${serviceName(allocation.serviceId)} ${Math.round(allocation.share * 100)}%`).join(" · "); return `<article class="staff-card"><div class="staff-head"><div><h3>${escapeHtml(person.name)}</h3><span>${escapeHtml(person.role === "vet" ? L("Veterinarian", "Vétérinaire") : L("Support", "Soutien"))}</span></div><strong>${pct(row?.workload || 0)}</strong></div><div class="chips" aria-label="${escapeHtml(L("Skills", "Compétences"))}">${person.skills.length ? person.skills.map((skill) => `<span class="chip">${escapeHtml(skillName(skill))}</span>`).join("") : `<span class="chip">${escapeHtml(L("No specialist skills", "Aucune compétence spécialisée"))}</span>`}</div><p class="allocation-summary">${escapeHtml(summary)}</p>${(() => { const zone = allocationZone(row?.assignedShare ?? 1); return `<p class="staff-zone ${zone.tone}">${escapeHtml(zone.text)}</p>`; })()}${(() => { const closed = closedAssignments(person, planned); if (!closed.length) return ""; const hours = closed.reduce((sum, item) => sum + (row?.availableHours || 0) * item.share, 0); const names = closed.map((item) => serviceName(item.serviceId)).join(", "); return `<p class="staff-zone bad">△ ${escapeHtml(L(`${number(hours)} h on closed services (${names}) produce nothing`, `${number(hours)} h sur des services fermés (${names}) ne produisent rien`))}</p>`; })()}<div class="staff-hours-line"><span>${escapeHtml(L("Hours used", "Heures utilisées"))}</span><strong>${number(row?.usedHours || 0)} / ${number(row?.availableHours || 0)}${row?.overtimeHours > 0 ? ` · ${escapeHtml(L("overtime", "heures sup."))} ${number(row.overtimeHours)}` : ""}</strong></div>${(() => { const carried = casesCarried(forecast, person.id); if (carried.total < .5) return ""; return `<div class="staff-hours-line"><span>${escapeHtml(L("Cases carried", "Cas portés"))}</span><strong>${escapeHtml(forecastText(carried.total, "number"))}</strong></div>`; })()}${meter(row?.workload || 0, row?.workload > 1 ? "bad" : row?.workload > .94 ? "warn" : "good")}<div class="button-row"><button class="button primary" data-open-drawer="staffAllocation" data-context="${person.id}">${escapeHtml(L("Change time allocation", "Modifier l’affectation du temps"))}</button><button class="button secondary" data-open-drawer="staffPerson" data-context="${person.id}">${escapeHtml(L("Pay", "Salaire"))}</button>${pendingActions().some((action) => (action.payload.kind === "hire" && action.payload.targetId === person.id) || (action.payload.kind === "training" && action.payload.personId === person.id)) ? "" : `<button class="button secondary" data-open-drawer="staffExit" data-context="${person.id}">${escapeHtml(L("Let go", "Se séparer"))}</button>`}</div></article>`; }).join("")}</div></section>
+      <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Current team", "Équipe actuelle"))}</h2><span class="panel-links"><button class="text-button" data-open-drawer="capabilities">${escapeHtml(L("Who can do what", "Qui peut faire quoi"))} ›</button><button class="text-button" data-open-drawer="hoursByService">${escapeHtml(L("See hours by service", "Voir les heures par service"))} ›</button></span></div><button class="button secondary" data-open-drawer="training">${escapeHtml(L("Plan training", "Planifier une formation"))}</button><button class="button secondary" data-open-drawer="relations">${escapeHtml(L("Act on climate and trust", "Agir sur le climat et la confiance"))}</button></div>${(() => { const partage = D.services.filter((service) => service.vetShare > 0 && service.supportShare > 0 && planned.services[service.id].active).map((service) => serviceName(service.id)); if (!partage.length) return ""; return `<p class="panel-note">${escapeHtml(L(`A case needing both a vet and a support worker is carried by both: ${partage.join(", ")}. Cases carried do not add up across the team — the clinic treated ${forecastText(forecast.operational.totalHonored, "number")} cases in total.`, `Un cas qui demande à la fois un vétérinaire et du soutien est porté par les deux : ${partage.join(", ")}. Les cas portés ne s’additionnent donc pas d’une personne à l’autre — la clinique traite ${forecastText(forecast.operational.totalHonored, "number")} cas au total.`))}</p>`; })()}<div class="staff-grid">${planned.staff.map((person) => { const row = rows[person.id]; const summary = normalizeAllocations(person).map((allocation) => `${serviceName(allocation.serviceId)} ${Math.round(allocation.share * 100)}%`).join(" · "); return `<article class="staff-card"><div class="staff-head"><div><h3>${escapeHtml(person.name)}</h3><span>${escapeHtml(person.role === "vet" ? L("Veterinarian", "Vétérinaire") : L("Support", "Soutien"))}</span></div><strong>${pct(row?.workload || 0)}</strong></div><div class="chips" aria-label="${escapeHtml(L("Skills", "Compétences"))}">${person.skills.length ? person.skills.map((skill) => `<span class="chip">${escapeHtml(skillName(skill))}</span>`).join("") : `<span class="chip">${escapeHtml(L("No specialist skills", "Aucune compétence spécialisée"))}</span>`}</div><p class="allocation-summary">${escapeHtml(summary)}</p>${(() => { const zone = allocationZone(row?.assignedShare ?? 1); return `<p class="staff-zone ${zone.tone}">${escapeHtml(zone.text)}</p>`; })()}${(() => { const closed = closedAssignments(person, planned); if (!closed.length) return ""; const hours = closed.reduce((sum, item) => sum + (row?.availableHours || 0) * item.share, 0); const names = closed.map((item) => serviceName(item.serviceId)).join(", "); return `<p class="staff-zone bad">△ ${escapeHtml(L(`${number(hours)} h on closed services (${names}) produce nothing`, `${number(hours)} h sur des services fermés (${names}) ne produisent rien`))}</p>`; })()}<div class="staff-hours-line"><span>${escapeHtml(L("Hours used", "Heures utilisées"))}</span><strong>${number(row?.usedHours || 0)} / ${number(row?.availableHours || 0)}${row?.overtimeHours > 0 ? ` · ${escapeHtml(L("overtime", "heures sup."))} ${number(row.overtimeHours)}` : ""}</strong></div>${(() => { const carried = casesCarried(forecast, person.id); if (carried.total < .5) return ""; return `<div class="staff-hours-line"><span>${escapeHtml(L("Cases carried", "Cas portés"))}</span><strong>${escapeHtml(forecastText(carried.total, "number"))}</strong></div>`; })()}${meter(row?.workload || 0, workloadTone(row?.workload || 0))}<div class="button-row"><button class="button primary" data-open-drawer="staffAllocation" data-context="${person.id}">${escapeHtml(L("Change time allocation", "Modifier l’affectation du temps"))}</button><button class="button secondary" data-open-drawer="staffPerson" data-context="${person.id}">${escapeHtml(L("Pay", "Salaire"))}</button>${pendingActions().some((action) => (action.payload.kind === "hire" && action.payload.targetId === person.id) || (action.payload.kind === "training" && action.payload.personId === person.id)) ? "" : `<button class="button secondary" data-open-drawer="staffExit" data-context="${person.id}">${escapeHtml(L("Let go", "Se séparer"))}</button>`}</div></article>`; }).join("")}</div></section>
       <section class="card-section"><div class="panel-heading"><h2>${escapeHtml(L("How the clinic operates", "Fonctionnement de la clinique"))}</h2></div><div class="operation-rows">
         <button data-open-drawer="opening"><span>${escapeHtml(L("Opening schedule", "Horaires d’ouverture"))}</span><strong>${escapeHtml(openingNames.join(", ") || L("Standard daytime", "Journée standard"))}</strong><em>›</em></button>
         <button data-open-drawer="dropoff"><span>${escapeHtml(L("Drop-off workflow", "Parcours de dépôt"))}</span><strong>${escapeHtml(planned.operations.dropoff ? L("Enabled", "Activé") : L("Disabled", "Désactivé"))}</strong><em>›</em></button>
@@ -2257,11 +2320,32 @@
     </section>`;
   }
 
+  // Two bars, two quantities, and they must not be read off the same ruler. The assignment bar is
+  // drawn on the 0–130% scale, because that is the range a student can choose. The workload bar is
+  // drawn on 0–100%, because it reports what was actually worked. Both tones come from here so a
+  // state cannot be green on one screen and orange on the other.
+  function assignedTone(share) {
+    const percent = Math.round(share * 100);
+    if (percent > 100) return "bad";
+    if (percent === 100) return "good";
+    return "warn";
+  }
+
+  // Workload 0 used to be painted green: a person who produced nothing looked healthy. Low
+  // utilisation is the Monday problem, so it reads as a problem.
+  function workloadTone(workload) {
+    if (workload > 1.0001) return "bad";
+    if (workload >= .85) return "good";
+    if (workload >= .5) return "warn";
+    return "bad";
+  }
+
   function allocationZone(share) {
     const percent = Math.round(share * 100);
-    if (percent > 100) return { tone: "bad", text: L(`${percent}% assigned · ${percent - 100}% overtime`, `${percent} % affectés · ${percent - 100} % d’heures supplémentaires`) };
-    if (percent < 100) return { tone: "warn", text: L(`${percent}% assigned · ${100 - percent}% idle but paid`, `${percent} % affectés · ${100 - percent} % inoccupés mais payés`) };
-    return { tone: "good", text: L("100% assigned", "100 % affectés") };
+    const tone = assignedTone(share);
+    if (percent > 100) return { tone, text: L(`${percent}% assigned · ${percent - 100}% overtime`, `${percent} % affectés · ${percent - 100} % d’heures supplémentaires`) };
+    if (percent < 100) return { tone, text: L(`${percent}% assigned · ${100 - percent}% idle but paid`, `${percent} % affectés · ${100 - percent} % inoccupés mais payés`) };
+    return { tone, text: L("100% assigned", "100 % affectés") };
   }
 
   function roleLabel(role) {
@@ -2292,6 +2376,13 @@
   function allocationDraftFor(person) {
     if (!ui.allocationDrafts[person.id]) ui.allocationDrafts[person.id] = clone(normalizeAllocations(person));
     return ui.allocationDrafts[person.id];
+  }
+
+  // The hours a person actually has this year, under the plan as it stands. Every control that
+  // writes a share converts through this one number, so hours typed, hours stepped and hours shown
+  // are the same hours.
+  function availableHoursFor(personId) {
+    return simulatePlan(pendingActions()).operational.staffRows.find((row) => row.id === personId)?.availableHours || 0;
   }
 
   function allocationDraftForecast(personId, allocations) {
@@ -2369,40 +2460,51 @@
 
   // Cinq réglages prélèvent des heures de soutien avant toute affectation. Leur total arrivait
   // sur la fiche sous le nom « autres tâches », sans cause et sans chemin vers le réglage.
-  function supportReservations(clinic) {
-    const stock = D.stockStrategies[clinic.operations.stockStrategy];
-    const monitoring = D.marketingStrategies.monitoring[clinic.marketing.monitoring];
-    const geo = D.marketingStrategies.geomarketing[clinic.marketing.geomarketing];
-    const waste = D.sustainability.wasteStrategies[clinic.sustainability.wasteStrategy];
-    const access = clinic.sustainability.accessPlan ? D.sustainability.interventions.accessPlan : { supportHours: 0 };
-    return [
-      { hours: stock.supportHours || 0, label: L("Stock strategy", "Stratégie de stock"), drawer: "stock" },
-      { hours: monitoring.supportHours || 0, label: L("Market monitoring", "Veille de marché"), drawer: "marketing" },
-      { hours: geo.supportHours || 0, label: L("Geomarketing", "Géomarketing"), drawer: "marketing" },
-      { hours: waste.supportHours || 0, label: L("Waste strategy", "Gestion des déchets"), drawer: "sustainability" },
-      { hours: access.supportHours || 0, label: L("Access plan", "Offre d’accès"), drawer: "sustainability" }
-    ].filter((item) => item.hours > 0);
+  // Where each reservation is set, and what to call it. The hours come from the model.
+  const RESERVATION_ROUTES = {
+    stock: { drawer: "stock", label: () => L("Stock strategy", "Stratégie de stock") },
+    monitoring: { drawer: "marketing", label: () => L("Market monitoring", "Veille de marché") },
+    geomarketing: { drawer: "marketing", label: () => L("Geomarketing", "Géomarketing") },
+    waste: { drawer: "sustainability", label: () => L("Waste strategy", "Gestion des déchets") },
+    accessPlan: { drawer: "sustainability", label: () => L("Access plan", "Offre d’accès") },
+    planned: { drawer: "plan", label: () => L("Decisions already in the plan", "Décisions déjà au plan") }
+  };
+
+  function supportReservations(row) {
+    return (row?.nonClinicalParts || []).filter((part) => part.hours >= .5).map((part) => ({
+      hours: part.hours,
+      label: (RESERVATION_ROUTES[part.id] || { label: () => part.id }).label(),
+      drawer: (RESERVATION_ROUTES[part.id] || { drawer: "plan" }).drawer
+    }));
   }
 
   function reservationNote(person, planned, row) {
     if (person.role !== "support" || !(row?.nonClinicalHours > 1)) return "";
-    const items = supportReservations(planned);
+    const items = supportReservations(row);
     if (!items.length) return "";
     return `<p class="reservation-note"><strong>${escapeHtml(L(`The ${number(row.nonClinicalHours)} h of other duties are taken by:`, `Les ${number(row.nonClinicalHours)} h d’autres tâches sont prises par :`))}</strong> ${items.map((item) => `<button class="text-button" data-open-drawer="${item.drawer}">${escapeHtml(`${item.label} · ${number(item.hours)} h`)} ›</button>`).join(" ")}</p>`;
   }
 
+  // The figures the student reads, in whole hours, from the model and nowhere else. Rounding each
+  // one on its own broke the column by an hour — 900 used and 522 unused against 1 421 available —
+  // so the last figure is taken as the remainder of the others. It is the same subtraction the
+  // model does, performed after rounding instead of before, and a guard holds it to within an hour
+  // of the model's own value.
+  function displayedHours(row) {
+    const available = Math.round(row?.availableHours || 0);
+    const used = Math.round(row?.usedHours || 0);
+    const overtime = Math.round(row?.overtimeHours || 0);
+    return { available, used, overtime, unused: Math.max(0, available + overtime - used), blocked: Math.round(row?.blockedHours || 0) };
+  }
+
   function hoursCells(row) {
-    const available = row?.availableHours || 0;
-    const used = row?.usedHours || 0;
-    const blocked = row?.blockedHours || 0;
-    const overtime = row?.overtimeHours || 0;
-    const unused = Math.max(0, available - used - blocked);
+    const h = displayedHours(row);
     return [
-      [L("Available hours", "Heures disponibles"), available],
-      [L("Hours used", "Heures utilisées"), used],
-      ...(overtime >= .5 ? [[L("Overtime hours", "Heures supplémentaires"), overtime]] : []),
-      [L("Unused hours", "Heures inutilisées"), unused],
-      [L("Blocked hours", "Heures bloquées"), blocked]
+      [L("Available hours", "Heures disponibles"), h.available],
+      [L("Hours used", "Heures utilisées"), h.used],
+      ...(h.overtime >= 1 ? [[L("Overtime hours", "Heures supplémentaires"), h.overtime]] : []),
+      [L("Unused hours", "Heures inutilisées"), h.unused],
+      ...(h.blocked >= 1 ? [[L("Blocked by a missing skill", "Bloquées faute de compétence"), h.blocked]] : [])
     ];
   }
 
@@ -2440,19 +2542,25 @@
     draft.forEach((allocation) => missingRequirements(SERVICE_BY_ID[allocation.serviceId], planned).forEach((reason) => blockerMap.set(`${allocation.serviceId}:${reason.type}:${reason.id || ""}`, { serviceId: allocation.serviceId, reason })));
     const remainingBlockers = [...blockerMap.values()].slice(0, 3);
     const percent = Math.round(total * 100);
+    // These are the hours the rows print, and the total prints their sum: a student who adds the
+    // column gets the figure on the total line.
+    const availableHours = currentRow?.availableHours || 0;
+    const rowHours = draft.map((allocation) => Math.round(availableHours * allocation.share));
+    const totalHours = rowHours.reduce((sum, value) => sum + value, 0);
     const draftOvertimeCost = (draftRow?.overtimePay || 0) * (1 + SOCIAL_CHARGE_RATE);
-    const draftBlocked = draftRow?.blockedHours || 0;
-    const draftUsed = draftRow?.usedHours || 0;
-    const draftUnused = Math.max(0, (draftRow?.availableHours || 0) - draftUsed - draftBlocked);
+    const draftHours = displayedHours(draftRow);
+    const draftBlocked = draftHours.blocked;
+    const draftUsed = draftHours.used;
+    const draftUnused = draftHours.unused;
     const meterText = percent === 0 ? L("0% assigned — give this person at least one service", "0 % affectés — donnez au moins un service à cette personne")
       : draftBlocked >= 1 && draftUsed < 1 ? L(`${percent}% assigned, but all ${number(draftBlocked)} h are blocked until training — no cases can be handled`, `${percent} % affectés, mais les ${number(draftBlocked)} h sont bloquées jusqu’à la formation — aucun cas ne peut être traité`)
       : draftBlocked >= 1 ? L(`${percent}% assigned · ${number(draftBlocked)} h blocked until training`, `${percent} % affectés · ${number(draftBlocked)} h bloquées jusqu’à la formation`)
-      : percent > 100 ? L(`${percent}% assigned · up to ${number(draftRow?.overtimeAssignedHours || 0)} overtime hours (max ${Math.round(MAX_ALLOCATION * 100)}%). Forecast worked: ${number(draftRow?.overtimeHours || 0)} h ≈ ${money(draftOvertimeCost)}`, `${percent} % affectés · jusqu’à ${number(draftRow?.overtimeAssignedHours || 0)} heures supplémentaires (max ${Math.round(MAX_ALLOCATION * 100)} %). Prévu : ${number(draftRow?.overtimeHours || 0)} h ≈ ${money(draftOvertimeCost)}`)
+      : percent > 100 ? L(`${percent}% assigned, maximum ${Math.round(MAX_ALLOCATION * 100)}% · overtime forecast: ${number(draftRow?.overtimeHours || 0)} h ≈ ${money(draftOvertimeCost)}`, `${percent} % affectés, maximum ${Math.round(MAX_ALLOCATION * 100)} % · heures supplémentaires prévues : ${number(draftRow?.overtimeHours || 0)} h ≈ ${money(draftOvertimeCost)}`)
       : draftUnused >= 1 ? L(`${percent}% assigned · ${number(draftUnused)} h paid and unused`, `${percent} % affectés · ${number(draftUnused)} h payées sans emploi`)
       : L("100% assigned — fully booked, no overtime", "100 % affectés — temps plein, sans heures supplémentaires");
-    const zoneClass = !valid ? "warn" : percent > 100 ? "overtime" : percent < 100 ? "idle" : "ready";
+    const zoneClass = !valid ? "warn" : { good: "ready", warn: "idle", bad: "overtime" }[assignedTone(total)];
     const hoursFlow = currentRow ? L(`${number(currentRow.contractedHours)} contracted − ${number(currentRow.expectedAbsenceHours)} expected absence${absenceNote(currentRow)} − ${number(currentRow.trainingHours)} training${currentRow.onboardingHours > 1 ? ` − ${number(currentRow.onboardingHours)} onboarding` : ""} −${number(currentRow.nonClinicalHours)} other duties = ${number(currentRow.availableHours)} available hours`, `${number(currentRow.contractedHours)} contractuelles − ${number(currentRow.expectedAbsenceHours)} d’absence prévue${absenceNote(currentRow)} − ${number(currentRow.trainingHours)} de formation${currentRow.onboardingHours > 1 ? ` − ${number(currentRow.onboardingHours)} d’intégration` : ""} −${number(currentRow.nonClinicalHours)} d’autres tâches = ${number(currentRow.availableHours)} heures disponibles`) : "";
-    return `<div class="allocation-editor">${closedHoursWarning(person, planned, currentRow?.availableHours)}<details class="note-repliee regle-affectation" data-pli="regleOpen" ${ui.regleOpen ? "open" : ""}><summary>${escapeHtml(L("How the percentages work", "Comment fonctionnent les pourcentages"))}</summary><p>${escapeHtml(L(`Up to 100%, changing percentages moves existing hours; it does not create new hours. Above 100% is paid overtime (${OVERTIME_PREMIUM}× pay, maximum ${Math.round(MAX_ALLOCATION * 100)}%) and lowers staff climate. Below 100% is paid idle time.`, `Jusqu’à 100 %, modifier les pourcentages déplace des heures existantes ; cela ne crée pas de nouvelles heures. Au-delà de 100 %, ce sont des heures supplémentaires payées (${String(OVERTIME_PREMIUM).replace(".", ",")}× le salaire, ${Math.round(MAX_ALLOCATION * 100)} % maximum) qui dégradent le climat d’équipe. En dessous, le temps payé reste inoccupé.`))}</p></details>${hoursFlow ? `<p class="hours-flow">${escapeHtml(hoursFlow)}</p>` : ""}${reservationNote(person, planned, currentRow)}<div class="mini-hours">${hoursCells(draftRow).map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${number(value || 0)}</strong></div>`).join("")}</div><div class="allocation-total ${zoneClass}"><strong>${escapeHtml(meterText)}</strong>${meter(total / MAX_ALLOCATION, percent > 100 ? "bad" : valid && percent === 100 ? "good" : "warn")}</div><div class="allocation-rows">${draft.map((allocation, index) => { const service = SERVICE_BY_ID[allocation.serviceId]; const qualified = personQualified(person, service); const hours = (currentRow?.availableHours || 0) * allocation.share; return `<article><div><strong>${escapeHtml(serviceName(service.id))}</strong>${qualified ? "" : `<span class="qualification-warning">△ ${escapeHtml(L("Needs training", "Formation nécessaire"))}</span>`}${qualified ? `<label class="heures-exactes"><input type="number" min="0" step="1" value="${Math.round(hours)}" data-allocation-hours="${index}" aria-label="${escapeHtml(L(`Hours on ${serviceName(service.id)}`, `Heures sur ${serviceName(service.id)}`))}"><span>${escapeHtml(L("assigned hours — type a number or use the buttons", "heures affectées — tapez un nombre ou utilisez les boutons"))}</span></label>` : `<small>${number(hours)} ${escapeHtml(L("hours blocked until training", "heures bloquées jusqu’à la formation"))}</small>`}${allocationRowNote(person, service, comparison.after, planned)}${allocationRemainder(draft, index) > 0 ? `<button class="text-button" data-allocation-fill="${index}">${escapeHtml(L(`Use remaining ${number((currentRow?.availableHours || 0) * allocationRemainder(draft, index))} h`, `Utiliser les ${number((currentRow?.availableHours || 0) * allocationRemainder(draft, index))} h restantes`))}</button>` : ""}</div><div class="stepper" role="group" aria-label="${escapeHtml(serviceName(service.id))}"><button data-allocation-adjust="-5" data-allocation-index="${index}" aria-label="${escapeHtml(L("Reduce by 5%", "Réduire de 5 %"))}">−</button><output>${Math.round(allocation.share * 100)}%</output><button data-allocation-adjust="5" data-allocation-index="${index}" ${total >= MAX_ALLOCATION - .0001 ? "disabled" : ""} aria-label="${escapeHtml(L("Increase by 5%", "Augmenter de 5 %"))}">+</button><button class="remove-allocation" data-remove-allocation="${index}" aria-label="${escapeHtml(L("Remove service", "Retirer le service"))}">×</button></div></article>`; }).join("")}</div>${ordered.length ? `<div class="add-allocation"><label><span>${escapeHtml(L("Add another service", "Ajouter un autre service"))}</span><select data-allocation-service>${optionGroup(L("Active and planned services", "Services actifs et planifiés"), activeOptions)}${optionGroup(L("Other services", "Autres services"), otherOptions)}${optionGroup(L("Needs training", "Formation nécessaire"), trainingOptions)}</select></label><button class="button secondary" data-add-allocation>${escapeHtml(L("Add at 0%", "Ajouter à 0 %"))}</button></div>` : ""}${remainingBlockers.length ? `<div class="requirement-list"><strong>${escapeHtml(L("Other blockers still apply", "D’autres blocages restent à résoudre"))}</strong>${remainingBlockers.map((item) => `<div><span>△ ${escapeHtml(serviceName(item.serviceId))}: ${escapeHtml(blockerText(item.reason))}</span></div>`).join("")}</div>` : ""}<section class="allocation-impact"><h3>${escapeHtml(L("Live impact", "Impact en direct"))}</h3><div class="comparison-list"><div><strong>${escapeHtml(L("This person’s workload", "Charge de cette personne"))}</strong><span>${pct(currentRow?.workload || 0)}</span><em>→ ${pct(draftRow?.workload || 0)}</em></div><div><strong>${escapeHtml(L("Cases this person carries", "Cas portés par cette personne"))}</strong><span>${escapeHtml(forecastText(casesCarried(comparison.before, person.id).total, "number"))}</span><em>→ ${escapeHtml(forecastText(casesCarried(comparison.after, person.id).total, "number"))}</em></div><div><strong>${escapeHtml(L("Team workload", "Charge de l’équipe"))}</strong><span>${pct(comparison.before.operational.staffUse)}</span><em>→ ${pct(comparison.after.operational.staffUse)}</em></div><div><strong>${escapeHtml(L("Cases served", "Cas traités"))}</strong><span>${escapeHtml(forecastText(comparison.before.operational.totalHonored, "number"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.operational.totalHonored, "number"))}</em></div><div><strong>${escapeHtml(L("Net result", "Résultat net"))}</strong><span>${escapeHtml(forecastText(comparison.before.financial.netResult, "money"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.financial.netResult, "money"))}</em></div>${comparison.before.financial.overtimeCost >= 1 || comparison.after.financial.overtimeCost >= 1 ? `<div><strong>${escapeHtml(L("Overtime cost", "Coût des heures supplémentaires"))}</strong><span>${money(comparison.before.financial.overtimeCost)}</span><em>→ ${money(comparison.after.financial.overtimeCost)}</em></div>` : ""}<div><strong>${escapeHtml(L("Staff climate", "Climat de l’équipe"))}</strong><span>${number(comparison.before.social.after.staffClimate)}</span><em>→ ${number(comparison.after.social.after.staffClimate)}</em></div><div><strong>${escapeHtml(L("Carbon footprint", "Empreinte carbone"))}</strong><span>${tonnes(comparison.before.carbon.total)}</span><em>→ ${tonnes(comparison.after.carbon.total)}</em></div></div>${serviceDeltas.length ? `<ul>${serviceDeltas.map((row) => `<li><strong>${escapeHtml(serviceName(row.id))}:</strong> ${escapeHtml(row.cases > 0 ? L(`${row.cases} additional cases possible`, `${row.cases} cas supplémentaires possibles`) : L(`${Math.abs(row.cases)} fewer cases possible`, `${Math.abs(row.cases)} cas possibles en moins`))}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No change in cases served with this draft.", "Aucun changement des cas traités avec ce brouillon."))}</p>`}</section><button class="button primary" data-review-allocation="${person.id}" ${valid ? "" : "disabled"}>${escapeHtml(L("Review allocation", "Examiner l’affectation"))}</button></div>`;
+    return `<div class="allocation-editor">${closedHoursWarning(person, planned, currentRow?.availableHours)}<details class="note-repliee regle-affectation" data-pli="regleOpen" ${ui.regleOpen ? "open" : ""}><summary>${escapeHtml(L("How the percentages work", "Comment fonctionnent les pourcentages"))}</summary><p>${escapeHtml(L(`Up to 100%, changing percentages moves existing hours; it does not create new hours. Above 100% is paid overtime (${OVERTIME_PREMIUM}× pay, maximum ${Math.round(MAX_ALLOCATION * 100)}%) and lowers staff climate. Below 100% is paid idle time.`, `Jusqu’à 100 %, modifier les pourcentages déplace des heures existantes ; cela ne crée pas de nouvelles heures. Au-delà de 100 %, ce sont des heures supplémentaires payées (${String(OVERTIME_PREMIUM).replace(".", ",")}× le salaire, ${Math.round(MAX_ALLOCATION * 100)} % maximum) qui dégradent le climat d’équipe. En dessous, le temps payé reste inoccupé.`))}</p></details>${hoursFlow ? `<p class="hours-flow">${escapeHtml(hoursFlow)}</p>` : ""}${reservationNote(person, planned, currentRow)}<div class="mini-hours">${hoursCells(draftRow).map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${number(value || 0)}</strong></div>`).join("")}</div><div class="allocation-total marque-cent ${zoneClass}"><strong>${escapeHtml(meterText)}</strong><span class="total-heures">${escapeHtml(L(`${number(totalHours)} h assigned of ${number(availableHours)} h available`, `${number(totalHours)} h affectées sur ${number(availableHours)} h disponibles`))}</span>${meter(total / MAX_ALLOCATION, !valid ? "warn" : assignedTone(total))}</div><div class="allocation-rows">${draft.map((allocation, index) => { const service = SERVICE_BY_ID[allocation.serviceId]; const qualified = personQualified(person, service); const hours = rowHours[index]; return `<article><div><strong>${escapeHtml(serviceName(service.id))}</strong>${qualified ? "" : `<span class="qualification-warning">△ ${escapeHtml(L("Needs training", "Formation nécessaire"))}</span>`}${qualified ? "" : `<small>${number(hours)} ${escapeHtml(L("hours blocked until training", "heures bloquées jusqu’à la formation"))}</small>`}${allocationRowNote(person, service, comparison.after, planned)}${allocationRemainder(draft, index) > 0 ? `<button class="text-button" data-allocation-fill="${index}">${escapeHtml(L(`Use remaining ${number((currentRow?.availableHours || 0) * allocationRemainder(draft, index))} h`, `Utiliser les ${number((currentRow?.availableHours || 0) * allocationRemainder(draft, index))} h restantes`))}</button>` : ""}</div><div class="stepper" role="group" aria-label="${escapeHtml(serviceName(service.id))}"><button data-allocation-adjust="-5" data-allocation-index="${index}" aria-label="${escapeHtml(L(`Reduce by ${number(availableHours * .05)} hours`, `Réduire de ${number(availableHours * .05)} heures`))}">−</button><span class="pas-heures"><input type="text" inputmode="numeric" autocomplete="off" value="${hours}" data-allocation-hours="${index}" aria-label="${escapeHtml(L(`Hours on ${serviceName(service.id)}`, `Heures sur ${serviceName(service.id)}`))}"><em>h</em></span><button data-allocation-adjust="5" data-allocation-index="${index}" ${total >= MAX_ALLOCATION - .0001 ? "disabled" : ""} aria-label="${escapeHtml(L(`Add ${number(availableHours * .05)} hours`, `Ajouter ${number(availableHours * .05)} heures`))}">+</button><button class="remove-allocation" data-remove-allocation="${index}" aria-label="${escapeHtml(L("Remove service", "Retirer le service"))}">×</button></div></article>`; }).join("")}</div>${ordered.length ? `<div class="add-allocation"><label><span>${escapeHtml(L("Add another service", "Ajouter un autre service"))}</span><select data-allocation-service>${optionGroup(L("Active and planned services", "Services actifs et planifiés"), activeOptions)}${optionGroup(L("Other services", "Autres services"), otherOptions)}${optionGroup(L("Needs training", "Formation nécessaire"), trainingOptions)}</select></label><button class="button secondary" data-add-allocation>${escapeHtml(L("Add at 0%", "Ajouter à 0 %"))}</button></div>` : ""}${remainingBlockers.length ? `<div class="requirement-list"><strong>${escapeHtml(L("Other blockers still apply", "D’autres blocages restent à résoudre"))}</strong>${remainingBlockers.map((item) => `<div><span>△ ${escapeHtml(serviceName(item.serviceId))}: ${escapeHtml(blockerText(item.reason))}</span></div>`).join("")}</div>` : ""}<section class="allocation-impact"><h3>${escapeHtml(L("Live impact", "Impact en direct"))}</h3><div class="comparison-list"><div><strong>${escapeHtml(L("This person’s workload", "Charge de cette personne"))}</strong><span>${pct(currentRow?.workload || 0)}</span><em>→ ${pct(draftRow?.workload || 0)}</em></div><div><strong>${escapeHtml(L("Cases this person carries", "Cas portés par cette personne"))}</strong><span>${escapeHtml(forecastText(casesCarried(comparison.before, person.id).total, "number"))}</span><em>→ ${escapeHtml(forecastText(casesCarried(comparison.after, person.id).total, "number"))}</em></div><div><strong>${escapeHtml(L("Team workload", "Charge de l’équipe"))}</strong><span>${escapeHtml(forecastText(comparison.before.operational.staffUse, "percent"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.operational.staffUse, "percent"))}</em></div><div><strong>${escapeHtml(L("Cases served", "Cas traités"))}</strong><span>${escapeHtml(forecastText(comparison.before.operational.totalHonored, "number"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.operational.totalHonored, "number"))}</em></div><div><strong>${escapeHtml(L("Net result", "Résultat net"))}</strong><span>${escapeHtml(forecastText(comparison.before.financial.netResult, "money"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.financial.netResult, "money"))}</em></div>${comparison.before.financial.overtimeCost >= 1 || comparison.after.financial.overtimeCost >= 1 ? `<div><strong>${escapeHtml(L("Overtime cost", "Coût des heures supplémentaires"))}</strong><span>${money(comparison.before.financial.overtimeCost)}</span><em>→ ${money(comparison.after.financial.overtimeCost)}</em></div>` : ""}<div><strong>${escapeHtml(L("Staff climate", "Climat de l’équipe"))}</strong><span>${escapeHtml(forecastText(comparison.before.social.after.staffClimate, "number"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.social.after.staffClimate, "number"))}</em></div><div><strong>${escapeHtml(L("Carbon footprint", "Empreinte carbone"))}</strong><span>${escapeHtml(forecastText(comparison.before.carbon.total, "carbon"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.carbon.total, "carbon"))}</em></div></div>${serviceDeltas.length ? `<ul>${serviceDeltas.map((row) => `<li><strong>${escapeHtml(serviceName(row.id))}:</strong> ${escapeHtml(row.cases > 0 ? L(`${row.cases} additional cases possible`, `${row.cases} cas supplémentaires possibles`) : L(`${Math.abs(row.cases)} fewer cases possible`, `${Math.abs(row.cases)} cas possibles en moins`))}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No change in cases served with this draft.", "Aucun changement des cas traités avec ce brouillon."))}</p>`}</section><button class="button primary" data-review-allocation="${person.id}" ${valid ? "" : "disabled"}>${escapeHtml(L("Review allocation", "Examiner l’affectation"))}</button></div>`;
   }
 
   function renderHoursByService(forecast) {
@@ -2464,6 +2572,20 @@
   // la marge par cas. Rien ne les montrait. La marge par heure se divise par UNE ressource —
   // jamais par la somme : une promotion a classe l'echographie a 89 €/h au lieu de 138 en
   // additionnant les heures veterinaires et de soutien.
+  // Rounds a column so that it still adds up to its own rounded total: the leftover euro goes to
+  // the largest figure, where it is least visible. A table a student is asked to add up has to add
+  // up — rounding each cell on its own left the services at 32 721 € against a total of 32 720 €.
+  function roundToTotal(values, total) {
+    const rounded = values.map((value) => Math.round(value));
+    const residual = Math.round(total) - rounded.reduce((sum, value) => sum + value, 0);
+    if (residual && rounded.length) {
+      let index = 0;
+      rounded.forEach((value, position) => { if (Math.abs(value) > Math.abs(rounded[index])) index = position; });
+      rounded[index] += residual;
+    }
+    return rounded;
+  }
+
   function renderServiceLedger() {
     const latest = state.history.at(-1);
     if (!latest) return `<p>${escapeHtml(L("No completed year yet.", "Aucune année terminée."))}</p>`;
@@ -2472,16 +2594,22 @@
     const totalRecettes = lignes.reduce((sum, row) => sum + row.revenue, 0);
     const totalVariables = lignes.reduce((sum, row) => sum + row.variableCosts, 0);
     const totalCas = lignes.reduce((sum, row) => sum + row.honored, 0);
-    const cellule = (row) => {
+    const ecartStock = latest.financial.variableCosts - totalVariables;
+    const montreStock = Math.abs(ecartStock) > 1;
+    const recettesAffichees = roundToTotal(lignes.map((row) => row.revenue), totalRecettes);
+    // The stock adjustment is one of the figures in the column, so it takes the rounding with the
+    // rest and the column still ends on the clinic's own total.
+    const variablesAffichees = roundToTotal([...lignes.map((row) => row.variableCosts), ...(montreStock ? [ecartStock] : [])], latest.financial.variableCosts);
+    const cellule = (row, index) => {
       const vet = row.vetDuration > 0 ? money(row.contributionPerCase / row.vetDuration) : "—";
       const sout = row.supportDuration > 0 ? money(row.contributionPerCase / row.supportDuration) : "—";
-      return `<div role="row"><span>${escapeHtml(serviceName(row.id))}</span><span>${number(row.honored)}</span><span>${money(row.revenue)}</span><span>${money(row.variableCosts)}</span><span>${money(row.contributionPerCase)}</span><span>${escapeHtml(vet)}</span><span>${escapeHtml(sout)}</span></div>`;
+      return `<div role="row"><span>${escapeHtml(serviceName(row.id))}</span><span>${number(row.honored)}</span><span>${money(recettesAffichees[index])}</span><span>${money(variablesAffichees[index])}</span><span>${money(row.contributionPerCase)}</span><span>${escapeHtml(vet)}</span><span>${escapeHtml(sout)}</span></div>`;
     };
     return `<p>${escapeHtml(L("Year", "Année"))} ${latest.turn}. ${escapeHtml(L("Margin per hour divides by one resource at a time — never by the two added together, which are not interchangeable.", "La marge par heure se divise par une seule ressource à la fois — jamais par les deux additionnées, qui ne sont pas interchangeables."))}</p>
       <div class="hours-table ledger" role="table">
         <div role="row"><strong>${escapeHtml(L("Service", "Service"))}</strong><strong>${escapeHtml(t("common.cases"))}</strong><strong>${escapeHtml(t("forecast.revenue"))}</strong><strong>${escapeHtml(L("Variable costs", "Coûts variables"))}</strong><strong>${escapeHtml(L("Margin / case", "Marge / cas"))}</strong><strong>${escapeHtml(L("€ / vet hour", "€ / h vét."))}</strong><strong>${escapeHtml(L("€ / support hour", "€ / h soutien"))}</strong></div>
         ${lignes.map(cellule).join("")}
-        ${Math.abs(latest.financial.variableCosts - totalVariables) > 1 ? `<div role="row" class="ajustement"><span>${escapeHtml(L("Stock strategy, applied to the whole", "Stratégie de stock, appliquée à l’ensemble"))}</span><span>—</span><span>—</span><span>${money(latest.financial.variableCosts - totalVariables)}</span><span>—</span><span>—</span><span>—</span></div>` : ""}
+        ${montreStock ? `<div role="row" class="ajustement"><span>${escapeHtml(L("Stock strategy, applied to the whole", "Stratégie de stock, appliquée à l’ensemble"))}</span><span>—</span><span>—</span><span>${money(variablesAffichees[variablesAffichees.length - 1])}</span><span>—</span><span>—</span><span>—</span></div>` : ""}
         <div role="row" class="total"><strong>${escapeHtml(L("Total", "Total"))}</strong><strong>${number(totalCas)}</strong><strong>${money(totalRecettes)}</strong><strong>${money(latest.financial.variableCosts)}</strong><strong>${money(totalCas ? (totalRecettes - latest.financial.variableCosts) / totalCas : 0)}</strong><strong>—</strong><strong>—</strong></div>
       </div>`;
   }
@@ -2513,7 +2641,8 @@
   function renderBusiness(planned, forecast) {
     const location = D.locations[planned.location.sectorId];
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Business", "Gestion"))}</h1><p>${escapeHtml(L("Prices, financing, market position, and location—opened one decision at a time.", "Prix, financement, marché et implantation — une décision à la fois."))}</p></div></div>
-      <div class="dashboard-grid compact-five">${metricCard(L("Revenue", "Recettes"), money(forecast.financial.revenue))}${metricCard(L("Total costs", "Coûts totaux"), money(forecast.financial.totalCosts), overtimeNote(forecast))}${metricCard(L("Variable costs", "Coûts variables"), money(forecast.financial.variableCosts), variableCostNote(forecast))}${metricCard(L("Net result", "Résultat net"), money(forecast.financial.netResult), pct(forecast.financial.margin), forecast.financial.netResult >= 0 ? "good" : "bad")}${metricCard(L("End treasury", "Trésorerie finale"), money(forecast.financial.treasury))}</div>
+      ${forecastGridNote()}
+      <div class="dashboard-grid compact-five">${metricCard(L("Revenue", "Recettes"), forecastText(forecast.financial.revenue, "money"))}${metricCard(L("Total costs", "Coûts totaux"), money(forecast.financial.totalCosts), overtimeNote(forecast))}${metricCard(L("Variable costs", "Coûts variables"), money(forecast.financial.variableCosts), variableCostNote(forecast))}${metricCard(L("Net result", "Résultat net"), forecastText(forecast.financial.netResult, "money"), forecastText(forecast.financial.margin, "percent"), forecast.financial.netResult >= 0 ? "good" : "bad")}${metricCard(L("End treasury", "Trésorerie finale"), forecastText(forecast.financial.treasury, "money"))}</div>
       <section class="card-section action-menu"><button data-open-drawer="pricing"><span>${escapeHtml(L("Service prices", "Prix des services"))}</span><strong>${escapeHtml(L("Review price sensitivity and money left after supplies", "Voir la sensibilité au prix et l’argent restant après les fournitures"))}</strong><em>›</em></button><button data-open-drawer="finance"><span>${escapeHtml(L("Financing", "Financement"))}</span><strong>${escapeHtml(planned.finance.loan ? money(planned.finance.loan.remaining) : L("No outstanding loan", "Aucun emprunt"))}</strong><em>›</em></button><button data-open-drawer="market"><span>${escapeHtml(L("Market focus", "Marché cible"))}</span><strong>${escapeHtml(itemLabel(D.segments[planned.marketFocus].name))}</strong><em>›</em></button><button data-open-drawer="location"><span>${escapeHtml(L("Location and parking", "Implantation et parking"))}</span><strong>${escapeHtml(itemLabel(location.name))}</strong><em>›</em></button><button data-open-drawer="marketing"><span>${escapeHtml(L("Market strategies", "Stratégies de marché"))}</span><strong>${escapeHtml(L("Communication, competitor monitoring, and local market research", "Communication, veille concurrentielle et étude du marché local"))}</strong><em>›</em></button></section>
     </section>`;
   }
@@ -2524,7 +2653,8 @@
     const reduction = baseline.perCase ? 1 - forecast.carbon.perCase / baseline.perCase : 0;
     const sources = ["building", "clinical", "waste", "travel"];
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Sustainability", "Durabilité"))}</h1><p>${escapeHtml(L("Choose a source, see the trade-off, and decide whether it fits the clinic.", "Choisissez une source, observez le compromis et décidez s’il convient à la clinique."))}</p></div></div>
-      <div class="dashboard-grid compact-four">${metricCard(L("Carbon footprint", "Empreinte carbone"), tonnes(forecast.carbon.total), `${delta > 0 ? "+" : ""}${tonnes(delta)} ${L("vs start", "par rapport au départ")}`, delta <= 0 ? "good" : "warn")}${metricCard(L("Per treated case", "Par cas traité"), kilograms(forecast.carbon.perCase), `${pct(reduction)} ${L("change", "d’évolution")}`, reduction > 0 ? "good" : "warn")}${metricCard(L("Largest source", "Source principale"), sourceLabel(forecast.carbon.primaryDrivers[0]), tonnes(forecast.carbon.bySource[forecast.carbon.primaryDrivers[0]]))}${metricCard(L("Scenario target", "Objectif du scénario"), pct(({ balanced: .15, rescue: .08, growth: .20 })[state.scenarioId]), L("reduction per case while retaining 80% of starting care", "de réduction par cas en conservant 80 % des soins initiaux"))}</div>
+      ${forecastGridNote()}
+      <div class="dashboard-grid compact-four">${metricCard(L("Carbon footprint", "Empreinte carbone"), forecastText(forecast.carbon.total, "carbon"), `${forecastText(delta, "carbon", { signed: true })} ${L("vs start", "par rapport au départ")}`, delta <= 0 ? "good" : "warn")}${metricCard(L("Per treated case", "Par cas traité"), kilograms(forecast.carbon.perCase), `${pct(reduction)} ${L("change", "d’évolution")}`, reduction > 0 ? "good" : "warn")}${metricCard(L("Largest source", "Source principale"), sourceLabel(forecast.carbon.primaryDrivers[0]), tonnes(forecast.carbon.bySource[forecast.carbon.primaryDrivers[0]]))}${metricCard(L("Scenario target", "Objectif du scénario"), pct(({ balanced: .15, rescue: .08, growth: .20 })[state.scenarioId]), L("reduction per case while retaining 80% of starting care", "de réduction par cas en conservant 80 % des soins initiaux"))}</div>
       <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Where the footprint comes from", "Origine de l’empreinte"))}</h2><p>${escapeHtml(L("Select one source to see only the relevant choices.", "Sélectionnez une source pour ne voir que les choix pertinents."))}</p></div></div><div class="source-list">${sources.map((id) => { const value = forecast.carbon.bySource[id]; const share = forecast.carbon.total ? value / forecast.carbon.total : 0; return `<article><div><strong>${escapeHtml(sourceLabel(id))}</strong><span>${tonnes(value)} · ${pct(share)}</span></div>${meter(share, id === forecast.carbon.primaryDrivers[0] ? "warn" : "good")}<button class="button secondary" data-open-drawer="sustainability" data-context="${id}">${escapeHtml(L("See options", "Voir les options"))}</button></article>`; }).join("")}</div></section>
       <details class="card-section methodology"><summary>${escapeHtml(L("How is this calculated?", "Comment ce calcul est-il réalisé ?"))}</summary><p>${escapeHtml(L("The model combines building electricity and heating, volatile anaesthetic, waste treatment, and client travel. Official conversion factors are kept separate from the clinic activity assumptions used to make the simulation playable.", "Le modèle combine l’électricité et le chauffage du bâtiment, l’anesthésique volatil, le traitement des déchets et les déplacements des clients. Les facteurs de conversion officiels sont séparés des hypothèses d’activité qui rendent la simulation jouable."))}</p><dl><div><dt>${escapeHtml(L("Model version", "Version du modèle"))}</dt><dd>${escapeHtml(D.carbonModel.version)}</dd></div>${Object.values(D.carbonModel.factorRegistry).map((factor) => `<div><dt>${escapeHtml(itemLabel(factor.detail))}</dt><dd>${preciseNumber(factor.value)} ${escapeHtml(factor.unit)} · ${escapeHtml(String(factor.year))}<br>${escapeHtml(factor.source)}</dd></div>`).join("")}<div><dt>${escapeHtml(L("Simulation assumptions", "Hypothèses de simulation"))}</dt><dd>${escapeHtml(L("Energy and waste per service, building demand, room demand, client-trip patterns, and selected treatment routes.", "Énergie et déchets par service, besoins du bâtiment et des salles, déplacements des clients et filières de traitement retenues."))}</dd></div><div><dt>${escapeHtml(L("Not included", "Non inclus"))}</dt><dd>${escapeHtml(L("Medicines and other supply chains, staff commuting, equipment manufacture, construction, and refrigerants.", "Médicaments et autres chaînes d’approvisionnement, trajets du personnel, fabrication des équipements, construction et fluides frigorigènes."))}</dd></div></dl><p class="source-links"><a href="https://vetsustain.org/resources/the-veterinary-carbon-calculator-getting-started" target="_blank" rel="noreferrer">Vet Sustain</a><a href="https://www.eea.europa.eu/en/analysis/indicators/greenhouse-gas-emission-intensity-of-1-1751032678/greenhouse-gas-emission-intensity-of-electricity-generation-country-level" target="_blank" rel="noreferrer">EEA</a><a href="https://www.gov.uk/government/publications/greenhouse-gas-reporting-conversion-factors-2025" target="_blank" rel="noreferrer">UK 2025 factors</a><a href="https://www.gov.uk/guidance/fluorinated-gases-f-gases" target="_blank" rel="noreferrer">UK F-gas table</a><a href="https://dailymed.nlm.nih.gov/dailymed/lookup.cfm?setid=d27da7db-5c2c-4b9f-bf14-a4d18d3e6d4e" target="_blank" rel="noreferrer">DailyMed</a><a href="https://www.england.nhs.uk/long-read/nhs-clinical-waste-strategy/" target="_blank" rel="noreferrer">NHS clinical waste</a><a href="https://ghgprotocol.org/corporate-standard-frequently-asked-questions" target="_blank" rel="noreferrer">GHG Protocol</a></p></details>
     </section>`;
@@ -2774,6 +2904,7 @@
     })() : "";
     const causeRows = `<article><span>${escapeHtml(L("Main constraint", "Contrainte principale"))}</span><strong>${escapeHtml(blockerText(latest.operational.mainConstraint))}</strong><em>${escapeHtml(L("Explains unmet requests or weak revenue", "Explique les demandes non traitées ou les recettes insuffisantes"))}</em></article><article><span>${escapeHtml(L("Largest cost", "Coût principal"))}</span><strong>${escapeHtml(costDrivers[0][0])}: ${money(costDrivers[0][1])}</strong><em>${escapeHtml(L("Largest annual financial pressure", "Principale pression financière annuelle"))}</em></article>${carbon ? `<article><span>${escapeHtml(L("Largest carbon source", "Principale source de carbone"))}</span><strong>${escapeHtml(sourceLabel(mainCarbon))}: ${tonnes(carbon.bySource[mainCarbon])}</strong><em>${escapeHtml(mainCarbon === "building" ? L("Opening hours, rooms, and energy choices", "Horaires, salles et choix énergétiques") : mainCarbon === "clinical" ? L("Anaesthetic use in eligible procedures", "Gaz anesthésiques des actes concernés") : mainCarbon === "waste" ? L("Waste produced by treated cases", "Déchets produits par les cas traités") : L("Client numbers, location, and parking", "Nombre de clients, implantation et parking"))}</em></article>` : ""}`;
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Year results", "Résultats de l’année"))}</h1><p>${escapeHtml(L("See the outcome, identify the causes, then record what the team learned.", "Observez le résultat, identifiez les causes, puis consignez les apprentissages de l’équipe."))}</p></div><div class="button-row"><strong>${escapeHtml(t("app.year", { year: latest.turn, target: state.rules.targetYear }))}</strong><button class="button primary" data-domain="overview">${escapeHtml(L(`Plan Year ${state.year} →`, `Planifier l’année ${state.year} →`))}</button></div></div>
+      ${resolvedGridNote(latest.turn)}
       <div class="dashboard-grid compact-three">${changes.map((item) => metricCard(item.label, item.value, item.good ? L("Improved or on track", "Amélioration ou objectif atteint") : L("Needs attention", "À surveiller"), item.good ? "good" : "warn")).join("")}</div>
       ${verdict}
       <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("What drove the result", "Origine du résultat"))}</h2></div><span class="panel-links"><button class="text-button" data-open-drawer="serviceLedger">${escapeHtml(L("What each service brings in", "Ce que rapporte chaque service"))} ›</button></span></div><div class="cause-list">${causeRows}</div><h3>${escapeHtml(L("Actions taken", "Actions réalisées"))}</h3><div class="chips">${latest.actions?.length ? latest.actions.map((action) => `<span class="chip">${escapeHtml(actionLabel(action))}</span>`).join("") : `<span class="chip">${escapeHtml(t("results.noAction"))}</span>`}</div>${(latest.departures || []).length ? `<div class="recruitment-results">${latest.departures.map((item) => `<p class="bad-text">${escapeHtml(item.name)}: ${escapeHtml(departureText(item.reason))}</p>`).join("")}</div>` : ""}${latest.recruitment?.length ? `<div class="recruitment-results">${latest.recruitment.map((row) => `<p class="${row.accepted ? "good-text" : "bad-text"}">${escapeHtml(candidateById(row.candidateId)?.name || row.candidateId)}: ${escapeHtml(row.accepted ? t("staff.accepted") : t("staff.refused"))}</p>`).join("")}</div>` : ""}</section>
@@ -2830,7 +2961,18 @@
       window.setTimeout(() => {
         const body = drawer.querySelector(".drawer-body");
         if (body) body.scrollTop = restore.scrollTop;
-        if (restore.selector) drawer.querySelector(restore.selector)?.focus();
+        const cible = restore.selector ? drawer.querySelector(restore.selector) : null;
+        if (!cible) return;
+        cible.focus();
+        if (!restore.champ || typeof cible.setSelectionRange !== "function") return;
+        // Keep what was typed only while it still means the figure the model now holds, so a value
+        // the ceiling clamped is corrected on screen instead of being quietly kept.
+        const saisi = String(restore.champ.value ?? "");
+        const garde = Number(saisi || 0) === Number(cible.value || 0);
+        if (garde) cible.value = saisi;
+        // When a ceiling rewrote the figure, the caret goes to the end of the figure that won.
+        const position = garde ? Math.min(restore.champ.caret ?? cible.value.length, cible.value.length) : cible.value.length;
+        cible.setSelectionRange(position, position);
       }, 0);
     } else if (drawer && ui.focusItem && drawer.querySelector("[data-target-card]")) {
       ui.autoFocusDrawer = false;
@@ -2967,7 +3109,7 @@
       const hourRows = report.operational.serviceHourRows || [];
       const reflection = state.reflections[report.turn] || {};
       const snapshotStaff = report.clinicSnapshot?.staff || [];
-      const staffTable = staffRows.length ? reportTable([L("Person", "Personne"), L("Available", "Disponibles"), L("Assigned", "Affecté"), L("Used", "Utilisées"), L("Overtime", "Heures sup."), L("Idle", "Inoccupées"), L("Unused", "Inutilisées"), L("Blocked", "Bloquées"), L("Workload", "Charge"), L("Allocations", "Affectations")], staffRows.map((row) => { const person = snapshotStaff.find((item) => item.id === row.id); return [escapeHtml(person?.name || row.id), number(row.availableHours), pct(row.assignedShare ?? 1), number(row.usedHours), number(row.overtimeHours || 0), number(row.idleHours || 0), number(row.unusedHours), number(row.blockedHours), pct(row.workload), escapeHtml((row.assignments || []).map((assignment) => `${serviceName(assignment.serviceId)} ${Math.round(assignment.share * 100)}%`).join(" · "))]; })) : `<p class="notice">${escapeHtml(L("Detailed staff allocation was not recorded for this migrated year.", "L’affectation détaillée du personnel n’a pas été enregistrée pour cette année migrée."))}</p>`;
+      const staffTable = staffRows.length ? reportTable([L("Person", "Personne"), L("Available", "Disponibles"), L("Assigned", "Affecté"), L("Used", "Utilisées"), L("Overtime", "Heures sup."), L("Unused", "Inutilisées"), L("Blocked", "Bloquées"), L("Workload", "Charge"), L("Allocations", "Affectations")], staffRows.map((row) => { const person = snapshotStaff.find((item) => item.id === row.id); return [escapeHtml(person?.name || row.id), number(row.availableHours), pct(row.assignedShare ?? 1), number(row.usedHours), number(row.overtimeHours || 0), number(row.unusedHours), number(row.blockedHours), pct(row.workload), escapeHtml((row.assignments || []).map((assignment) => `${serviceName(assignment.serviceId)} ${Math.round(assignment.share * 100)}%`).join(" · "))]; })) : `<p class="notice">${escapeHtml(L("Detailed staff allocation was not recorded for this migrated year.", "L’affectation détaillée du personnel n’a pas été enregistrée pour cette année migrée."))}</p>`;
       const serviceRows = report.serviceResults || [];
       const services = serviceRows.length ? reportTable([L("Service", "Service"), L("Requests", "Demandes"), L("Served", "Traités"), L("Price", "Prix"), L("Revenue", "Recettes"), L("Variable costs", "Coûts variables"), L("Blocker", "Blocage")], serviceRows.filter((row) => row.active).map((row) => [escapeHtml(serviceName(row.id)), number(row.demand), number(row.honored), money(row.price), money(row.revenue), money(row.variableCosts), escapeHtml(blockerText(row.bottleneck))])) : `<p class="notice">${escapeHtml(L("Detailed service results were not recorded for this migrated year.", "Les résultats détaillés des services n’ont pas été enregistrés pour cette année migrée."))}</p>`;
       const hours = hourRows.length ? reportTable([L("Service", "Service"), L("Role", "Fonction"), L("Assigned", "Affectées"), L("Needed", "Nécessaires"), L("Used", "Utilisées"), L("Shortage", "Manque")], hourRows.map((row) => [escapeHtml(serviceName(row.serviceId)), escapeHtml(row.role === "vet" ? L("Veterinarian", "Vétérinaire") : L("Support", "Soutien")), number(row.assignedHours), number(row.neededHours), number(row.usedHours), number(row.shortageHours)])) : "";
@@ -3121,8 +3263,10 @@
       const index = Number(button.dataset.allocationIndex);
       if (!draft[index]) return;
       const others = allocationTotal(draft) - draft[index].share;
-      const ceiling = Math.floor((MAX_ALLOCATION - others) * 20 + .0001) / 20;
-      draft[index].share = clamp(Math.round((draft[index].share * 100 + Number(button.dataset.allocationAdjust)) / 5) * 5 / 100, 0, ceiling);
+      // A step moves the share by its own size and nothing else. Re-rounding the base to the 5%
+      // grid here destroyed a typed number of hours: 90 h became 142 h on one press of +, a jump
+      // of 52 h where the button promises 71.
+      draft[index].share = stepShare(draft[index].share, Number(button.dataset.allocationAdjust), others, availableHoursFor(person.id));
       rememberDrawer(`[data-allocation-adjust="${button.dataset.allocationAdjust}"][data-allocation-index="${index}"]`);
       render();
       return;
@@ -3134,9 +3278,9 @@
       const index = Number(button.dataset.allocationFill);
       if (!draft[index]) return;
       const others = allocationTotal(draft) - draft[index].share;
-      const ceiling = Math.floor((MAX_ALLOCATION - others) * 20 + .0001) / 20;
+      const ceiling = allocationCeiling(others);
       // Fill to exactly 100% of available hours rather than the 1.3 ceiling, so this never buys overtime.
-      draft[index].share = clamp(Math.min(1 - others, ceiling), 0, ceiling);
+      draft[index].share = snapShareToHours(clamp(Math.min(1 - others, ceiling), 0, ceiling), availableHoursFor(person.id));
       rememberDrawer(`[data-allocation-index="${index}"]`);
       render();
       return;
@@ -3304,23 +3448,6 @@
       input.value = "";
       return;
     }
-    if (input.dataset.allocationHours !== undefined) {
-      const person = plannedState().staff.find((item) => item.id === ui.drawerContext);
-      if (!person) return;
-      const draft = allocationDraftFor(person);
-      const index = Number(input.dataset.allocationHours);
-      if (!draft[index]) return;
-      const forecast = simulatePlan(pendingActions());
-      const disponibles = forecast.operational.staffRows.find((row) => row.id === person.id)?.availableHours || 0;
-      if (!(disponibles > 0)) return;
-      const autres = allocationTotal(draft) - draft[index].share;
-      const plafond = Math.max(0, MAX_ALLOCATION - autres);
-      draft[index].share = clamp(Math.max(0, Number(input.value) || 0) / disponibles, 0, plafond);
-      ui.allocationDrafts[person.id] = draft;
-      rememberDrawer(`[data-allocation-hours="${index}"]`);
-      render();
-      return;
-    }
     if (input.dataset.prediction !== undefined) { ui.predictionDraft = input.value || null; return; }
     if (input.dataset.vacancyRole !== undefined) {
       const allowed = input.value === "vet" ? ["general", "ultrasound", "dentistry", "orthopedics"] : ["preventive", "surgery", "lab", "imaging", "emergency", "inpatient", "pharmacy", "animalCare"];
@@ -3341,6 +3468,29 @@
 
   document.addEventListener("input", (event) => {
     const input = event.target;
+    // Hours commit as they are typed. On "change" they committed only on blur, so the field showed
+    // one number while the total, the bar, the caption and the live impact underneath still showed
+    // the old one — the panel contradicting itself with nothing to say which figure was current.
+    if (input.dataset.allocationHours !== undefined) {
+      const person = plannedState().staff.find((item) => item.id === ui.drawerContext);
+      if (!person) return;
+      const draft = allocationDraftFor(person);
+      const index = Number(input.dataset.allocationHours);
+      if (!draft[index]) return;
+      const disponibles = availableHoursFor(person.id);
+      if (!(disponibles > 0)) return;
+      const autres = allocationTotal(draft) - draft[index].share;
+      // Only digits reach the model; anything else is dropped, and the caret moves back by whatever
+      // was removed so the next keystroke lands where the writer expects.
+      const brut = String(input.value || "");
+      const chiffres = brut.replace(/[^0-9]/g, "");
+      const caret = Math.max(0, (input.selectionStart ?? brut.length) - (brut.length - chiffres.length));
+      draft[index].share = shareFromHours(chiffres, autres, disponibles);
+      ui.allocationDrafts[person.id] = draft;
+      rememberDrawer(`[data-allocation-hours="${index}"]`, { value: chiffres, caret });
+      render();
+      return;
+    }
     if (input.dataset.settingsField) { ui.settingsDraft = { ...(ui.settingsDraft || {}), [input.dataset.settingsField]: input.value }; return; }
     if (input.dataset.draftKey) { ui.decisionDrafts[input.dataset.draftKey] = input.value; return; }
     if (input.dataset.vacancyBudget !== undefined) { ui.vacancy.budget = Number(input.value || 0); return; }
@@ -3385,7 +3535,7 @@
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   });
 
-  globalThis.ClinicTest = { initialState, hydrate, sauvegarderClinique, chargerClinique, casesCarried, countedActions, isFreeAction, predictionOptions, constraintKey, constraintBreakdown, planFrames, adjustCash, parseRoute, routeFor, applyRoute, openDrawer, closeDrawer, planRowLabel, planRows, applyAction, simulateYear, simulatePlan, queueAction, removeAction, resolveTurn, undoYear, resetScenario, pendingActions, forecastRecord, calculateCarbon, missingRequirements, requirementList, projectedDemand, actionLabel, goalChecks, getBeginnerSignals, emptyEffects, combineEffects, clone, validAllocations, allocationRemainder, stockServices: STOCK_SERVICES, buildExportPayload, buildPrintableReportHtml, data: D, getState: () => clone(state), renderState: (next) => { state = hydrate(next); ui.selectedServiceId = null; ui.settingsDraft = null; render(); return document.querySelector("#app").innerHTML; }, renderUiForTest: (changes) => { ui = { ...ui, ...changes }; render(); return document.querySelector("#app").innerHTML; } };
+  globalThis.ClinicTest = { initialState, hydrate, sauvegarderClinique, chargerClinique, casesCarried, countedActions, isFreeAction, predictionOptions, constraintKey, constraintBreakdown, planFrames, adjustCash, parseRoute, routeFor, applyRoute, openDrawer, closeDrawer, planRowLabel, planRows, applyAction, simulateYear, simulatePlan, queueAction, removeAction, resolveTurn, undoYear, resetScenario, pendingActions, forecastRecord, calculateCarbon, missingRequirements, requirementList, projectedDemand, actionLabel, goalChecks, getBeginnerSignals, emptyEffects, combineEffects, clone, validAllocations, allocationRemainder, allocationCeiling, snapShareToHours, stepShare, shareFromHours, availableHoursFor, assignedTone, workloadTone, stockServices: STOCK_SERVICES, buildExportPayload, buildPrintableReportHtml, data: D, getState: () => clone(state), renderState: (next) => { state = hydrate(next); ui.selectedServiceId = null; ui.settingsDraft = null; render(); return document.querySelector("#app").innerHTML; }, renderUiForTest: (changes) => { ui = { ...ui, ...changes }; render(); return document.querySelector("#app").innerHTML; } };
   if (typeof location !== "undefined" && location.hash) applyRoute(parseRoute(location.hash));
   render();
 })();

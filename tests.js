@@ -168,8 +168,13 @@
   test("allocations below 100% show paid idle time without overtime", () => {
     const clinic = busyConsultClinic(.8);
     const row = T.simulateYear(T.clone(clinic), clinic, T.emptyEffects(), []).operational.staffRows.find((item) => item.id === "vet-founder");
-    assert(row.idleHours > 0 && row.overtimeHours === 0, "Idle hours were not reported");
-    assert(Math.abs(row.idleHours - row.availableHours * .2) < 1e-8, "Idle hours do not match the unassigned share");
+    assert(row.overtimeHours === 0, "An allocation below 100% cannot create overtime");
+    assert(row.unusedHours > 0, "Paid hours nobody worked were not reported");
+    // Unused hours are what the clinic pays for and nobody works: available minus used, and nothing
+    // else. The old reading took the unassigned share instead, so hours assigned to a service the
+    // clinic could not deliver counted as busy.
+    assert(Math.abs(row.unusedHours - (row.availableHours - row.usedHours)) < 1e-8, "Unused hours must be the hours paid for and not worked");
+    assert(row.usedHours + row.unusedHours - row.availableHours - row.overtimeHours < 1e-8, "Used and unused hours must account for every paid hour");
   });
 
   test("per-person training gives the skill and training hours to one person only", () => {
