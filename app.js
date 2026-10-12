@@ -115,8 +115,8 @@
     for (const row of allocations) {
       const service = SERVICE_BY_ID[row?.serviceId];
       const share = Number(row?.share);
-      if (!service || !roleCompatible(person, service) || ids.has(service.id) || share <= 0 || share > MAX_ALLOCATION + .0001) return false;
-      if (Math.abs(share * 20 - Math.round(share * 20)) > .0001) return false;
+      if (!service || !roleCompatible(person, service) || ids.has(service.id)) return false;
+      if (!Number.isFinite(share) || share <= 0 || share > MAX_ALLOCATION + .0001) return false;
       ids.add(service.id);
       total += share;
     }

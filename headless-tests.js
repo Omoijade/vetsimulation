@@ -1269,6 +1269,23 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
   });
   if (!/data-allocation-hours/.test(html)) throw new Error("The hours field disappeared: percentages alone cannot hit a chosen number of hours");
 
+  // A field you can type into and then cannot validate is worse than no field. validAllocations
+  // only accepted multiples of 5% — an interface assumption from when buttons were the only way
+  // to make a share — so 400 h of 1 421 was refused and the review button stayed disabled with
+  // nothing saying why. The cases below are already rejected by the running total; they are
+  // asserted so a future rewrite of this function cannot quietly start accepting them.
+  const vet = ClinicTest.getState().staff.find((p) => p.role === "vet");
+  const horaire = [{ serviceId: "consult", share: 400 / 1421 }];
+  if (!ClinicTest.validAllocations(vet, horaire)) throw new Error("An allocation typed in hours must be valid, or the student can change it and never confirm it");
+  [[NaN, "NaN"], [Infinity, "Infinity"], [0, "zero"], [-0.2, "negative"], [1.35, "135%"]].forEach(([share, quoi]) => {
+    if (ClinicTest.validAllocations(vet, [{ serviceId: "consult", share }])) throw new Error(`validAllocations accepted ${quoi}`);
+  });
+  if (!ClinicTest.validAllocations(vet, [{ serviceId: "consult", share: 1.3 }])) throw new Error("130% is paid overtime and must stay allowed");
+  // and the whole way through: type, review, confirm, and find it in the plan
+  ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: vet.id });
+  const apres = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: vet.id });
+  if (/data-review-allocation="[^"]*"\s+disabled/.test(apres)) throw new Error("The review button is disabled on a freshly opened allocation");
+
   // Anything that collapses must stay open across a re-render. The frames only exist once a plan
   // has something in it, so give it one before asking.
   ClinicTest.queueAction("pli", { kind: "toggle-service", targetId: "vaccination", value: true });
