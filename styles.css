@@ -136,10 +136,10 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   box-shadow: var(--shadow);
 }
 .forecast-table { display: grid; gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--line); }
-.forecast-head, .forecast-row { display: grid; grid-template-columns: 1.3fr repeat(3, .75fr); gap: 8px; align-items: center; padding: 8px; background: #fff; }
-.forecast-head { color: var(--muted); background: var(--surface-soft); font-size: 12px; font-weight: 800; text-transform: uppercase; }
-.forecast-row { font-size: 13px; }
-.forecast-row strong { font-size: 13px; }
+.forecast-head, .forecast-row { display: grid; grid-template-columns: 1.35fr repeat(3, .72fr); gap: 6px; align-items: center; padding: 5px 8px; background: #fff; line-height: 1.25; }
+.forecast-head { color: var(--muted); background: var(--surface-soft); font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .02em; }
+.forecast-row { font-size: 12.5px; }
+.forecast-row strong { font-size: 12.5px; font-weight: 600; }
 .forecast-row span, .forecast-row em { text-align: right; font-style: normal; }
 .forecast-row em { color: var(--primary); font-weight: 800; }
 .forecast-row.constraint { grid-template-columns: 1fr 1fr 1fr 24px; align-items: start; }
@@ -148,7 +148,50 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .plan-action button { flex: 0 0 27px; width: 27px; height: 27px; border: 0; border-radius: 50%; color: var(--bad); background: var(--bad-soft); font-size: 18px; }
 .plan-action.free-action { border-style: dashed; background: var(--surface, #fbfbfb); }
 .plan-action small { display: block; color: var(--muted); font-weight: 400; font-size: 11px; }
+.metric-card .text-button { margin-top: 6px; font-size: 12px; }
+.hours-table.ledger [role="row"] { grid-template-columns: 1.4fr .6fr .9fr .9fr .8fr .8fr .8fr; }
+.hours-table.ledger [role="row"].total { border-top: 2px solid var(--line); font-weight: 700; }
+.hours-table.ledger [role="row"].ajustement { color: var(--muted); font-style: italic; }
+.note-repliee > summary { list-style: none; cursor: pointer; color: var(--muted); font-size: 11.5px; padding: 3px 0; }
+.note-repliee > summary::-webkit-details-marker { display: none; }
+.note-repliee p { margin: 4px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); }
+.export-choices.sauvegarde { border: 1px dashed var(--line); border-radius: 10px; padding: 10px; margin-bottom: 12px; }
+.bouton-fichier input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.bouton-fichier span { display: inline-block; cursor: pointer; }
+.heures-exactes { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; margin: 2px 0 1px; }
+.heures-exactes input { width: 78px; min-height: 40px; padding: 6px 9px; font-size: 14px; font-weight: 700; text-align: right; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.heures-exactes input:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
+.heures-exactes span { color: var(--muted); font-size: 12px; }
+.reservation-note { margin: 6px 0 10px; font-size: 12.5px; line-height: 1.6; color: var(--muted); }
+.reservation-note strong { color: var(--text); }
+.reservation-note .text-button { margin-right: 8px; }
 .panel-note { margin: 10px 0 0; padding: 9px 11px; border-left: 3px solid var(--line); color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.prediction-ask { margin: 14px 0 4px; padding: 12px; border: 1px dashed var(--line); border-radius: 9px; }
+.prediction-ask small { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+.prediction-verdict { border-left: 5px solid var(--line); }
+.prediction-verdict.matched { border-left-color: var(--good, #2f6b4f); }
+.prediction-verdict.missed { border-left-color: var(--warn, #b4322a); }
+.prediction-verdict p { margin: 8px 0; }
+.prediction-verdict .arguable { padding: 10px 12px; border: 1px dashed var(--line); border-radius: 8px; font-size: 13.5px; line-height: 1.5; }
+.plan-frames { margin: 14px 0 0; padding: 0 12px 11px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.plan-frames > summary { list-style: none; cursor: pointer; padding: 10px 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "titre chevron" "note chevron"; align-items: center; gap: 2px 10px; font-size: 12px; }
+.plan-frames > summary::-webkit-details-marker { display: none; }
+.plan-frames > summary strong { grid-area: titre; }
+.plan-frames > summary span { grid-area: note; }
+.plan-frames > summary span { color: var(--muted); font-size: 11.5px; }
+.plan-frames.split > summary span { color: var(--bad, #b4322a); }
+.plan-frames.split { border-color: var(--warn, #b4322a); }
+.plan-frames h3 { margin: 0 0 9px; font-size: 13px; }
+.frame-row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 12px; }
+.frame-row:first-of-type { border-top: 0; }
+.frame-row strong { font-weight: 700; }
+.frame-row em { grid-column: 1 / -1; font-style: normal; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+.frame-mark { font-weight: 700; font-size: 15px; line-height: 1; }
+.frame-row.better .frame-mark { color: var(--good, #2f6b4f); }
+.frame-row.worse .frame-mark { color: var(--bad, #b4322a); }
+.frame-row.flat .frame-mark { color: var(--muted); }
+.frame-note { margin: 9px 0 0; font-size: 11.5px; line-height: 1.5; color: var(--muted); }
+.plan-frames.split .frame-note { color: var(--text); }
 .pass-button { width: 100%; min-height: 44px; }
 .plan-footer { position: sticky; bottom: -16px; padding-top: 10px; padding-bottom: 1px; background: #f9fbfd; }
 .empty { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
@@ -629,3 +672,23 @@ textarea { min-height: 112px; padding: 10px; resize: vertical; line-height: 1.45
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
+
+/* « Ceci s'ouvre » doit se voir. Un seul chevron pour tous les dépliants, qui pivote à
+   l'ouverture et laisse une cible de clic franche. */
+.note-repliee > summary, .plan-frames > summary, .methodology > summary, .setup-record > summary, .settings-details > summary, .history-accordions summary {
+  position: relative; padding-right: 26px;
+}
+.note-repliee > summary::after, .plan-frames > summary::after, .methodology > summary::after,
+.setup-record > summary::after, .settings-details > summary::after, .history-accordions summary::after {
+  content: ""; position: absolute; right: 6px; top: 50%; width: 8px; height: 8px;
+  border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: translateY(-70%) rotate(45deg); opacity: .55; transition: transform .15s ease;
+}
+.plan-frames > summary::after { grid-area: chevron; }
+details[open] > summary::after { transform: translateY(-30%) rotate(225deg); }
+.note-repliee > summary:hover::after, .plan-frames > summary:hover::after { opacity: 1; }
+.plan-frames > summary:focus-visible, .note-repliee > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 6px; }
+
+.regle-affectation { margin: 0 0 2px; }
+.regle-affectation > summary { font-weight: 700; color: var(--text); font-size: 12.5px; }
+.regle-affectation p { margin: 6px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); }

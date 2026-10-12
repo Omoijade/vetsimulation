@@ -1082,6 +1082,204 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
   if (!teamHtml.includes("do not add up across the team")) throw new Error("Showing cases per person without saying they overlap invites a total that is wrong by every shared case");
 }
 
+// The prediction loop. A student who only watches an outcome learns little; one who committed and
+// was contradicted has nowhere to hide. The question must be about the year AFTER the one being
+// passed — the plan panel already forecasts the coming year, so asking about that would be reading
+// a row rather than reasoning. The pair must survive into the history and the export.
+{
+  const pred = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("balanced", "en")));
+  ClinicTest.renderState(pred);
+  const forecast = ClinicTest.simulatePlan([]);
+  const options = ClinicTest.predictionOptions(ClinicTest.getState(), forecast);
+  if (options.length < 3) throw new Error(`A prediction needs real alternatives; only ${options.length} offered`);
+  if (new Set(options.map((option) => option.key)).size !== options.length) throw new Error("The prediction options must not repeat a constraint");
+  if (options.some((option) => !option.label || option.label === option.key)) throw new Error("Every prediction option must carry the same wording the clinic uses to answer");
+  // The answer the clinic will give must be expressible as one of the choices offered.
+  const answerable = ClinicTest.constraintKey(forecast.operational.mainConstraint);
+  if (!options.some((option) => option.key === answerable)) throw new Error(`The clinic's own answer "${answerable}" is not among the options a student can pick`);
+
+  // Commit, resolve, adjudicate, retain.
+  ClinicTest.renderUiForTest({ passCheck: true, predictionDraft: "vetHours:" });
+  const modal = ClinicTest.renderUiForTest({ passCheck: true, predictionDraft: "vetHours:" });
+  if (!modal.includes("data-prediction")) throw new Error("The year-end review must ask for the prediction before the year resolves");
+  if (!modal.includes("Year 2")) throw new Error("The prediction must be asked about the year after the one being passed, not the one the plan panel already forecasts");
+  ClinicTest.resolveTurn();
+  const afterFirst = ClinicTest.getState();
+  if (afterFirst.history[0].prediction) throw new Error("A prediction made while passing year 1 is about year 2; it must not be adjudicated against year 1");
+  if (afterFirst.prediction?.forYear !== 2) throw new Error("The prediction must be held until the year it speaks about");
+  ClinicTest.resolveTurn();
+  const resolved = ClinicTest.getState().history[1].prediction;
+  if (!resolved) throw new Error("The year the prediction spoke about must carry the adjudication");
+  if (resolved.predicted !== "vetHours:") throw new Error("The adjudication must keep what the student actually said");
+  if (resolved.actual !== ClinicTest.constraintKey(ClinicTest.getState().history[1].operational.mainConstraint)) throw new Error("The adjudication must compare against the constraint the clinic reported");
+  if (resolved.match !== (resolved.predicted === resolved.actual)) throw new Error("The verdict must follow from the two values, not be set separately");
+  const results = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "results" });
+  if (!results.includes("You predicted")) throw new Error("The results page must show the prediction beside what happened");
+  // A verdict that only announces the right answer trains deference to the model, which is the
+  // habit this kind of course exists to break. It has to hand back what the clinic was counting,
+  // and it has to leave "the model is wrong here" reachable.
+  if (!results.includes("Why the clinic answers this")) throw new Error("The verdict must return the clinic's basis, not only its answer");
+  if (!results.includes("you have found an edge of the model")) throw new Error("The verdict must make disagreeing with the model on uncounted grounds a finding rather than an error");
+  const payload = ClinicTest.buildExportPayload();
+  const row = payload.years?.find((year) => year.predictedConstraint);
+  if (!row) throw new Error("The prediction and its outcome must leave the instrument in the export; otherwise no trace survives for the facilitator or the researcher");
+
+  // The ranking must be checked on a clinic that actually leaves requests unserved, or the
+  // assertion goes quiet exactly where it matters. `balanced` serves everything it offers.
+  ClinicTest.renderState(ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("growth", "en"))));
+  ClinicTest.resolveTurn();
+  ClinicTest.resolveTurn();
+  const strained = ClinicTest.getState().history[1];
+  const ranking = ClinicTest.constraintBreakdown(strained);
+  const unservedTotal = ranking.reduce((sum, row) => sum + row.unserved, 0);
+  if (unservedTotal <= 0) throw new Error("This check needs a year with unserved requests; the scenario no longer provides one and the ranking assertion below would pass vacuously");
+  if (ranking.length < 2) throw new Error("A ranking of one tells the student nothing about how close the answer was");
+  const reported = ClinicTest.constraintKey(strained.operational.mainConstraint);
+  if (ranking[0].key !== reported) throw new Error(`The breakdown must rank the same way the clinic does: it leads with ${ranking[0].key}, the clinic reported ${reported}`);
+  if (ranking.some((row, index) => index > 0 && row.unserved > ranking[index - 1].unserved)) throw new Error("The breakdown must be ordered by how many requests each constraint cost");
+  if (ranking.some((row) => row.services.some((service) => service.unserved <= 0))) throw new Error("The breakdown must only name services that actually lost requests");
+}
+
+// Framing is the one judgement in this software that no figure can settle. The same plan is an
+// improvement or a loss depending on which quantity is chosen to look at, so the panel shows four
+// and refuses to rank them. If they could never disagree the feature would be decoration.
+{
+  const framed = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("balanced", "en")));
+  ClinicTest.renderState(framed);
+  const flat = ClinicTest.planFrames(ClinicTest.simulatePlan([]), ClinicTest.simulatePlan([]));
+  if (flat.length < 4) throw new Error(`A frame comparison needs several points of view; got ${flat.length}`);
+  if (flat.some((frame) => frame.verdict !== "flat")) throw new Error("With no action planned, no point of view may report a change");
+  if (new Set(flat.map((frame) => frame.id)).size !== flat.length) throw new Error("Each point of view must be distinct");
+  ClinicTest.queueAction("service:vaccination", { kind: "toggle-service", targetId: "vaccination", value: true });
+  ClinicTest.queueAction("service:preventive", { kind: "toggle-service", targetId: "preventive", value: true });
+  const judged = ClinicTest.planFrames(ClinicTest.simulatePlan([]), ClinicTest.simulatePlan(ClinicTest.pendingActions()));
+  const better = judged.filter((frame) => frame.verdict === "better");
+  const worse = judged.filter((frame) => frame.verdict === "worse");
+  if (!better.length || !worse.length) throw new Error(`Opening two services must improve some points of view and damage another, or framing is not testable here: ${judged.map((f) => f.id + "=" + f.verdict).join(" ")}`);
+  if (judged.some((frame) => !frame.detail || !/\d/.test(frame.detail))) throw new Error("Every point of view must return the figure that decided it, so the verdict can be argued with");
+  const panel = ClinicTest.renderState(ClinicTest.getState());
+  if (!panel.includes("Better or worse — seen from where?")) throw new Error("The frame comparison must sit in the plan panel, beside the decision it judges");
+  if (!panel.includes("choosing which one counts is the decision")) throw new Error("When the points of view disagree the software must say it will not choose between them");
+}
+
+// A clinic must be able to leave the machine it was made on: Wednesday is done at home, and a
+// laptop can fail. The analytical export is not a save file — it drops nineteen state keys —
+// so this is a separate file whose only job is to come back identical.
+{
+  const saved = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("growth", "en")));
+  ClinicTest.renderState(saved);
+  ClinicTest.queueAction("a", { kind: "toggle-service", targetId: "vaccination", value: true });
+  ClinicTest.resolveTurn();
+  ClinicTest.resolveTurn();
+  const before = ClinicTest.getState();
+  const file = { kind: "clinique-sauvegarde", schemaVersion: 8, savedAt: new Date().toISOString(), state: ClinicTest.clone(before) };
+  ClinicTest.renderState(ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("balanced", "en"))));
+  if (!ClinicTest.chargerClinique(JSON.stringify(file))) throw new Error("A valid save file must load");
+  const after = ClinicTest.getState();
+  const scrub = (o) => JSON.parse(JSON.stringify(o), (k, v) => (k === "at" || k === "updatedAt" || k === "savedAt" ? null : v));
+  if (JSON.stringify(scrub(before)) !== JSON.stringify(scrub(after))) throw new Error("A saved clinic must come back identical, or a team loses a week of play");
+  if (after.history.length !== 2 || after.scenarioId !== "growth") throw new Error("Loading must restore the scenario and the history, not only the current year");
+  // Nothing that is not a save file may replace a clinic, and a refusal must change nothing.
+  const sentinel = JSON.stringify(scrub(ClinicTest.getState()));
+  [JSON.stringify({ kind: "autre" }), JSON.stringify({ kind: "autre", schemaVersion: 8, state: ClinicTest.clone(before) }), JSON.stringify(ClinicTest.buildExportPayload()), JSON.stringify({ kind: "clinique-sauvegarde", schemaVersion: 3, state: {} }), "pas du json"].forEach((bad, index) => {
+    if (ClinicTest.chargerClinique(bad) !== false) throw new Error(`Bad save file ${index} was accepted`);
+    if (JSON.stringify(scrub(ClinicTest.getState())) !== sentinel) throw new Error(`Refusing bad save file ${index} still altered the clinic`);
+  });
+}
+
+// What each service brings in. Every figure is already in the report; the table must reconcile to
+// the clinic's own totals, and margin per hour must divide by one resource at a time — a cohort
+// divided by the two added together and ranked ultrasound at 89 €/h instead of 138.
+{
+  const led = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("balanced", "en")));
+  ClinicTest.renderState(led);
+  ["vaccination", "preventive", "lab"].forEach((id, index) => ClinicTest.queueAction("s" + index, { kind: "toggle-service", targetId: id, value: true }));
+  ClinicTest.resolveTurn();
+  const report = ClinicTest.getState().history[0];
+  const rows = report.serviceResults.filter((row) => row.active && row.honored > 0);
+  if (rows.length < 3) throw new Error(`This check needs at least three services treating cases; got ${rows.length}`);
+  const serviceNameFor = (id) => (ClinicData.services.find((x) => x.id === id).name.en);
+  const html = ClinicTest.renderUiForTest({ drawer: "serviceLedger" });
+  if (!html.includes("What each service brings in") && !/Service/.test(html)) throw new Error("The service ledger did not render");
+  // Read the cells the student actually sees, not the report they were built from.
+  const cells = [...html.matchAll(/<div role="row"[^>]*>([\s\S]*?)<\/div>\s*(?=<div role="row"|<\/div>)/g)]
+    .map((m) => [...m[1].matchAll(/<(?:span|strong)>([^<]*)<\/(?:span|strong)>/g)].map((c) => c[1].trim()));
+  const euros = (txt) => {
+    const brut = String(txt).replace(/[^\d-]/g, "");
+    return Number(brut) || 0;
+  };
+
+  const totalRow = cells.find((row) => /^(Total)$/.test(row[0]));
+  if (!totalRow) throw new Error("The service ledger has no total row to check against the clinic");
+  if (Math.abs(euros(totalRow[2]) - report.financial.revenue) > 1) throw new Error(`The table's total revenue reads ${euros(totalRow[2])} against the clinic's ${Math.round(report.financial.revenue)}`);
+  if (Math.abs(euros(totalRow[3]) - report.financial.variableCosts) > 1) throw new Error(`The table's total variable costs read ${euros(totalRow[3])} against the clinic's ${Math.round(report.financial.variableCosts)}`);
+  rows.filter((row) => row.vetDuration > 0 && row.supportDuration > 0).forEach((row) => {
+    const ligne = cells.find((cellule) => cellule[0] === serviceNameFor(row.id));
+    if (!ligne) return;
+    const affiche = euros(ligne[5]);
+    const summed = row.contributionPerCase / (row.vetDuration + row.supportDuration);
+    if (Math.abs(affiche - summed) < 1) throw new Error(`${row.id}: the table shows ${affiche} €/vet hour, which is margin over the two resources added together — they are not interchangeable`);
+  });
+}
+
+// The results page loses the questionnaire teams never filled in, and keeps every word already
+// written: the exports are where that work survives.
+{
+  const kept = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("balanced", "en")));
+  ClinicTest.renderState(kept);
+  ClinicTest.resolveTurn();
+  const withText = ClinicTest.getState();
+  withText.reflections = { 1: { rationale: "We used spare time", expected: "More care", observed: "It worked", surprise: "Travel rose", uncertainty: "Demand" } };
+  ClinicTest.renderState(withText);
+  const page = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "results" });
+  if (/data-reflection=/.test(page)) throw new Error("The results page still asks the five reflection questions");
+  if (ClinicTest.buildExportPayload().years[0].reflection.rationale !== "We used spare time") throw new Error("Removing the questionnaire lost the reflections already written");
+  if (!ClinicTest.buildPrintableReportHtml().includes("We used spare time")) throw new Error("The printable report lost the reflections already written");
+}
+
+// Where a number is read is where its control belongs.
+{
+  const routes = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("balanced", "en")));
+  const overview = ClinicTest.renderState({ ...routes, domain: "overview" });
+  if (!/data-open-drawer="relations"/.test(overview)) throw new Error("Staff climate and client trust are read on the overview; the actions that move them must be reachable from there");
+  const care = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "care" });
+  const roomsAt = care.indexOf('data-open-drawer="rooms"');
+  const listAt = care.indexOf("Current services");
+  if (roomsAt < 0 || listAt < 0 || roomsAt > listAt) throw new Error("The rooms and equipment controls must sit above the service list, which lengthens with every service opened");
+  const panel = ClinicTest.renderState(ClinicTest.getState());
+  const actionsAt = panel.indexOf('class="plan-actions"');
+  const framesAt = panel.indexOf("plan-frames");
+  if (actionsAt < 0 || (framesAt >= 0 && framesAt < actionsAt)) throw new Error("The planned actions are the panel's only control; nothing may come between them and the forecast");
+}
+
+// The hours field must live where the hours are read, not inside the stepper. The stepper is a
+// four-column grid: a fifth child was crushed to 34px around a 56px input, which is how a working
+// control can still be unusable.
+{
+  const alloc = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("balanced", "en")));
+  ClinicTest.renderState(alloc);
+  const sup = ClinicTest.getState().staff.find((p) => p.role === "support");
+  const html = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: sup.id });
+  const steppers = [...html.matchAll(/<div class="stepper"[\s\S]*?<\/div>/g)].map((m) => m[0]);
+  if (!steppers.length) throw new Error("The allocation editor rendered no stepper");
+  steppers.forEach((st) => {
+    if (/data-allocation-hours/.test(st)) throw new Error("The hours field is back inside the stepper, whose grid has four fixed columns — it will be crushed");
+    const enfants = (st.match(/<(button|output)\b/g) || []).length;
+    if (enfants !== 4) throw new Error(`The stepper must hold exactly its four controls; found ${enfants}`);
+  });
+  if (!/data-allocation-hours/.test(html)) throw new Error("The hours field disappeared: percentages alone cannot hit a chosen number of hours");
+
+  // Anything that collapses must stay open across a re-render. The frames only exist once a plan
+  // has something in it, so give it one before asking.
+  ClinicTest.queueAction("pli", { kind: "toggle-service", targetId: "vaccination", value: true });
+  ["framesOpen", "noteOpen", "regleOpen"].forEach((cle) => {
+    const ouvert = ClinicTest.renderUiForTest({ drawer: cle === "regleOpen" ? "staffAllocation" : null, drawerContext: cle === "regleOpen" ? sup.id : null, [cle]: true });
+    const ferme = ClinicTest.renderUiForTest({ drawer: cle === "regleOpen" ? "staffAllocation" : null, drawerContext: cle === "regleOpen" ? sup.id : null, [cle]: false });
+    if (ouvert === ferme) throw new Error(`ui.${cle} changes nothing: the panel will snap shut on the next re-render`);
+    if (!new RegExp(`data-pli="${cle}"[^>]*\\bopen\\b`).test(ouvert)) throw new Error(`ui.${cle} does not re-render the block open`);
+  });
+}
+
 require("./tests.js");
 
 for (const item of resultItems) console.log(item.textContent);
