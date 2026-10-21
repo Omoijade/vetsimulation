@@ -137,6 +137,140 @@
     { id: "support-emergency", name: "Nadia Haddad", role: "support", baseSalary: 34000, expectedSalary: 34000, capacity: 1500, postingFee: 400, skills: ["emergency", "inpatient"], primaryService: "emergency", pitch: bi("Covers emergencies and hospitalised animals.", "Couvre les urgences et les animaux hospitalisés.") }
   ];
 
+  // What clients do with their trust. Trust moves the price they accept, and past thresholds it moves
+  // clients themselves — the same shape as the team climate's thresholds, so both can be watched
+  // crossing a line. A price above what clients accept costs trust each year, scaled by how
+  // sensitive the client type is to price.
+  const trustModel = {
+    priceSlope: .004,                // prix accepté : +0,4 % par point de confiance au-dessus de 50. 0–.01
+    leaveBelow: 45,                  // sous cette confiance, des foyers partent chaque année…
+    leaveRate: -.03,                 // …cette part (−3 %). −.1–0
+    fleeBelow: 35,                   // sous cette confiance, ils partent vite…
+    fleeRate: -.08,                  // …cette part (−8 %). −.2–0
+    referAbove: 65,                  // au-dessus de cette confiance, le bouche-à-oreille amène des foyers…
+    referRate: .03,                  // …cette part (+3 %). 0–.1
+    unfairWeight: 20,                // confiance perdue par part de prix au-dessus du prix accepté…
+    unfairCap: 6,                    // …au plus ce nombre de points par an. 0–15
+    servedGain: 3.2,                 // confiance gagnée par an quand toutes les demandes sont servies (× part servie). 0–8
+    refusedLoss: 5.8,                // confiance perdue par an quand toutes sont refusées (× part refusée). 0–10
+    dropoffTrust: 1,                 // confiance par an avec le parcours de dépôt. 0–3
+    stockoutWeight: 30,              // confiance perdue par part des cas perdus en ruptures de stock…
+    stockoutCap: 4                   // …au plus ce nombre de points par an. 0–10
+  };
+
+  // The other relations around the clinic, each with one clear role.
+  const socialModel = {
+    referralSlope: .01,              // référents : chaque point au-dessus de 50 apporte +1 % de demandes avancées. 0–.03
+    pressureDemandSlope: 0,          // demandes créées par la pression d’accès (0 : désactivé). 0–.005
+    pressureRise: 5,                 // ancienne règle de pression, utilisée seulement si pressureSpeed vaut 0
+    pressureFall: 2,                 // ancienne règle de pression (baisse au-dessus de 84 % servis)
+    pressureSpeed: .5,               // la pression comble cette part de l’écart avec sa cible chaque année. 0–1
+    pressureBase: 40,                // cible de la pression quand tout est servi. 0–60
+    pressureRefusedWeight: 150,      // + ce nombre × la part refusée (85 % servis → 62,5). 0–300
+    pressureTrustSlope: .1,          // au-dessus de 50, chaque point de pression coûte ce nombre de points de confiance par an. 0–.3
+    reputationGrowthWeight: 0,       // poids de la réputation dans la croissance des foyers (0 : elle passe par la confiance). 0–.003
+    trustGrowthWeight: 1 / 300,      // croissance des foyers par point de confiance au-dessus de 50. 0–.01
+    carbonTrustWeight: 20,           // carbone par cas −10 % sur un an : +2 de confiance ; +10 % : −2. 0–40
+    carbonTrustCap: 2,               // au plus ±2 de confiance par an. 0–5
+    refusedLeave: .06,               // foyers perdus par demande refusée : ces familles vont ailleurs pour de bon. 0–.2
+    slowBelow: 50,                   // sous ce climat, une équipe fatiguée travaille plus lentement…
+    slowPerPoint: .004,              // …chaque point en dessous ajoute cette part au temps de chaque cas. 0–.01
+    repeatDecay: .5                  // une action de climat ou de confiance refaite l’année suivante agit × ce nombre, par année de suite. 0–1
+  };
+
+  // ---------- Tous les nombres du modèle sont ici ; app.js ne contient que les mécanismes. ----------
+  // Chaque ligne : ce que c’est, son unité, une plage raisonnable. Changez un nombre, puis lancez
+  // « node outils/verifier-tout.js » pour voir ce qui a bougé. La carte « carte-du-modele.html » explique tout.
+
+  // L’équipe : heures, heures supplémentaires, absences, démissions.
+  const staffModel = {
+    maxAllocation: 1.3,              // part maximale des heures d’une personne qu’on peut affecter (×). 1–1,5
+    overtimePremium: 1.25,           // salaire d’une heure supplémentaire (× salaire horaire). 1–2
+    fatigueAbsencePerOvertime: .3,   // absence en plus l’an prochain, par part d’heures supplémentaires travaillées. 0–1
+    hireOnboarding: .25,             // part des heures de la première année d’une recrue perdue à s’installer. 0–.5
+    severanceShare: .25,             // indemnité de départ (× salaire annuel). 0–1
+    departureClimate: -6,            // points de climat perdus quand quelqu’un est licencié. −15–0
+    resignClimate: 30,               // sous ce climat, quelqu’un démissionne en fin d’année. 0–50
+    resignPayClimate: 45,            // sous ce climat, toute personne payée sous le ratio ci-dessous démissionne. 0–60
+    resignPayRatio: .95,             // …ce ratio de son salaire de référence. .8–1
+    moraleLow: 50,                   // sous ce climat, les absences montent…
+    moraleLowSlope: .004,            // …de cette part des heures par point en dessous…
+    moraleLowCap: .08,               // …jusqu’à cette part. 0–.2
+    moraleHigh: 60,                  // au-dessus de ce climat, les absences baissent…
+    moraleHighSlope: .002,           // …de cette part par point au-dessus…
+    moraleHighCap: .03               // …jusqu’à cette part. 0–.1
+  };
+
+  // Les clients et la demande.
+  const clientModel = {
+    serviceRampUp: .6,               // part de sa demande qu’un service reçoit sa première année. .3–1
+    clinicDemandSwing: .04,          // variation aléatoire de la demande de la clinique (± part), quand la variation est activée. 0–.15
+    serviceDemandSwing: .08,         // variation aléatoire de la demande d’un service (± part). 0–.2
+    growthBase: .9,                  // foyers gardés chaque année avant tout le reste (×). .8–1
+    growthServedWeight: .13,         // foyers gagnés par part de demandes servies (tout servi : +.13). 0–.3
+    growthMin: .78,                  // les foyers baissent au plus jusqu’à cette part en un an. .5–1
+    growthMax: 1.16,                 // et montent au plus jusqu’à cette part. 1–1,5
+    priceUnderResponse: .35,         // demande en plus par part de prix sous le prix accepté (× élasticité). 0–1
+    priceOverDecay: 4,               // vitesse de baisse de la demande par part au-dessus du prix accepté (× élasticité). 1–8
+    trustDemandDivisor: 500,         // effet de la confiance sur la demande : (confiance − 50) ÷ ce nombre. 200–1000
+    parkingDemand: 1.08              // demande avec parking, pour clients soins courants ou prix et la pension (×). 1–1,2
+  };
+
+  // Le climat de l’équipe, ses composantes par an (points).
+  const climateModel = {
+    payWeight: 40,                   // points de climat par part de salaire au-dessus (ou en dessous) de la référence…
+    payCap: 4,                       // …au plus ± ce nombre. 0–10
+    overtimeWeight: 20,              // points perdus par part d’heures supplémentaires (sur toute l’équipe)…
+    overtimeCap: 8,                  // …au plus ce nombre. 0–15
+    workloadHigh: .94,               // au-dessus de cette charge de l’équipe…
+    workloadHighEffect: -3,          // …le climat bouge de ce nombre par an ;
+    workloadLow: .45,                // sous cette charge…
+    workloadLowEffect: -1,           // …de ce nombre ;
+    workloadOkEffect: 1,             // entre les deux, de ce nombre.
+    supportiveHoursFactor: .5        // avec la stratégie RH « soutenante », les horaires étendus coûtent cette part de leur climat. 0–1
+  };
+
+  // L’argent.
+  const financeModel = {
+    socialChargeRate: .22,           // charges patronales sur les salaires (part). 0–.5
+    taxRate: .25,                    // impôt sur un résultat positif (part). 0–.5
+    adminBase: 14000,                // frais d’administration par an (€)…
+    adminPerService: 900             // …plus ce montant par service ouvert (€).
+  };
+
+  // Le fonctionnement.
+  const operationsModel = {
+    dropoffRoomFactor: .7            // temps de salle par cas avec le parcours de dépôt (×). .4–1
+  };
+
+  // La réputation (gardée dans les rapports ; son poids dans la croissance des foyers est socialModel.reputationGrowthWeight).
+  const reputationModel = {
+    served: 4,                       // points de réputation par part de demandes servies
+    refused: 5,                      // points perdus par part de demandes refusées
+    profit: .8,                      // points pour un résultat net positif
+    loss: -.7,                       // points pour un résultat net négatif
+    trustDivisor: 75,                // + (confiance − 50) ÷ ce nombre
+    min: 20,                         // borne basse
+    max: 95                          // borne haute
+  };
+
+  // Goals are promises to someone who reacts the following year. Each stakeholder holds the clinic
+  // to some of the scenario's goals; its reaction lands a year later, on another part of the clinic.
+  const commitmentModel = {
+    stakeholders: {
+      bank: ["net", "cash", "margin"],
+      clients: ["served"],
+      team: ["staff", "climate"],
+      peers: ["services", "advanced"],
+      commune: ["carbon"]
+    },
+    bankRates: [.06, .09, null],     // taux d’emprunt après 0, 1, 2 années de suite de promesse non tenue (null : refusé)
+    referralKept: 2,                 // référents : +2 par an quand assez de services tournent…
+    referralMissed: -1,              // …−1 sinon
+    grant: 2000,                     // prime de la commune (€), versée l’année après une promesse carbone tenue…
+    grantNeedsInvestment: true       // …et seulement si la clinique a une mesure de durabilité
+  };
+
   const segmentBase = {
     community: { name: bi("Community mix", "Population locale mixte"), growth: .01, priceSensitivity: 1, serviceMix: {}, willingness: {} },
     routine: { name: bi("Routine-care households", "Foyers de soins courants"), growth: .025, priceSensitivity: 1.12, serviceMix: { vaccination: 1.32, preventive: 1.35, emergency: .65, orthopedic: .45, boarding: 1.05 }, willingness: { consult: 52, vaccination: 63, preventive: 82, surgery: 390, ultrasound: 118, dentistry: 185, emergency: 125, orthopedic: 680 } },
@@ -250,9 +384,9 @@
   // Pace changes staff, room, and equipment time per case. Faster care serves
   // more cases with the same hours but lowers client trust and reputation.
   const servicePaces = {
-    thorough: { name: bi("Thorough", "Approfondi"), note: bi("20% more time per case; clients notice the extra care.", "20 % de temps en plus par cas ; les clients remarquent le soin supplémentaire."), duration: 1.2, trust: 1.5, reputation: .5 },
-    standard: { name: bi("Standard", "Standard"), note: bi("The reference time per case.", "Le temps de référence par cas."), duration: 1, trust: 0, reputation: 0 },
-    fast: { name: bi("Fast", "Rapide"), note: bi("20% less time per case; rushed visits lower trust and reputation.", "20 % de temps en moins par cas ; les visites pressées réduisent la confiance et la réputation."), duration: .8, trust: -2.5, reputation: -1 }
+    thorough: { name: bi("Thorough", "Approfondi"), note: bi("20% more time per case; clients notice the extra care.", "20 % de temps en plus par cas ; les clients remarquent le soin supplémentaire."), duration: 1.2, trust: 1.5, reputation: .5, returnRate: 0, climate: 0 },
+    standard: { name: bi("Standard", "Standard"), note: bi("The reference time per case.", "Le temps de référence par cas."), duration: 1, trust: 0, reputation: 0, returnRate: 0, climate: 0 },
+    fast: { name: bi("Fast", "Rapide"), note: bi("20% less time per case; rushed visits lower trust and reputation.", "20 % de temps en moins par cas ; les visites pressées réduisent la confiance et la réputation."), duration: .8, trust: -6, reputation: -1, returnRate: .10, climate: -1 }
   };
 
   const stockStrategies = {
@@ -276,15 +410,12 @@
       standard: { name: bi("Regular follow-up", "Suivi régulier"), cost: 3000, trust: 2, demand: .02, willingness: .03 },
       targeted: { name: bi("Targeted communication", "Communication ciblée"), cost: 8000, trust: 5, demand: .05, willingness: .08 }
     },
-    monitoring: {
-      none: { name: bi("No monitoring", "Aucune veille"), cost: 0, supportHours: 0, relief: 0 },
-      internal: { name: bi("Internal monitoring", "Veille interne"), cost: 0, supportHours: 80, relief: .25 },
-      external: { name: bi("External monitoring", "Veille externe"), cost: 6000, supportHours: 0, relief: .5 }
-    },
+    // A local market study buys information, not demand: without one, the price clients accept is
+    // known only as a range (precision ± share); a study narrows it, a paid one removes it.
     geomarketing: {
-      none: { name: bi("No geographic analysis", "Aucune analyse géographique"), cost: 0, supportHours: 0, demand: 0 },
-      internal: { name: bi("Internal geographic analysis", "Analyse géographique interne"), cost: 0, supportHours: 60, demand: .03 },
-      external: { name: bi("External geographic analysis", "Analyse géographique externe"), cost: 8000, supportHours: 0, demand: .06 }
+      none: { name: bi("No market study", "Aucune étude"), cost: 0, supportHours: 0, precision: .2 },
+      internal: { name: bi("Study by the team", "Étude par l’équipe"), cost: 0, supportHours: 60, precision: .08 },
+      external: { name: bi("Study by a consultancy", "Étude par un cabinet"), cost: 8000, supportHours: 0, precision: 0 }
     }
   };
 
@@ -296,7 +427,6 @@
   };
 
   const socialActions = {
-    communication: { name: bi("Improve communication", "Améliorer la communication"), note: bi("Clear reminders and follow-up raise trust and repeat visits.", "Des rappels et un suivi clairs renforcent la confiance et les visites répétées."), cost: 800, deltas: { clientTrust: 8, communityPressure: -2 } },
     staffMeeting: { name: bi("Hold a staff meeting", "Organiser une réunion d’équipe"), note: bi("Alignment improves staff climate but uses management time.", "L’alignement améliore le climat mais mobilise du temps de gestion."), cost: 500, deltas: { staffClimate: 8, clientTrust: 1 }, supportHours: 12, fatigueRelief: .5 },
     referralOutreach: { name: bi("Referral outreach", "Développer les référents"), note: bi("Local partners send more diagnostic and advanced-care requests.", "Les partenaires locaux envoient davantage de demandes diagnostiques et avancées."), cost: 1200, deltas: { referralSupport: 10 }, advancedDemand: .06 },
     communityAccess: { name: bi("Community access offer", "Offre d’accès communautaire"), note: bi("Easier access raises routine demand and public expectations.", "Un accès facilité augmente la demande courante et les attentes publiques."), cost: 1200, deltas: { clientTrust: 5, communityPressure: 8 }, routineDemand: .07 }
@@ -307,7 +437,7 @@
       { id: "served", type: "min", metric: "honoredRate", value: .82, label: bi("Serve at least 82% of open requests", "Traiter au moins 82 % des demandes ouvertes") },
       { id: "net", type: "min", metric: "netResult", value: 0, label: bi("Reach a non-negative net result", "Atteindre un résultat net non négatif") },
       { id: "cash", type: "min", metric: "treasury", value: 0, label: bi("Keep treasury above zero", "Maintenir une trésorerie positive") },
-      { id: "staff", type: "range", metric: "staffUse", value: [.45, .94], label: bi("Keep staff use between 45% and 94% (overtime pushes it above)", "Maintenir l’utilisation du personnel entre 45 % et 94 % (les heures supplémentaires la font dépasser)") },
+      { id: "staff", type: "range", metric: "staffUse", value: [.45, .94], label: bi("Keep team workload between 45% and 94%", "Garder la charge de l’équipe entre 45 % et 94 %") },
       { id: "services", type: "min", metric: "readyServices", value: 3, label: bi("Operate at least three ready and staffed services", "Exploiter au moins trois services prêts et dotés en personnel") }
     ],
     rescue: [
@@ -320,20 +450,155 @@
       { id: "margin", type: "min", metric: "margin", value: .08, label: bi("Reach an 8% net margin", "Atteindre une marge nette de 8 %") },
       { id: "advanced", type: "min", metric: "advancedServed", value: 220, label: bi("Serve 220 advanced-care cases", "Traiter 220 cas de soins avancés") },
       { id: "cash", type: "min", metric: "treasury", value: 50000, label: bi("Keep at least EUR 50,000 treasury", "Conserver au moins 50 000 EUR de trésorerie") },
-      { id: "staff", type: "range", metric: "staffUse", value: [.5, .92], label: bi("Keep staff use between 50% and 92% (overtime pushes it above)", "Maintenir l’utilisation du personnel entre 50 % et 92 % (les heures supplémentaires la font dépasser)") },
+      { id: "staff", type: "range", metric: "staffUse", value: [.5, .92], label: bi("Keep team workload between 50% and 92%", "Garder la charge de l’équipe entre 50 % et 92 %") },
       { id: "services", type: "min", metric: "readyServices", value: 4, label: bi("Operate at least four ready and staffed services", "Exploiter au moins quatre services prêts et dotés en personnel") }
     ]
   };
 
   const scenarios = {
     balanced: { name: bi("Balanced startup", "Démarrage équilibré"), description: bi("A stable clinic with room to choose its direction.", "Une clinique stable qui peut choisir son orientation."), treasury: 160000, clients: 1200, reputation: 56, marketFocus: "community", staff: baseStaff, services: ["consult"], rooms: { consult: 1 }, equipment: {}, trainings: ["preventive"], location: "residential", social: { clientTrust: 50, staffClimate: 50, referralSupport: 50, communityPressure: 50 }, goals: scenarioGoals.balanced },
-    rescue: { name: bi("Cash-strapped rescue", "Redressement sous contrainte"), description: bi("Low cash, tired staff, and urgent routine demand require careful recovery.", "Trésorerie faible, équipe fatiguée et demande courante pressante exigent un redressement prudent."), treasury: 50000, clients: 900, reputation: 48, marketFocus: "budget", staff: baseStaff.map((person) => ({ ...person, salary: Math.round(person.salary * .95) })), services: ["consult", "vaccination"], rooms: { consult: 1 }, equipment: {}, trainings: ["preventive"], location: "residential", social: { clientTrust: 43, staffClimate: 38, referralSupport: 42, communityPressure: 67 }, goals: scenarioGoals.rescue },
+    rescue: { name: bi("Cash-strapped rescue", "Redressement sous contrainte"), description: bi("Low cash, tired staff, and urgent routine demand require careful recovery.", "Trésorerie faible, équipe fatiguée et demande courante pressante exigent un redressement prudent."), treasury: 50000, clients: 900, reputation: 48, marketFocus: "budget", staff: baseStaff.map((person) => ({ ...person, salary: Math.round(person.salary * .95) })), services: ["consult", "vaccination"], rooms: { consult: 1 }, equipment: {}, trainings: ["preventive"], location: "residential", social: { clientTrust: 46, staffClimate: 38, referralSupport: 42, communityPressure: 67 }, goals: scenarioGoals.rescue },
     growth: { name: bi("Specialist growth clinic", "Clinique spécialisée en croissance"), description: bi("A capable imaging clinic must turn expensive assets into sustainable growth.", "Une clinique d’imagerie doit transformer des actifs coûteux en croissance durable."), treasury: 140000, clients: 1050, reputation: 64, marketFocus: "advanced", staff: [...baseStaff, ...specialistStaff], services: ["consult", "vaccination", "lab", "ultrasound"], rooms: { consult: 2, lab: 1, imaging: 1 }, equipment: { labAnalyzer: { owned: 1, leased: 0 }, ultrasound: { owned: 0, leased: 1 } }, trainings: ["preventive", "lab", "imaging", "ultrasound"], location: "centre", social: { clientTrust: 58, staffClimate: 52, referralSupport: 64, communityPressure: 48 }, goals: scenarioGoals.growth }
   };
+
+  // ---------- L’atelier : les réglages qu’un enseignant peut changer dans le jeu ----------
+  // Chaque entrée : le chemin du nombre dans ce fichier, un nom et une phrase en langage simple,
+  // les bornes sûres (le jeu fonctionne entre les deux), le pas du curseur et l’affichage.
+  // Affichage : "nombre", "pourcent" (0,06 → 6 %), "euro", "fois" (1,25 → ×1,25).
+  const atelierSettings = [
+    { groupe: "Clients", chemin: "socialModel.refusedLeave", nom: "Familles qui partent après un refus", texte: "Foyers perdus pour de bon par demande refusée.", min: 0, max: .2, pas: .01, nomEn: "Families who leave after a refusal", texteEn: "Households lost for good per refused request.", affichage: "pourcent" },
+    { groupe: "Clients", chemin: "clientModel.growthServedWeight", nom: "Clients gagnés en servant tout le monde", texte: "Croissance des foyers quand toutes les demandes sont servies.", min: 0, max: .3, pas: .01, nomEn: "Clients won by serving everyone", texteEn: "Household growth when every request is served.", affichage: "pourcent" },
+    { groupe: "Clients", chemin: "socialModel.trustGrowthWeight", nom: "Clients gagnés par la confiance", texte: "Croissance des foyers par point de confiance au-dessus de 50.", min: 0, max: .01, pas: .0005, nomEn: "Clients won through trust", texteEn: "Household growth per trust point above 50.", affichage: "pourcent" },
+    { groupe: "Clients", chemin: "trustModel.leaveBelow", nom: "Seuil où les clients partent", texte: "Sous cette confiance, des foyers partent chaque année.", min: 20, max: 60, pas: 1, nomEn: "Trust level where clients leave", texteEn: "Below this trust, households leave every year.", affichage: "nombre" },
+    { groupe: "Clients", chemin: "trustModel.leaveRate", nom: "Clients qui partent sous ce seuil", texte: "Part des foyers perdus chaque année sous le seuil.", min: -.15, max: 0, pas: .01, nomEn: "Clients who leave below that level", texteEn: "Share of households lost each year below the level.", affichage: "pourcent" },
+    { groupe: "Clients", chemin: "clientModel.serviceRampUp", nom: "Demande d’un service neuf", texte: "Part de sa demande qu’un service reçoit sa première année.", min: .3, max: 1, pas: .05, nomEn: "Demand for a new service", texteEn: "Share of its demand a service receives in its first year.", affichage: "pourcent" },
+    { groupe: "Clients", chemin: "clientModel.priceOverDecay", nom: "Clients qui fuient un prix trop haut", texte: "Vitesse à laquelle la demande baisse au-dessus du prix accepté.", min: 1, max: 8, pas: .5, nomEn: "Clients who flee a price too high", texteEn: "How fast demand falls above the accepted price.", affichage: "nombre" },
+    { groupe: "Clients", chemin: "trustModel.priceSlope", nom: "Prix accepté grâce à la confiance", texte: "Hausse du prix accepté par point de confiance au-dessus de 50.", min: 0, max: .01, pas: .001, nomEn: "Accepted price thanks to trust", texteEn: "Rise in the accepted price per trust point above 50.", affichage: "pourcent" },
+    { groupe: "Confiance", chemin: "trustModel.servedGain", nom: "Confiance gagnée en servant", texte: "Points de confiance par an quand toutes les demandes sont servies.", min: 0, max: 8, pas: .2, nomEn: "Trust won by serving", texteEn: "Trust points a year when every request is served.", affichage: "nombre" },
+    { groupe: "Confiance", chemin: "trustModel.refusedLoss", nom: "Confiance perdue en refusant", texte: "Points de confiance perdus par an quand toutes les demandes sont refusées.", min: 0, max: 10, pas: .2, nomEn: "Trust lost by refusing", texteEn: "Trust points lost a year when every request is refused.", affichage: "nombre" },
+    { groupe: "Confiance", chemin: "socialModel.pressureTrustSlope", nom: "Confiance usée par les refus accumulés", texte: "Au-dessus de 50 de pression d’accès, points de confiance perdus par point.", min: 0, max: .3, pas: .01, nomEn: "Trust worn down by piled-up refusals", texteEn: "Above 50 access pressure, trust lost per point.", affichage: "nombre" },
+    { groupe: "Confiance", chemin: "trustModel.unfairWeight", nom: "Confiance perdue par un prix trop haut", texte: "Points perdus par part de prix au-dessus du prix accepté.", min: 0, max: 40, pas: 1, nomEn: "Trust lost to a price too high", texteEn: "Points lost per share of price above the accepted price.", affichage: "nombre" },
+    { groupe: "Confiance", chemin: "socialModel.repeatDecay", nom: "Effet d’une action répétée", texte: "Une réunion ou une communication refaite l’année suivante agit × ce nombre.", min: 0, max: 1, pas: .05, nomEn: "Effect of a repeated action", texteEn: "A meeting or communication repeated the next year works × this.", affichage: "fois" },
+    { groupe: "Équipe", chemin: "socialModel.slowPerPoint", nom: "Une équipe fatiguée ralentit", texte: "Temps en plus par cas, par point de climat sous le seuil de fatigue.", min: 0, max: .01, pas: .0005, nomEn: "A tired team slows down", texteEn: "Extra time per case, per climate point under the fatigue level.", affichage: "pourcent" },
+    { groupe: "Équipe", chemin: "socialModel.slowBelow", nom: "Seuil de fatigue", texte: "Sous ce climat, l’équipe travaille plus lentement.", min: 30, max: 70, pas: 1, nomEn: "Fatigue level", texteEn: "Below this climate, the team works more slowly.", affichage: "nombre" },
+    { groupe: "Équipe", chemin: "staffModel.moraleLowSlope", nom: "Absences quand le climat baisse", texte: "Heures d’absence en plus par point de climat sous 50.", min: 0, max: .01, pas: .0005, nomEn: "Absences when the climate falls", texteEn: "Extra absence per climate point under 50.", affichage: "pourcent" },
+    { groupe: "Équipe", chemin: "staffModel.resignClimate", nom: "Seuil de démission", texte: "Sous ce climat, quelqu’un démissionne en fin d’année.", min: 0, max: 50, pas: 1, nomEn: "Resignation level", texteEn: "Below this climate, someone resigns at year end.", affichage: "nombre" },
+    { groupe: "Équipe", chemin: "staffModel.overtimePremium", nom: "Salaire d’une heure supplémentaire", texte: "Combien coûte une heure supplémentaire, par rapport à une heure normale.", min: 1, max: 2, pas: .05, nomEn: "Pay for an overtime hour", texteEn: "What an overtime hour costs, compared with a normal hour.", affichage: "fois" },
+    { groupe: "Équipe", chemin: "staffModel.fatigueAbsencePerOvertime", nom: "Heures sup. qui reviennent en absences", texte: "Absence l’année suivante, par part d’heures supplémentaires travaillées.", min: 0, max: 1, pas: .05, nomEn: "Overtime that returns as absence", texteEn: "Absence the next year, per share of overtime worked.", affichage: "nombre" },
+    { groupe: "Équipe", chemin: "climateModel.overtimeWeight", nom: "Climat usé par les heures sup.", texte: "Points de climat perdus par part d’heures supplémentaires.", min: 0, max: 40, pas: 1, nomEn: "Climate worn down by overtime", texteEn: "Climate points lost per share of overtime.", affichage: "nombre" },
+    { groupe: "Équipe", chemin: "climateModel.payWeight", nom: "Climat et salaire", texte: "Points de climat par part de salaire au-dessus de la référence.", min: 0, max: 80, pas: 2, nomEn: "Climate and pay", texteEn: "Climate points per share of pay above the benchmark.", affichage: "nombre" },
+    { groupe: "Argent", chemin: "financeModel.taxRate", nom: "Impôt sur le bénéfice", texte: "Part d’un résultat positif payée en impôt.", min: 0, max: .5, pas: .01, nomEn: "Tax on profit", texteEn: "Share of a positive result paid in tax.", affichage: "pourcent" },
+    { groupe: "Argent", chemin: "financeModel.socialChargeRate", nom: "Charges sociales", texte: "Charges patronales ajoutées aux salaires.", min: 0, max: .5, pas: .01, nomEn: "Employer charges", texteEn: "Charges added to salaries.", affichage: "pourcent" },
+    { groupe: "Argent", chemin: "financeModel.adminBase", nom: "Frais d’administration", texte: "Coût fixe d’administration par an.", min: 0, max: 40000, pas: 1000, nomEn: "Administration costs", texteEn: "Fixed administration cost per year.", affichage: "euro" },
+    { groupe: "Fonctionnement", chemin: "stockStrategies.basic.stockoutRate", nom: "Ruptures de stock (stratégie basique)", texte: "Part des cas perdus faute de fournitures avec la stratégie de base.", min: 0, max: .2, pas: .01, nomEn: "Stock-outs (basic strategy)", texteEn: "Share of cases lost for lack of supplies with the basic strategy.", affichage: "pourcent" },
+    { groupe: "Promesses", chemin: "commitmentModel.bankRates.1", nom: "Taux d’emprunt après une promesse manquée", texte: "Taux du prochain emprunt après une année où la banque n’a pas eu sa promesse.", min: .06, max: .2, pas: .01, nomEn: "Loan rate after a missed promise", texteEn: "Rate of the next loan after a year the bank's promise was missed.", affichage: "pourcent" },
+    { groupe: "Promesses", chemin: "commitmentModel.grant", nom: "Prime de la commune", texte: "Prime versée l’année après une promesse carbone tenue.", min: 0, max: 10000, pas: 500, nomEn: "Municipality's grant", texteEn: "Grant paid the year after a kept carbon promise.", affichage: "euro" },
+    { groupe: "Promesses", chemin: "commitmentModel.referralKept", nom: "Référents gagnés par la promesse aux confrères", texte: "Points de soutien des référents par an quand assez de services tournent.", min: 0, max: 6, pas: 1, nomEn: "Referral support from the promise to vets", texteEn: "Referral points a year while enough services run.", affichage: "nombre" }
+  ];
+
+  // Le reste du jeu, table par table : ce que l’atelier permet de changer. Chaque champ a un genre,
+  // qui fixe ses bornes (aucune borne n’est tapée à la main) et son affichage :
+  //   money (montant, converti avec la monnaie), share (part de 0 à 1, affichée en %), hours,
+  //   count, factor, points (effet sur un indicateur), score (0 à 100).
+  // source : le chemin de la table dans ce fichier ; « nom » / « texte » : les libellés modifiables.
+  const atelierCatalogue = [
+    { id: "services", section: "services", titre: bi("Services", "Services"), source: "services", nom: "name", champs: [
+      { cle: "price", label: bi("Base price", "Prix de base"), genre: "money" },
+      { cle: "variableCost", label: bi("Supplies (share of price)", "Fournitures (part du prix)"), genre: "share" },
+      { cle: "duration", label: bi("Time per case (h)", "Temps par cas (h)"), genre: "hours" },
+      { cle: "vetShare", label: bi("Vet share of the time", "Part vétérinaire du temps"), genre: "share", complement: "supportShare" },
+      { cle: "demand", label: bi("Requests per 1 200 households", "Demandes pour 1 200 foyers"), genre: "count" },
+      { cle: "elasticity", label: bi("Price sensitivity", "Sensibilité au prix"), genre: "factor" }
+    ] },
+    { id: "acceptes", section: "services", titre: bi("Prices clients accept", "Prix acceptés par les clients"), source: "segments", nom: "name", matrice: "willingness", genre: "money" },
+    { id: "equipe", section: "equipe", titre: bi("Starting team", "Équipe de départ"), source: "scenarios.*.staff", nom: "name", champs: [
+      { cle: "salary", label: bi("Salary", "Salaire"), genre: "money" },
+      { cle: "baseSalary", label: bi("Benchmark salary", "Salaire de référence"), genre: "money" },
+      { cle: "capacity", label: bi("Contract hours", "Heures au contrat"), genre: "hours" }
+    ] },
+    { id: "candidats", section: "equipe", titre: bi("Applicants", "Candidats"), source: "candidates", nom: "name", champs: [
+      { cle: "expectedSalary", label: bi("Expected salary", "Salaire demandé"), genre: "money" },
+      { cle: "baseSalary", label: bi("Benchmark salary", "Salaire de référence"), genre: "money" },
+      { cle: "postingFee", label: bi("Posting fee", "Frais d’annonce"), genre: "money" },
+      { cle: "capacity", label: bi("Contract hours", "Heures au contrat"), genre: "hours" }
+    ] },
+    { id: "salles", section: "salles", titre: bi("Rooms", "Salles"), source: "rooms", nom: "name", champs: [
+      { cle: "fitout", label: bi("Fit-out (once)", "Aménagement (une fois)"), genre: "money" },
+      { cle: "annualRent", label: bi("Rent per year", "Loyer par an"), genre: "money" },
+      { cle: "capacityHours", label: bi("Hours per year", "Heures par an"), genre: "hours" }
+    ] },
+    { id: "equipements", section: "salles", titre: bi("Equipment", "Équipements"), source: "equipment", nom: "name", champs: [
+      { cle: "purchase", label: bi("Purchase", "Achat"), genre: "money" },
+      { cle: "lease", label: bi("Lease per year", "Location par an"), genre: "money" },
+      { cle: "maintenanceRate", label: bi("Upkeep (share of price, per year)", "Entretien (part du prix, par an)"), genre: "share" },
+      { cle: "capacityHours", label: bi("Hours per year", "Heures par an"), genre: "hours" }
+    ] },
+    { id: "formations", section: "salles", titre: bi("Training", "Formations"), source: "trainings", nom: "name", champs: [
+      { cle: "cost", label: bi("Cost", "Coût"), genre: "money" },
+      { cle: "hours", label: bi("Hours taken", "Heures prises"), genre: "hours" }
+    ] },
+    { id: "horaires", section: "fonctionnement", titre: bi("Opening hours", "Horaires d’ouverture"), source: "openingPeriods", nom: "name", champs: [
+      { cle: "cost", label: bi("Cost per year", "Coût par an"), genre: "money" },
+      { cle: "hours", label: bi("Room hours added", "Heures de salle en plus"), genre: "hours" },
+      { cle: "demand", label: bi("Extra demand", "Demande en plus"), genre: "share" },
+      { cle: "climate", label: bi("Climate per year", "Climat par an"), genre: "points" }
+    ] },
+    { id: "stock", section: "fonctionnement", titre: bi("Stock strategies", "Stratégies de stock"), source: "stockStrategies", nom: "name", champs: [
+      { cle: "cost", label: bi("Cost per year", "Coût par an"), genre: "money" },
+      { cle: "stockoutRate", label: bi("Cases lost to stock-outs", "Cas perdus en ruptures"), genre: "share" },
+      { cle: "multiplier", label: bi("Supply spending (×)", "Dépenses de fournitures (×)"), genre: "factor" },
+      { cle: "supportHours", label: bi("Support hours taken", "Heures de soutien prises"), genre: "hours" }
+    ] },
+    { id: "rh", section: "fonctionnement", titre: bi("HR strategies", "Stratégies RH"), source: "hrStrategies", nom: "name", champs: [
+      { cle: "cost", label: bi("Cost per year", "Coût par an"), genre: "money" },
+      { cle: "absenteeism", label: bi("Absence", "Absences"), genre: "share" },
+      { cle: "climate", label: bi("Climate per year", "Climat par an"), genre: "points" },
+      { cle: "retention", label: bi("Protection against departures", "Protection contre les départs"), genre: "points" }
+    ] },
+    { id: "communication", section: "fonctionnement", titre: bi("Communication", "Communication"), source: "marketingStrategies.communication", nom: "name", champs: [
+      { cle: "cost", label: bi("Cost per year", "Coût par an"), genre: "money" },
+      { cle: "trust", label: bi("Trust per year", "Confiance par an"), genre: "points" },
+      { cle: "demand", label: bi("Extra demand", "Demande en plus"), genre: "share" },
+      { cle: "willingness", label: bi("Accepted price", "Prix accepté"), genre: "share" }
+    ] },
+    { id: "etude", section: "fonctionnement", titre: bi("Market study", "Étude de marché"), source: "marketingStrategies.geomarketing", nom: "name", champs: [
+      { cle: "cost", label: bi("Cost per year", "Coût par an"), genre: "money" },
+      { cle: "supportHours", label: bi("Support hours taken", "Heures de soutien prises"), genre: "hours" },
+      { cle: "precision", label: bi("Accepted price known within ±", "Prix accepté connu à ±"), genre: "share" }
+    ] },
+    { id: "actions", section: "fonctionnement", titre: bi("Team and client actions", "Actions équipe et clients"), source: "socialActions", nom: "name", champs: [
+      { cle: "cost", label: bi("Cost", "Coût"), genre: "money" }
+    ] },
+    { id: "implantations", section: "fonctionnement", titre: bi("Locations", "Implantations"), source: "locations", nom: "name", champs: [
+      { cle: "rent", label: bi("Rent per year", "Loyer par an"), genre: "money" },
+      { cle: "moveCost", label: bi("Moving cost", "Coût du déménagement"), genre: "money" },
+      { cle: "parkingCost", label: bi("Parking (once)", "Parking (une fois)"), genre: "money" },
+      { cle: "averageRoundTripKm", label: bi("Average client trip (km)", "Trajet moyen d’un client (km)"), genre: "count" }
+    ] },
+    { id: "durabilite", section: "fonctionnement", titre: bi("Sustainability measures", "Mesures de durabilité"), source: "sustainability.interventions", nom: "name", champs: [
+      { cle: "once", label: bi("Cost (once)", "Coût (une fois)"), genre: "money" },
+      { cle: "annual", label: bi("Cost per year", "Coût par an"), genre: "money" }
+    ] },
+    { id: "depart", section: "depart", titre: bi("Starting clinic", "Clinique de départ"), source: "scenarios", nom: "name", texte: "description", champs: [
+      { cle: "treasury", label: bi("Starting treasury", "Trésorerie de départ"), genre: "money" },
+      { cle: "clients", label: bi("Client households", "Foyers clients"), genre: "count" },
+      { cle: "social.clientTrust", label: bi("Client trust", "Confiance des clients"), genre: "score" },
+      { cle: "social.staffClimate", label: bi("Staff climate", "Climat de l’équipe"), genre: "score" }
+    ] }
+  ];
+
+  // Les monnaies proposées par l’atelier (code ISO, affiché par le navigateur).
+  const atelierCurrencies = ["EUR", "CHF", "GBP", "USD", "CAD", "XOF", "XAF", "MAD", "TND", "DZD"];
+
+  // Le code d’accès à l’atelier, sous forme d’empreinte (le code lui-même n’est pas écrit ici).
+  // Pour le changer : node outils/code-atelier.js NOUVEAU-CODE
+  const atelierCodeHash = "cfa71636";
 
   root.ClinicData = {
     bi, demandScale, skills, services, rooms, equipment, trainings, candidates, segments: segmentBase,
     locations, openingPeriods, servicePaces, stockStrategies, hrStrategies, marketingStrategies,
-    socialIndicators, socialActions, scenarios, baseStaff, sustainability, carbonModel
+    socialIndicators, socialActions, scenarios, baseStaff, sustainability, carbonModel, trustModel, socialModel, commitmentModel,
+    staffModel, clientModel, climateModel, financeModel, operationsModel, reputationModel,
+    atelierSettings, atelierCatalogue, atelierCurrencies, atelierCodeHash
   };
 })(globalThis);

@@ -348,7 +348,7 @@
     assert(report.financial.sustainabilityCost === T.data.sustainability.interventions.solar.annual, "Solar annual maintenance is missing");
   });
 
-  test("analytical and printable exports include staffing and reflections", () => {
+  test("analytical and printable exports include staffing, and no team reflections", () => {
     const clinic = T.initialState("balanced", "en");
     const report = T.simulateYear(T.clone(clinic), clinic, T.emptyEffects(), []);
     clinic.history = [report];
@@ -359,9 +359,10 @@
     assert(json.playerTeam.teamCode === "G-07", "Export lost the team code");
     assert(!("teamName" in json.playerTeam) && !("participantNames" in json.playerTeam), "Export must not carry free-text names");
     assert(json.years[0].operational.staffRows.length === clinic.staff.length, "JSON export lost staff hour rows");
-    assert(json.years[0].reflection.rationale === "We used spare time", "JSON export lost reflection text");
+    assert(!("reflection" in json.years[0]), "JSON export still carries team reflections, which no longer exist");
     const printable = T.buildPrintableReportHtml();
-    assert(printable.includes("G-07") && printable.includes("We used spare time"), "Printable report lost the team code or reflection detail");
+    assert(printable.includes("G-07"), "Printable report lost the team code");
+    assert(!printable.includes("We used spare time") && !printable.includes("Team reflections"), "Printable report still prints team reflections");
     assert(printable.includes("Staff hours") && printable.includes("Carbon footprint"), "Printable report lacks operational or carbon detail");
   });
 

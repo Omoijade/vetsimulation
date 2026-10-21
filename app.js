@@ -6,20 +6,8 @@
   const STORAGE_KEY = "clinic-board-v3-full";
   const LEGACY_KEY = "clinic-board-v2-mvp";
   const SCHEMA_VERSION = 8;
-  const MAX_ALLOCATION = 1.3;
-  const OVERTIME_PREMIUM = 1.25;
-  const SOCIAL_CHARGE_RATE = .22;
-  const FATIGUE_ABSENCE_PER_OVERTIME = .3;
-  const SERVICE_RAMP_UP = .6;
-  const HIRE_ONBOARDING = .25;
-  const SEVERANCE_SHARE = .25;
-  const DEPARTURE_CLIMATE = -6;
-  const DROPOFF_ROOM_FACTOR = .7;
-  const RESIGN_CLIMATE = 30;
-  const RESIGN_PAY_CLIMATE = 45;
-  const RESIGN_PAY_RATIO = .95;
-  const CLINIC_DEMAND_SWING = .04;
-  const SERVICE_DEMAND_SWING = .08;
+  // Every number lives in data.js and is read where it is used, so a rule changed in the teacher's
+  // workshop takes effect at once.
   const STOCK_SERVICES = new Set(["pharmacy", "surgery", "hospital", "dentistry", "orthopedic", "vaccination", "preventive"]);
 
   // Deterministic 0–1 value from a string, so a class code gives every team the same luck.
@@ -36,13 +24,163 @@
 
   function demandSwing(clinic, serviceId) {
     const seed = `${clinic.setup?.classCode || "default"}|${clinic.scenarioId}|${clinic.year}`;
-    return (1 + (seededUnit(`${seed}|clinic`) * 2 - 1) * CLINIC_DEMAND_SWING) * (1 + (seededUnit(`${seed}|${serviceId}`) * 2 - 1) * SERVICE_DEMAND_SWING);
+    return (1 + (seededUnit(`${seed}|clinic`) * 2 - 1) * D.clientModel.clinicDemandSwing) * (1 + (seededUnit(`${seed}|${serviceId}`) * 2 - 1) * D.clientModel.serviceDemandSwing);
   }
   const ADVANCED_SERVICES = new Set(["surgery", "lab", "ultrasound", "dentistry", "radiography", "hospital", "orthopedic"]);
   const ROUTINE_SERVICES = new Set(["consult", "vaccination", "preventive", "pharmacy", "retail"]);
   const DROPOFF_SERVICES = new Set(["vaccination", "preventive", "lab", "pharmacy"]);
   const SERVICE_BY_ID = Object.fromEntries(D.services.map((item) => [item.id, item]));
   const DEFAULT_SOCIAL = { clientTrust: 50, staffClimate: 50, referralSupport: 50, communityPressure: 50 };
+
+  // ---------- The game's rules: data.js, plus the changes a teacher made in the workshop ----------
+  // A clinic may carry `modelRules` (version 2): { nom, valeurs: { chemin: nombre }, noms: { chemin:
+  // { fr, en } or text }, delies: { serviceId: true }, monnaie: { code, facteur } }. Every number and
+  // name the workshop may change is listed once (data.js › atelierSettings, atelierCatalogue). Before
+  // every year is computed, all of them return to their original and the clinic's rules are applied
+  // — so a clinic without rules plays the original game.
+  const stepInto = (v, k) => (v == null ? undefined : Array.isArray(v) ? (v.find((x) => x && x.id === k) ?? (/^\d+$/.test(k) ? v[Number(k)] : undefined)) : v[k]);
+  const readRule = (chemin) => chemin.split(".").reduce(stepInto, D);
+  function writeRule(chemin, value) {
+    const parts = chemin.split(".");
+    const last = parts.pop();
+    const parent = parts.reduce(stepInto, D);
+    if (parent == null || typeof parent !== "object") return;
+    parent[Array.isArray(parent) ? Number(last) : last] = value;
+  }
+  const isBilingual = (v) => v && typeof v === "object" && typeof v.en === "string" && typeof v.fr === "string";
+  // A field's kind sets its bounds and its step, so no bound is typed by hand for each entry.
+  const RULE_KINDS = {
+    money: { bornes: (o) => [0, Math.max(o * 10, 100)], pas: (o) => (o >= 1000 ? 100 : 1), affichage: "euro" },
+    share: { bornes: () => [0, 1], pas: () => .01, affichage: "pourcent" },
+    hours: { bornes: (o) => [0, Math.max(o * 5, 10)], pas: (o) => (o >= 50 ? 10 : .01), affichage: "nombre" },
+    count: { bornes: (o) => [0, Math.max(o * 5, 10)], pas: (o) => (o >= 50 ? 10 : 1), affichage: "nombre" },
+    factor: { bornes: (o) => [Math.round(o * 20) / 100, Math.max(o * 5, 1)], pas: () => .05, affichage: "nombre" },
+    points: { bornes: (o) => [Math.min(-20, o * 3), Math.max(20, o * 3)], pas: () => .5, affichage: "nombre" },
+    score: { bornes: () => [0, 100], pas: () => 1, affichage: "nombre" }
+  };
+  const RULE_SETTINGS = {};
+  const RULE_NAMES = {};
+  (D.atelierSettings || []).forEach((s) => {
+    RULE_SETTINGS[s.chemin] = { ...s, section: "regles", money: s.affichage === "euro", nomL: { en: s.nomEn || s.nom, fr: s.nom }, texteL: { en: s.texteEn || s.texte, fr: s.texte } };
+  });
+  // The rows of a catalogue table: one per item, with the path that reaches it in data.js.
+  function atelierRows(table) {
+    if (table.source === "scenarios.*.staff") {
+      const vus = new Map();
+      Object.entries(D.scenarios).forEach(([sc, scen]) => (scen.staff || []).forEach((p) => {
+        if (vus.has(p)) vus.get(p).scenarios.push(sc);
+        else vus.set(p, { cle: `scenarios.${sc}.staff.${p.id}`, objet: p, scenarios: [sc] });
+      }));
+      return [...vus.values()];
+    }
+    const src = readRule(table.source);
+    if (Array.isArray(src)) return src.filter((x) => x && x.id).map((x) => ({ cle: `${table.source}.${x.id}`, objet: x }));
+    return Object.entries(src || {}).map(([k, x]) => ({ cle: `${table.source}.${k}`, objet: x }));
+  }
+  function addRuleField(chemin, table, row, champ) {
+    const v = readRule(chemin);
+    if (typeof v !== "number" || RULE_SETTINGS[chemin]) return;
+    const kind = RULE_KINDS[champ.genre] || RULE_KINDS.count;
+    const [min, max] = kind.bornes(v);
+    RULE_SETTINGS[chemin] = { chemin, section: table.section, table: table.id, ligne: row.cle, champ: champ.cle, label: champ.label, min, max, pas: kind.pas(v), affichage: kind.affichage, money: champ.genre === "money", complement: champ.complement ? `${row.cle}.${champ.complement}` : null };
+  }
+  (D.atelierCatalogue || []).forEach((table) => atelierRows(table).forEach((row) => {
+    if (table.matrice) Object.keys(row.objet[table.matrice] || {}).forEach((svc) => addRuleField(`${row.cle}.${table.matrice}.${svc}`, table, row, { cle: svc, genre: table.genre }));
+    else (table.champs || []).forEach((champ) => addRuleField(`${row.cle}.${champ.cle}`, table, row, champ));
+    [table.nom, table.texte].filter(Boolean).forEach((f) => {
+      const chemin = `${row.cle}.${f}`;
+      const v = readRule(chemin);
+      if (typeof v === "string" || isBilingual(v)) RULE_NAMES[chemin] = { section: table.section, table: table.id, ligne: row.cle, texte: f === table.texte };
+    });
+  }));
+  const RULE_DEFAULTS = Object.fromEntries(Object.keys(RULE_SETTINGS).map((c) => [c, readRule(c)]));
+  const NAME_DEFAULTS = Object.fromEntries(Object.keys(RULE_NAMES).map((c) => [c, JSON.parse(JSON.stringify(readRule(c)))]));
+  const COMPLEMENT_DEFAULTS = Object.fromEntries(Object.values(RULE_SETTINGS).filter((s) => s.complement).map((s) => [s.complement, readRule(s.complement)]));
+  const RULE_CURRENCIES = D.atelierCurrencies || ["EUR"];
+  let ruleCurrency = "EUR";
+  // Only listed settings and names, numbers inside their bounds, names kept short: a file from
+  // elsewhere can change the rules, never break the game. What equals the original is dropped.
+  function cleanRules(rules) {
+    if (!rules || typeof rules !== "object") return null;
+    const valeurs = {};
+    Object.entries(rules.valeurs || {}).forEach(([chemin, v]) => {
+      const def = RULE_SETTINGS[chemin];
+      const n = Number(v);
+      if (!def || !Number.isFinite(n)) return;
+      const borne = Math.min(def.max, Math.max(def.min, n));
+      if (Math.abs(borne - RULE_DEFAULTS[chemin]) > 1e-9) valeurs[chemin] = borne;
+    });
+    const noms = {};
+    Object.entries(rules.noms || {}).forEach(([chemin, v]) => {
+      const origine = NAME_DEFAULTS[chemin];
+      if (origine === undefined || v == null) return;
+      const court = (t, repli) => String(t ?? "").trim().slice(0, 120) || repli;
+      if (typeof origine === "string") { const t = court(typeof v === "string" ? v : v.fr ?? v.en, origine); if (t !== origine) noms[chemin] = t; return; }
+      const fr = court(v.fr, origine.fr), en = court(v.en, origine.en);
+      if (fr !== origine.fr || en !== origine.en) noms[chemin] = { fr, en };
+    });
+    const delies = {};
+    Object.entries(rules.delies || {}).forEach(([id, v]) => { if (v && SERVICE_BY_ID[id]) delies[id] = true; });
+    const code = RULE_CURRENCIES.includes(rules.monnaie?.code) ? rules.monnaie.code : "EUR";
+    const facteur = Math.min(5, Math.max(.2, Number(rules.monnaie?.facteur) || 1));
+    const monnaie = code !== "EUR" || Math.abs(facteur - 1) > 1e-9 ? { code, facteur } : null;
+    if (!Object.keys(valeurs).length && !Object.keys(noms).length && !monnaie && !Object.keys(delies).length) return null;
+    return { nom: String(rules.nom || "").slice(0, 60), version: 2, valeurs, noms, delies, monnaie };
+  }
+  let appliedRulesKey = "";
+  function applyModelRules(rules) {
+    const clean = cleanRules(rules);
+    const key = clean ? JSON.stringify(clean) : "";
+    if (key === appliedRulesKey) return;
+    Object.keys(RULE_SETTINGS).forEach((c) => writeRule(c, RULE_DEFAULTS[c]));
+    Object.entries(COMPLEMENT_DEFAULTS).forEach(([c, v]) => writeRule(c, v));
+    Object.keys(RULE_NAMES).forEach((c) => writeRule(c, JSON.parse(JSON.stringify(NAME_DEFAULTS[c]))));
+    ruleCurrency = "EUR";
+    if (clean) {
+      Object.entries(clean.valeurs).forEach(([c, v]) => {
+        writeRule(c, v);
+        const comp = RULE_SETTINGS[c].complement;
+        if (comp) writeRule(comp, Math.max(0, 1 - v));
+      });
+      // A base price moves what clients accept for that service by the same share, unless the
+      // teacher unlinked it (to create an over-priced situation on purpose).
+      Object.entries(clean.valeurs).forEach(([c, v]) => {
+        const m = c.match(/^services\.([^.]+)\.price$/);
+        if (!m || clean.delies[m[1]] || !RULE_DEFAULTS[c]) return;
+        Object.keys(D.segments).forEach((seg) => {
+          const p = `segments.${seg}.willingness.${m[1]}`;
+          if (p in RULE_SETTINGS && !(p in clean.valeurs)) writeRule(p, RULE_DEFAULTS[p] * v / RULE_DEFAULTS[c]);
+        });
+      });
+      Object.entries(clean.noms).forEach(([c, v]) => writeRule(c, typeof v === "string" ? v : { ...NAME_DEFAULTS[c], ...v }));
+      if (clean.monnaie) ruleCurrency = clean.monnaie.code;
+    }
+    appliedRulesKey = key;
+  }
+  // Prices, salaries, treasury, households and the relations are copied into a clinic when a game
+  // starts. So a clinic that has not played a year takes them again from the rules; after Year 1 they
+  // stay as played.
+  function withStartingValues(clinic) {
+    if ((clinic.history || []).length) return clinic;
+    applyModelRules(clinic.modelRules);
+    const fresh = initialState(clinic.scenarioId, clinic.language, clinic.setup, clinic.rules);
+    Object.keys(clinic.services).forEach((id) => { if (fresh.services[id]) clinic.services[id].price = fresh.services[id].price; });
+    clinic.staff = fresh.staff;
+    clinic.treasury = fresh.treasury;
+    clinic.setup = { ...clinic.setup, startingTreasury: fresh.setup.startingTreasury };
+    clinic.clients = fresh.clients;
+    clinic.reputation = fresh.reputation;
+    clinic.social = fresh.social;
+    clinic.carbonBaseline = null;
+    return clinic;
+  }
+  // The workshop's code is checked against a fingerprint (FNV-1a), never stored as such.
+  function atelierFingerprint(texte) {
+    let h = 0x811c9dc5;
+    for (const c of String(texte || "").trim().toUpperCase()) { h ^= c.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
+    return h.toString(16).padStart(8, "0");
+  }
+
 
   const clone = (value) => JSON.parse(JSON.stringify(value));
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -87,13 +225,13 @@
     source.forEach((row) => {
       const service = SERVICE_BY_ID[row?.serviceId];
       if (!service || !roleCompatible(person, service)) return;
-      const share = clamp(Number(row.share || 0), 0, MAX_ALLOCATION);
+      const share = clamp(Number(row.share || 0), 0, D.staffModel.maxAllocation);
       merged.set(service.id, (merged.get(service.id) || 0) + share);
     });
-    let allocations = [...merged.entries()].map(([serviceId, share]) => ({ serviceId, share: Math.min(MAX_ALLOCATION, share) }));
+    let allocations = [...merged.entries()].map(([serviceId, share]) => ({ serviceId, share: Math.min(D.staffModel.maxAllocation, share) }));
     if (!allocations.length) allocations = legacyAllocations(person);
     const total = allocationTotal(allocations);
-    if (total > MAX_ALLOCATION) allocations = allocations.map((row) => ({ ...row, share: row.share * MAX_ALLOCATION / total }));
+    if (total > D.staffModel.maxAllocation) allocations = allocations.map((row) => ({ ...row, share: row.share * D.staffModel.maxAllocation / total }));
     return allocations;
   }
 
@@ -105,7 +243,7 @@
   // 5% grid: a row holding a typed share (90 h of 1 421 is 6.33%) dropped the reachable maximum
   // from 130% to 120% while the hours field still allowed 123.67%.
   function allocationCeiling(others) {
-    return Math.max(0, MAX_ALLOCATION - others);
+    return Math.max(0, D.staffModel.maxAllocation - others);
   }
 
   // Every share a student sets stands for a whole number of hours, so the hours on the rows add up
@@ -132,7 +270,7 @@
   // hours, so this returns the precise remainder. It targets 100%, never the overtime ceiling.
   function allocationRemainder(allocations, index) {
     const others = allocationTotal(allocations) - (allocations[index]?.share || 0);
-    return Math.max(0, Math.min(1, MAX_ALLOCATION) - others - (allocations[index]?.share || 0));
+    return Math.max(0, Math.min(1, D.staffModel.maxAllocation) - others - (allocations[index]?.share || 0));
   }
 
   function validAllocations(person, allocations) {
@@ -143,11 +281,11 @@
       const service = SERVICE_BY_ID[row?.serviceId];
       const share = Number(row?.share);
       if (!service || !roleCompatible(person, service) || ids.has(service.id)) return false;
-      if (!Number.isFinite(share) || share <= 0 || share > MAX_ALLOCATION + .0001) return false;
+      if (!Number.isFinite(share) || share <= 0 || share > D.staffModel.maxAllocation + .0001) return false;
       ids.add(service.id);
       total += share;
     }
-    return total > 0 && total <= MAX_ALLOCATION + .0001;
+    return total > 0 && total <= D.staffModel.maxAllocation + .0001;
   }
 
   function initialState(scenarioId = "balanced", language = detectedLanguage(), setupOverride = null, rulesOverride = null) {
@@ -185,13 +323,14 @@
       operations: { openingPeriods: { extended: false, sunday: false, night: false }, dropoff: false, stockStrategy: "basic" },
       hr: { strategy: "reactive" },
       location: { sectorId: scenario.location, parking: false },
-      marketing: { communication: "basic", monitoring: "none", geomarketing: "none" },
+      marketing: { communication: "basic", geomarketing: "none" },
       finance: { loan: null },
       carbonModelVersion: D.carbonModel.version,
       sustainability: { energyUpgrade: "none", heatPump: false, solar: false, anaesthesiaProtocol: "standard", wasteStrategy: "standard", accessPlan: false },
       carbonBaseline: null,
       rules: { actionLimit: 3, unlimited: false, targetYear: 4, bankruptcyThreshold: -200000, ...(rulesOverride || {}) },
       reflections: {},
+      runArchive: [],
       pending: {},
       history: [],
       domain: "overview",
@@ -222,7 +361,7 @@
       primaryService: SERVICE_BY_ID[person.primaryService] ? person.primaryService : (person.role === "vet" ? "consult" : "vaccination"),
       secondaryService: SERVICE_BY_ID[person.secondaryService] ? person.secondaryService : "",
       secondaryShare: clamp(Number(person.secondaryShare || 0), 0, .95),
-      lastOvertimeRatio: clamp(Number(person.lastOvertimeRatio || 0), 0, MAX_ALLOCATION),
+      lastOvertimeRatio: clamp(Number(person.lastOvertimeRatio || 0), 0, D.staffModel.maxAllocation),
       hiredYear: Number(person.hiredYear || 0),
       allocations: []
     };
@@ -282,6 +421,7 @@
     merged.pending = Object.fromEntries(Object.entries(saved.pending || {}).map(([key, action]) => [key, { revisions: 0, ...action, key }]));
     merged.history = saved.history || [];
     merged.reflections = saved.reflections || {};
+    merged.runArchive = Array.isArray(saved.runArchive) ? saved.runArchive : [];
     merged.social = { ...DEFAULT_SOCIAL, ...(saved.social || {}) };
     merged.uiPreferences = { ...fresh.uiPreferences, ...(saved.uiPreferences || {}) };
     merged.setup = { ...fresh.setup, ...(saved.setup || {}) };
@@ -324,8 +464,12 @@
     return state.language === "fr" ? "fr-BE" : "en-GB";
   }
 
-  function money(value) {
-    return new Intl.NumberFormat(locale(), { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(Math.round(Number(value || 0)));
+  function money(value, devise = ruleCurrency) {
+    return new Intl.NumberFormat(locale(), { style: "currency", currency: devise, maximumFractionDigits: 0 }).format(Math.round(Number(value || 0)));
+  }
+
+  function currencySymbol() {
+    return (new Intl.NumberFormat(locale(), { style: "currency", currency: ruleCurrency, currencyDisplay: "narrowSymbol" }).formatToParts(0).find((p) => p.type === "currency") || {}).value || ruleCurrency;
   }
 
   function number(value) {
@@ -399,9 +543,12 @@
     return pendingActions().filter((action) => !isFreeAction(action.payload));
   }
 
-  function logDecision(event, key) {
+  // `label` is the decision as the team read it on screen, written at the moment it happens: a
+  // removed decision no longer exists anywhere else, and a key such as "price:consult" says nothing
+  // to someone reading the report.
+  function logDecision(event, key, label = "") {
     if (!Array.isArray(state.decisionLog)) state.decisionLog = [];
-    state.decisionLog.push({ year: state.year, at: new Date().toISOString(), event, key });
+    state.decisionLog.push({ year: state.year, at: new Date().toISOString(), event, key, ...(label ? { label } : {}) });
   }
 
   function queueAction(key, payload) {
@@ -414,7 +561,7 @@
     // First queue stamps `at`; later edits to the same target keep it and count as revisions,
     // so "repeated edits are one action" still holds while the going back and forth stays visible.
     state.pending[key] = { key, payload: clone(payload), at: previous?.at || at, updatedAt: at, revisions: previous ? Number(previous.revisions || 0) + 1 : 0 };
-    logDecision(previous ? "revise" : "add", key);
+    logDecision(previous ? "revise" : "add", key, actionLabel(payload));
     saveState();
     render();
   }
@@ -422,13 +569,28 @@
   // `champ` carries a text field across the re-render: what was typed and where the caret was. A
   // field rewritten from state without it loses the caret to position zero, and the next digit goes
   // in at the front — 937 typed one key at a time arrived as 739.
+  // The workshop is a full page: its scroll and the field being used survive a redraw.
+  function keepAtelierScroll(selector = null, caret = null) {
+    ui.atelierRestore = { main: document.querySelector(".atelier-main")?.scrollTop || 0, page: window.scrollY || 0, selector, caret };
+  }
+  function restoreAtelierScroll() {
+    const r = ui.atelierRestore;
+    ui.atelierRestore = null;
+    if (!r) return;
+    const main = document.querySelector(".atelier-main");
+    if (main) main.scrollTop = r.main;
+    window.scrollTo(0, r.page);
+    const cible = r.selector ? document.querySelector(r.selector) : null;
+    if (cible) { cible.focus({ preventScroll: true }); if (r.caret != null && typeof cible.setSelectionRange === "function") { try { cible.setSelectionRange(r.caret, r.caret); } catch (e) { /* range inputs have no caret */ } } }
+  }
+
   function rememberDrawer(selector = null, champ = null) {
     const body = document.querySelector(".drawer-body");
     ui.restore = { scrollTop: body?.scrollTop || 0, selector, champ };
   }
 
   function removeAction(key) {
-    if (state.pending[key]) logDecision("remove", key);
+    if (state.pending[key]) logDecision("remove", key, actionLabel(state.pending[key].payload));
     delete state.pending[key];
     saveState();
     render();
@@ -531,10 +693,10 @@
         target.staff.splice(index, 1);
         target.rehireBlocked = { ...(target.rehireBlocked || {}), [person.id]: target.year + 1 };
         if (chargeCosts) {
-          const severance = person.salary * SEVERANCE_SHARE;
+          const severance = person.salary * D.staffModel.severanceShare;
           effect.oneTimeCosts += severance;
           effect.severance += severance;
-          effect.climateShock += DEPARTURE_CLIMATE;
+          effect.climateShock += D.staffModel.departureClimate;
           effect.departures.push({ id: person.id, name: person.name, reason: "fired" });
         }
       }
@@ -565,7 +727,7 @@
     if (p.kind === "dropoff") target.operations.dropoff = Boolean(p.value);
     if (p.kind === "stock-strategy" && D.stockStrategies[p.targetId]) target.operations.stockStrategy = p.targetId;
     if (p.kind === "hr-strategy" && D.hrStrategies[p.targetId]) target.hr.strategy = p.targetId;
-    if (p.kind === "location" && D.locations[p.targetId]) {
+    if (p.kind === "location" && D.locations[p.targetId] && p.targetId !== target.location.sectorId) {
       target.location.sectorId = p.targetId;
       target.location.parking = false;
       if (chargeCosts) {
@@ -581,7 +743,15 @@
     if (p.kind === "social-action") {
       const socialAction = D.socialActions[p.targetId];
       if (socialAction) {
-        Object.entries(socialAction.deltas).forEach(([key, value]) => { target.social[key] = clamp(Number(target.social[key] || 0) + value, 0, 100); });
+        // Repeating the same move year after year wears it out: each consecutive earlier year it was
+        // taken multiplies its effect by repeatDecay. A cheap fix stays usable, not leaned on.
+        const decay = D.socialModel?.repeatDecay ?? 1;
+        let streak = 0;
+        for (let i = (target.history || []).length - 1; i >= 0; i--) {
+          if ((target.history[i].actions || []).some((a) => (a.payload || a).kind === "social-action" && (a.payload || a).targetId === p.targetId)) streak += 1; else break;
+        }
+        const strength = Math.pow(decay, streak);
+        Object.entries(socialAction.deltas).forEach(([key, value]) => { target.social[key] = clamp(Number(target.social[key] || 0) + value * strength, 0, 100); });
         if (chargeCosts) {
           effect.oneTimeCosts += socialAction.cost;
           effect.supportReserved += Number(socialAction.supportHours || 0);
@@ -592,8 +762,9 @@
       }
     }
     if (p.kind === "loan") {
-      if (!target.finance.loan) {
-        target.finance.loan = { principal: Number(p.value), remaining: Number(p.value), yearsRemaining: 5, rate: .06 };
+      const rate = loanRate(target);
+      if (!target.finance.loan && rate !== null) {
+        target.finance.loan = { principal: Number(p.value), remaining: Number(p.value), yearsRemaining: 5, rate };
         if (chargeCosts) effect.cashAdjustment += Number(p.value);
       }
     }
@@ -679,24 +850,24 @@
     const supportByService = Object.fromEntries(D.services.map((service) => [service.id, 0]));
     const climate = Number(clinic.social?.staffClimate ?? 50);
     // Morale changes absence: a low climate raises it, a high climate lowers it.
-    const moraleRate = climate < 50 ? Math.min(.08, (50 - climate) * .004) : climate > 60 ? -Math.min(.03, (climate - 60) * .002) : 0;
+    const stm = D.staffModel;
+    const moraleRate = climate < stm.moraleLow ? Math.min(stm.moraleLowCap, (stm.moraleLow - climate) * stm.moraleLowSlope) : climate > stm.moraleHigh ? -Math.min(stm.moraleHighCap, (climate - stm.moraleHigh) * stm.moraleHighSlope) : 0;
     const fatigueRelief = clamp(Number(effects.fatigueRelief || 0), 0, 1);
     const preliminary = clinic.staff.map((person) => {
       const contractedHours = person.capacity * salaryCapacityMultiplier(person);
       // Last year's overtime carries into this year as extra absence.
-      const fatigueRate = Math.min(.09, Number(person.lastOvertimeRatio || 0) * FATIGUE_ABSENCE_PER_OVERTIME) * (1 - fatigueRelief);
+      const fatigueRate = Math.min(.09, Number(person.lastOvertimeRatio || 0) * D.staffModel.fatigueAbsencePerOvertime) * (1 - fatigueRelief);
       const expectedAbsenceHours = contractedHours * Math.max(0, hr.absenteeism + fatigueRate + moraleRate);
       const gross = contractedHours - expectedAbsenceHours;
       const roleTraining = person.role === "vet" ? effects.vetTrainingHours : effects.supportTrainingHours;
       const sameRoleCount = Math.max(1, clinic.staff.filter((item) => item.role === person.role).length);
       const trainingHours = roleTraining / sameRoleCount + Number(effects.trainingHoursByPerson?.[person.id] || 0);
       // People hired this year spend a quarter of their time learning the clinic.
-      const onboardingHours = person.hiredYear === clinic.year ? Math.max(0, gross - trainingHours) * HIRE_ONBOARDING : 0;
+      const onboardingHours = person.hiredYear === clinic.year ? Math.max(0, gross - trainingHours) * D.staffModel.hireOnboarding : 0;
       return { person, contractedHours, expectedAbsenceHours, fatigueAbsenceHours: contractedHours * fatigueRate, moraleAbsenceHours: contractedHours * moraleRate, onboardingHours, grossHours: gross, trainingHours, beforeDuties: Math.max(0, gross - trainingHours - onboardingHours) };
     });
     const stock = D.stockStrategies[clinic.operations.stockStrategy];
-    const monitoring = D.marketingStrategies.monitoring[clinic.marketing.monitoring];
-    const geo = D.marketingStrategies.geomarketing[clinic.marketing.geomarketing];
+    const geo = D.marketingStrategies.geomarketing[clinic.marketing.geomarketing] || D.marketingStrategies.geomarketing.none;
     const waste = D.sustainability.wasteStrategies[clinic.sustainability.wasteStrategy];
     const access = clinic.sustainability.accessPlan ? D.sustainability.interventions.accessPlan : { supportHours: 0 };
     // Named where they are taken, so the drawer that shows a person's "other duties" can say what
@@ -706,7 +877,6 @@
     // decisions already in the plan.
     const reservationParts = [
       { id: "stock", hours: stock.supportHours || 0 },
-      { id: "monitoring", hours: monitoring.supportHours || 0 },
       { id: "geomarketing", hours: geo.supportHours || 0 },
       { id: "waste", hours: waste.supportHours || 0 },
       { id: "accessPlan", hours: access.supportHours || 0 },
@@ -798,17 +968,56 @@
     return value;
   }
 
+  // The price the clinic's clients accept for a service: what their type of client will pay, raised
+  // by paid communication, and moved by their trust in the clinic. One function, read by demand, by
+  // the trust lost to an unfair price, and by the price screen — so what is shown is what acts.
+  // A communication programme kept at the same level wears in: its trust gain halves (repeatDecay)
+  // for each earlier year in a row at that level. Its demand and accepted-price effects stay.
+  function communicationStrength(clinic) {
+    const level = clinic.marketing?.communication;
+    const decay = D.socialModel?.repeatDecay ?? 1;
+    let streak = 0;
+    for (let i = (clinic.history || []).length - 1; i >= 0; i--) {
+      if (clinic.history[i].clinicSnapshot?.marketing?.communication === level) streak += 1; else break;
+    }
+    return Math.pow(decay, streak);
+  }
+
+  // What the clinic knows of the price its clients accept: a range, unless a market study narrows it.
+  // The band is deliberately not centred on the true value, so its middle gives nothing away.
+  function acceptedKnown(service, clinic, value = acceptedPrice(service, clinic)) {
+    const study = D.marketingStrategies.geomarketing[clinic.marketing?.geomarketing] || D.marketingStrategies.geomarketing.none;
+    const p = study.precision || 0;
+    if (p <= 0) return { exact: true, low: Math.round(value), high: Math.round(value) };
+    const tilt = ([...service.id].reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % 7) / 10 + .2;
+    const low = Math.floor(value * (1 - p * 2 * tilt));
+    let high = Math.ceil(value * (1 + p * 2 * (1 - tilt)));
+    if (Math.abs((low + high) / 2 - value) < 1) high += 2;
+    return { exact: false, low, high };
+  }
+
+  function acceptedText(known) {
+    return known.exact ? money(known.low) : `${money(known.low)}–${money(known.high)}`;
+  }
+
+  function acceptedPrice(service, clinic) {
+    const segment = D.segments[clinic.marketFocus];
+    const communication = D.marketingStrategies.communication[clinic.marketing.communication];
+    const trustFactor = 1 + (Number(clinic.social?.clientTrust ?? 50) - 50) * (D.trustModel?.priceSlope || 0);
+    // Paid communication raises what clients accept paying, not only how many of them come. That is
+    // what keeps it worth buying once capacity binds, when extra demand converts to nothing at all.
+    return (segment.willingness[service.id] || service.price) * (1 + (communication.willingness || 0)) * trustFactor;
+  }
+
   function projectedDemand(service, clinic, effects = emptyEffects()) {
     const segment = D.segments[clinic.marketFocus];
     const location = D.locations[clinic.location.sectorId];
     const serviceState = clinic.services[service.id];
     const communication = D.marketingStrategies.communication[clinic.marketing.communication];
-    // Paid communication raises what clients accept paying, not only how many of them come. That is
-    // what keeps it worth buying once capacity binds, when extra demand converts to nothing at all.
-    const willingness = (segment.willingness[service.id] || service.price) * (1 + (communication.willingness || 0));
+    const willingness = acceptedPrice(service, clinic);
     const priceRatio = serviceState.price / Math.max(1, willingness);
     const priceEffect = priceRatio <= 1
-      ? 1 + (1 - priceRatio) * service.elasticity * .35
+      ? 1 + (1 - priceRatio) * service.elasticity * D.clientModel.priceUnderResponse
       // Above willingness the response decays instead of running into a flat clamp. A flat floor
       // could not work here: the old linear term reached zero at ratios from 1.65 (retail) to 5.55
       // (emergency), so every service plateaued at a different price and none could be priced out
@@ -817,22 +1026,23 @@
       // a price rise is a decision: at 2.2 a consultation priced 20% over willingness still kept 92%
       // of its requests. Rescue prices above willingness by default, so it is the scenario this
       // constant moves; Balanced and Growth sit below it and never evaluate this branch at all.
-      : Math.exp(-(priceRatio - 1) * service.elasticity * 4 * segment.priceSensitivity);
-    const monitoring = D.marketingStrategies.monitoring[clinic.marketing.monitoring];
-    const geo = D.marketingStrategies.geomarketing[clinic.marketing.geomarketing];
-    const competition = 1 - (1 - location.competition) * (1 - monitoring.relief);
-    const socialTrust = 1 + (clinic.social.clientTrust - 50) / 500;
-    const referral = ADVANCED_SERVICES.has(service.id) ? 1 + (clinic.social.referralSupport - 50) / 350 : 1;
-    const pressure = ROUTINE_SERVICES.has(service.id) ? 1 + Math.max(0, clinic.social.communityPressure - 50) / 500 : 1;
+      : Math.exp(-(priceRatio - 1) * service.elasticity * D.clientModel.priceOverDecay * segment.priceSensitivity);
+    const geo = D.marketingStrategies.geomarketing[clinic.marketing.geomarketing] || D.marketingStrategies.geomarketing.none;
+    const competition = location.competition;
+    const socialTrust = 1 + (clinic.social.clientTrust - 50) / D.clientModel.trustDemandDivisor;
+    const sm = D.socialModel || {};
+    // Referring vets send imaging and specialist cases: their support moves advanced requests only.
+    const referral = ADVANCED_SERVICES.has(service.id) ? Math.max(.2, 1 + (clinic.social.referralSupport - 50) * (sm.referralSlope ?? 1 / 350)) : 1;
+    const pressure = ROUTINE_SERVICES.has(service.id) ? 1 + Math.max(0, clinic.social.communityPressure - 50) * (sm.pressureDemandSlope ?? 1 / 500) : 1;
     const periods = Object.entries(clinic.operations.openingPeriods).reduce((sum, [id, active]) => sum + (active ? D.openingPeriods[id].demand : 0), 0);
     const emergency = service.id === "emergency" && clinic.operations.openingPeriods.night ? D.openingPeriods.night.emergencyDemand : 0;
-    const parking = clinic.location.parking && (clinic.marketFocus === "routine" || clinic.marketFocus === "budget" || service.id === "boarding") ? 1.08 : 1;
+    const parking = clinic.location.parking && (clinic.marketFocus === "routine" || clinic.marketFocus === "budget" || service.id === "boarding") ? D.clientModel.parkingDemand : 1;
     const actionDemand = 1 + (ADVANCED_SERVICES.has(service.id) ? effects.advancedDemand : 0) + (ROUTINE_SERVICES.has(service.id) ? effects.routineDemand : 0);
     const accessDemand = clinic.sustainability.accessPlan ? 1 + D.sustainability.interventions.accessPlan.demand : 1;
     return Math.max(0, Math.round(
       service.demand * D.demandScale * (clinic.clients / 1200) * segment.serviceMix[service.id] * priceEffect *
       (location.segmentMultipliers[clinic.marketFocus] || 1) * (location.serviceMultipliers[service.id] || 1) *
-      competition * (1 + communication.demand) * (1 + geo.demand) * socialTrust * referral * pressure *
+      competition * (1 + communication.demand) * (1 + (geo.demand || 0)) * socialTrust * referral * pressure *
       (1 + periods + emergency) * parking * accessDemand * actionDemand * (1 - effects.relocationLoss) * (1 - (effects.focusTransition || 0))
     ));
   }
@@ -854,11 +1064,11 @@
     const location = D.locations[clinic.location.sectorId];
     const serviceActivity = serviceResults.reduce((totals, result) => {
       const activity = SERVICE_BY_ID[result.id].carbonActivity;
-      totals.electricity += result.honored * activity.electricityKWhPerCase;
-      totals.clinicalWaste += result.honored * activity.clinicalWasteKgPerCase;
-      totals.generalWaste += result.honored * activity.generalWasteKgPerCase;
-      totals.anaesthetic += result.honored * activity.anaestheticMlPerCase;
-      totals.trips += result.honored * activity.clientTripsPerCase;
+      totals.electricity += (result.honored + (result.returnVisits || 0)) * activity.electricityKWhPerCase;
+      totals.clinicalWaste += (result.honored + (result.returnVisits || 0)) * activity.clinicalWasteKgPerCase;
+      totals.generalWaste += (result.honored + (result.returnVisits || 0)) * activity.generalWasteKgPerCase;
+      totals.anaesthetic += (result.honored + (result.returnVisits || 0)) * activity.anaestheticMlPerCase;
+      totals.trips += (result.honored + (result.returnVisits || 0)) * activity.clientTripsPerCase;
       return totals;
     }, { electricity: 0, clinicalWaste: 0, generalWaste: 0, anaesthetic: 0, trips: 0 });
     const roomElectricity = Object.entries(clinic.rooms).reduce((sum, [id, qty]) => sum + qty * D.rooms[id].electricityKWhYear, 0);
@@ -977,6 +1187,7 @@
   }
 
   function simulateYear(clinic, before, effects, actions, options = {}) {
+    applyModelRules(clinic.modelRules);
     const resources = initialResources(clinic, effects);
     const stockPlan = D.stockStrategies[clinic.operations.stockStrategy] || D.stockStrategies.basic;
     let totalExpected = 0;
@@ -997,7 +1208,7 @@
     const plans = D.services.slice().sort((a, b) => a.priority - b.priority).map((service) => {
       const serviceState = clinic.services[service.id];
       const openedThisYear = serviceState.openedYear === clinic.year;
-      const expectedDemand = Math.round(projectedDemand(service, clinic, effects) * (openedThisYear ? SERVICE_RAMP_UP : 1));
+      const expectedDemand = Math.round(projectedDemand(service, clinic, effects) * (openedThisYear ? D.clientModel.serviceRampUp : 1));
       // "Exact figures" must mean exact. The forecast clips demand at capacity BEFORE the swing is
       // applied, so a good year can never beat the projection while a bad one misses it: measured
       // over 300 class codes, the largest year-3 gap is 0.00 €. In exact mode the swing is off on
@@ -1006,12 +1217,19 @@
       const demandVaries = clinic.setup?.forecastPrecision !== "exact";
       const demand = options.actual && demandVaries ? Math.round(expectedDemand * demandSwing(clinic, service.id)) : expectedDemand;
       const missing = missingRequirements(service, clinic);
-      const vd = vetDuration(service, clinic);
-      const sd = supportDuration(service, clinic);
+      // A rushed case comes back a share of the time: the return uses the same vet, support and room
+      // time again, consumes supplies, and earns nothing. Folding it into the time per served case
+      // lets every capacity below — staff, rooms, equipment — feel it without a second pass.
+      // A tired team works slower: below the climate line, every case takes longer — staff and room
+      // time alike — so a low climate costs cases even when the room, not the team, is the constraint.
+      const slowdown = tiredSlowdown(clinic);
+      const returnRate = servicePace(clinic, service.id).returnRate || 0;
+      const vd = vetDuration(service, clinic) * (1 + returnRate) * (1 + slowdown);
+      const sd = supportDuration(service, clinic) * (1 + returnRate) * (1 + slowdown);
       const vetPool = resources.vetByService[service.id] || 0;
       const supportPool = resources.supportByService[service.id] || 0;
       // Drop-off animals wait outside the room while support staff work, freeing room time.
-      const facilityDuration = caseDuration(service, clinic) * (dropoffActive(clinic) && DROPOFF_SERVICES.has(service.id) ? DROPOFF_ROOM_FACTOR : 1);
+      const facilityDuration = caseDuration(service, clinic) * (1 + returnRate) * (1 + slowdown) * (dropoffActive(clinic) && DROPOFF_SERVICES.has(service.id) ? D.operationsModel.dropoffRoomFactor : 1);
       // Vet hours can cover the support part of a case; support hours cannot cover vet work.
       const unstaffed = vd > 0 && vetPool <= 0 ? { type: "unstaffed", id: "vet" } : vd + sd > 0 && vetPool + supportPool <= 0 ? { type: "unstaffed", id: "support" } : null;
       const staffCaps = { demand, vet: vd > 0 ? Math.floor(vetPool / vd) : Infinity, support: vd + sd > 0 ? Math.floor((vetPool + supportPool) / (vd + sd)) : Infinity };
@@ -1035,11 +1253,14 @@
       let vetUsed = 0;
       let supportUsed = 0;
       let bottleneck = serviceState.active ? { type: "demandMet" } : { type: "notOffered" };
+      // Where the refused requests went, by cause: the staff hours, then the room or equipment, then
+      // stock. They add up to demand − honored, so every screen can split the same number.
+      const lostBy = [];
       if (serviceState.active) {
         totalDemand += demand;
         totalExpected += expectedDemand;
-        if (missing.length) bottleneck = missing[0];
-        else if (unstaffed) bottleneck = unstaffed;
+        if (missing.length) { bottleneck = missing[0]; lostBy.push({ reason: missing[0], count: demand }); }
+        else if (unstaffed) { bottleneck = unstaffed; lostBy.push({ reason: unstaffed, count: demand }); }
         else {
           readyServices += 1;
           const caps = { ...staffCaps };
@@ -1047,6 +1268,9 @@
           service.equipmentIds.forEach((id) => { caps[`equipment:${id}`] = Math.floor(staffCap * facilityFactor("equipment", id) + 1e-9); });
           honored = Math.max(0, Math.min(...Object.values(caps)));
           bottleneck = honored >= demand ? { type: "demandMet" } : lowestCap(caps);
+          const staffOnly = Math.max(0, Math.min(staffCaps.vet, staffCaps.support, demand));
+          if (demand - staffOnly > 0) lostBy.push({ reason: staffCaps.vet <= staffCaps.support ? { type: "vetHours" } : { type: "supportHours" }, count: demand - staffOnly });
+          if (staffOnly - honored > 0) lostBy.push({ reason: lowestCap(Object.fromEntries(Object.entries(caps).filter(([k]) => k.includes(":")))), count: staffOnly - honored });
           if (bottleneck.type === "roomFull" || bottleneck.type === "equipmentFull") {
             const kind = bottleneck.type === "roomFull" ? "room" : "equipment";
             facilityLost[kind][bottleneck.id] = (facilityLost[kind][bottleneck.id] || 0) + Math.max(0, staffCap - honored);
@@ -1057,6 +1281,7 @@
             honored -= stockoutLost;
             totalStockoutLost += stockoutLost;
             if (stockoutLost > 0 && bottleneck.type === "demandMet") bottleneck = { type: "stockout" };
+            if (stockoutLost > 0) lostBy.push({ reason: { type: "stockout" }, count: stockoutLost });
           }
           supportUsed = Math.min(supportPool, honored * sd);
           vetUsed = honored * vd + (honored * sd - supportUsed);
@@ -1075,13 +1300,14 @@
       }
       const serviceRevenue = honored * serviceState.price;
       const circularMultiplier = D.sustainability.wasteStrategies[clinic.sustainability.wasteStrategy].variableCostMultiplier;
-      const variable = serviceRevenue * service.variableCost * circularMultiplier;
+      const returnVisits = Math.round(honored * (servicePace(clinic, service.id).returnRate || 0));
+      const variable = (serviceRevenue + returnVisits * serviceState.price) * service.variableCost * circularMultiplier;
       revenue += serviceRevenue;
       baseVariableCosts += variable;
       serviceState.lastDemand = demand;
       serviceState.lastHonored = honored;
       serviceState.lastBottleneck = bottleneck;
-      results.push({ id: service.id, active: serviceState.active, demand, honored, price: serviceState.price, revenue: serviceRevenue, variableCosts: variable, contributionPerCase: serviceState.price * (1 - service.variableCost), missing, bottleneck, vetDuration: vd, supportDuration: sd, vetUsed, supportUsed, vetCoverHours: Math.max(0, vetUsed - honored * vd), staffCap, expectedDemand, rampUp, stockoutLost });
+      results.push({ id: service.id, active: serviceState.active, demand, honored, lostBy, returnVisits, acceptedPrice: Math.round(acceptedPrice(service, clinic)), price: serviceState.price, revenue: serviceRevenue, variableCosts: variable, contributionPerCase: serviceState.price * (1 - service.variableCost), missing, bottleneck, vetDuration: vd, supportDuration: sd, vetUsed, supportUsed, vetCoverHours: Math.max(0, vetUsed - honored * vd), staffCap, expectedDemand, rampUp, stockoutLost });
     });
     const facilityRows = [...Object.keys(D.rooms).map((id) => ["room", id]), ...Object.keys(D.equipment).map((id) => ["equipment", id])]
       .filter(([kind, id]) => (facilityCapacity[kind][id] || 0) > 0 || (facilityNeed[kind][id] || 0) > 0)
@@ -1104,7 +1330,15 @@
       [["vet", effVet, needVet + supportGap, result.vetUsed], ["support", effSupport, needSupport, result.supportUsed]].forEach(([role, effectiveHours, neededHours, usedHours]) => {
         const assignedHours = resources.staffRows.filter((row) => row.role === role).flatMap((row) => row.assignments).filter((assignment) => assignment.serviceId === result.id).reduce((sum, assignment) => sum + assignment.assignedHours, 0);
         if (!(role === "vet" ? service.vetShare : service.supportShare) && !assignedHours) return;
-        const shortageHours = role === "vet" ? Math.max(0, needVet - effectiveHours) : Math.max(0, neededHours - effectiveHours - vetSpare);
+        // Hours short = hours that would serve more cases: the requests this service lost because
+        // this role ran out, times this role's time per case. Measured against all requests instead,
+        // it pointed at hours that would sit idle behind the room or the other role (owner, 2026-10-19).
+        const lostToRole = (result.lostBy || []).filter((l) => l.reason.type === (role === "vet" ? "vetHours" : "supportHours")).reduce((sum, l) => sum + l.count, 0);
+        // A service also held back by a full room or machine gains nothing from more staff hours: they
+        // only win it room time from the services it shares with (owner's case: +94 support hours on
+        // preventive care, −19 cases in all). No shortage is announced there.
+        const facilityBound = (result.lostBy || []).some((l) => l.reason.type === "roomFull" || l.reason.type === "equipmentFull");
+        const shortageHours = facilityBound ? 0 : lostToRole * (role === "vet" ? (result.vetDuration || 0) : (result.supportDuration || 0));
         const surplusHours = Math.max(0, effectiveHours - neededHours);
         serviceHourRows.push({ serviceId: result.id, role, assignedHours, effectiveHours, blockedHours: Math.max(0, assignedHours - effectiveHours), neededHours, usedHours: usedHours || 0, shortageHours, surplusHours });
       });
@@ -1121,7 +1355,7 @@
       staffRow.usedHours = staffRow.assignments.reduce((sum, assignment) => sum + assignment.usedHours, 0);
       // Overtime is paid only for hours actually worked beyond available time.
       staffRow.overtimeHours = Math.max(0, staffRow.usedHours - staffRow.availableHours);
-      staffRow.overtimePay = staffRow.overtimeHours * staffRow.hourlyRate * OVERTIME_PREMIUM;
+      staffRow.overtimePay = staffRow.overtimeHours * staffRow.hourlyRate * D.staffModel.overtimePremium;
       // Hours the clinic pays for and nobody works. There is one definition and this is it: five
       // others existed, agreeing only when nothing was blocked, and one of them counted an
       // over-allocation as free time — 1 945 idle hours reported where 1 518 were real. Blocked
@@ -1131,12 +1365,12 @@
     });
     const overtimeHours = resources.staffRows.reduce((sum, row) => sum + row.overtimeHours, 0);
     const overtimePay = resources.staffRows.reduce((sum, row) => sum + row.overtimePay, 0);
-    const overtimeCost = overtimePay * (1 + SOCIAL_CHARGE_RATE);
-    const overtimeClimate = -Math.min(8, resources.staffRows.reduce((sum, row) => sum + (row.availableHours ? row.overtimeHours / row.availableHours : 0), 0) * 20);
+    const overtimeCost = overtimePay * (1 + D.financeModel.socialChargeRate);
+    const overtimeClimate = -Math.min(D.climateModel.overtimeCap, resources.staffRows.reduce((sum, row) => sum + (row.availableHours ? row.overtimeHours / row.availableHours : 0), 0) * D.climateModel.overtimeWeight);
     const stock = D.stockStrategies[clinic.operations.stockStrategy];
     const variableCosts = baseVariableCosts * stock.multiplier;
     const payroll = clinic.staff.reduce((sum, person) => sum + person.salary, 0);
-    const socialCharges = payroll * SOCIAL_CHARGE_RATE;
+    const socialCharges = payroll * D.financeModel.socialChargeRate;
     const ownedMaintenance = Object.entries(clinic.equipment).reduce((sum, [id, counts]) => sum + counts.owned * D.equipment[id].purchase * D.equipment[id].maintenanceRate, 0);
     const leaseCosts = Object.entries(clinic.equipment).reduce((sum, [id, counts]) => sum + counts.leased * D.equipment[id].lease, 0);
     const roomRent = Object.entries(clinic.rooms).reduce((sum, [id, qty]) => sum + Math.max(0, qty - D.rooms[id].baseIncluded) * D.rooms[id].annualRent, 0);
@@ -1145,9 +1379,9 @@
     const openingCosts = Object.entries(clinic.operations.openingPeriods).reduce((sum, [id, active]) => sum + (active ? D.openingPeriods[id].cost : 0), 0);
     const dropoffCost = clinic.operations.dropoff ? 4000 : 0;
     const hrCost = D.hrStrategies[clinic.hr.strategy].cost;
-    const marketingCost = Object.entries(clinic.marketing).reduce((sum, [strategy, level]) => sum + D.marketingStrategies[strategy][level].cost, 0);
+    const marketingCost = Object.entries(clinic.marketing).reduce((sum, [strategy, level]) => sum + (D.marketingStrategies[strategy]?.[level]?.cost || 0), 0);
     const sustainabilityCost = sustainabilityAnnualCost(clinic);
-    const admin = 14000 + D.services.filter((service) => clinic.services[service.id].active).length * 900;
+    const admin = D.financeModel.adminBase + D.services.filter((service) => clinic.services[service.id].active).length * D.financeModel.adminPerService;
     let loanPayment = 0;
     let loanPrincipalPayment = 0;
     let loanInterest = 0;
@@ -1163,8 +1397,10 @@
     const operatingCosts = openingCosts + dropoffCost + stock.cost + hrCost + marketingCost + sustainabilityCost + admin + loanInterest;
     const fixedCosts = payroll + socialCharges + facilityCosts + operatingCosts + effects.oneTimeCosts;
     const totalCosts = variableCosts + fixedCosts + overtimeCost;
-    const operatingResult = revenue - totalCosts;
-    const tax = operatingResult > 0 ? operatingResult * .25 : 0;
+    const communeLast = lastCommitment(clinic, "commune");
+    const grant = communeLast?.ok && (investsInSustainability(clinic) || !D.commitmentModel?.grantNeedsInvestment) ? (D.commitmentModel?.grant || 0) : 0;
+    const operatingResult = revenue - totalCosts + grant;
+    const tax = operatingResult > 0 ? operatingResult * D.financeModel.taxRate : 0;
     const netResult = operatingResult - tax;
     const financingCashAdjustment = effects.cashAdjustment - loanPrincipalPayment;
     const treasury = clinic.treasury + financingCashAdjustment + netResult;
@@ -1175,9 +1411,9 @@
     if (mainConstraint.type === "none" && netResult < 0) mainConstraint = { type: "revenue" };
     const hr = D.hrStrategies[clinic.hr.strategy];
     const communication = D.marketingStrategies.communication[clinic.marketing.communication];
-    const periodClimate = Object.entries(clinic.operations.openingPeriods).reduce((sum, [id, active]) => sum + (active ? D.openingPeriods[id].climate : 0), 0) * (clinic.hr.strategy === "supportive" ? .5 : 1);
+    const periodClimate = Object.entries(clinic.operations.openingPeriods).reduce((sum, [id, active]) => sum + (active ? D.openingPeriods[id].climate : 0), 0) * (clinic.hr.strategy === "supportive" ? D.climateModel.supportiveHoursFactor : 1);
     const averagePayRatio = clinic.staff.reduce((sum, person) => sum + person.salary / person.baseSalary, 0) / Math.max(1, clinic.staff.length);
-    const payClimate = clamp((averagePayRatio - 1) * 40, -4, 4);
+    const payClimate = clamp((averagePayRatio - 1) * D.climateModel.payWeight, -D.climateModel.payCap, D.climateModel.payCap);
     const social = clone(clinic.social);
     const accessTrust = clinic.sustainability.accessPlan ? D.sustainability.interventions.accessPlan.trust : 0;
     const paceMix = results.reduce((sum, result) => {
@@ -1187,15 +1423,36 @@
     const paceTrust = totalHonored ? paceMix.trust / totalHonored : 0;
     const paceReputation = totalHonored ? paceMix.reputation / totalHonored : 0;
     const stockoutShare = totalStockoutLost / Math.max(1, totalHonored + totalStockoutLost);
-    const trustParts = { served: honoredRate * 3.2 - (1 - honoredRate) * 5.8, communication: communication.trust, access: accessTrust, pace: paceTrust, dropoff: dropoffActive(clinic) ? 1 : 0, stockouts: -Math.min(4, stockoutShare * 30) };
+    // A price above what clients accept costs trust every year it stays there, weighted by the share
+    // of cases at that price and by how sensitive this type of client is to price.
+    const tm = D.trustModel || {};
+    const segmentNow = D.segments[clinic.marketFocus];
+    const unfair = totalHonored ? results.reduce((sum, result) => {
+      if (!result.active || !result.honored) return sum;
+      const service = SERVICE_BY_ID[result.id];
+      const over = Math.max(0, result.price / Math.max(1, acceptedPrice(service, clinic)) - 1);
+      return sum + (result.honored / totalHonored) * over;
+    }, 0) : 0;
+    const priceTrust = -Math.min(tm.unfairCap || 0, unfair * (tm.unfairWeight || 0) * segmentNow.priceSensitivity);
+    const sm = D.socialModel || {};
+    // Refused clients pile up (access pressure, carried from last year): past 50 they cost trust.
+    const refusedTrust = -Math.max(0, Number(clinic.social.communityPressure ?? 50) - 50) * (sm.pressureTrustSlope || 0);
+    // Clients notice the footprint per case moving: lower than last year raises trust, higher lowers it.
+    // Compared with last year, not with the start, so it rewards a change rather than a service mix.
+    const previousPerCase = clinic.history?.length ? clinic.history[clinic.history.length - 1].carbon?.perCase : clinic.carbonBaseline?.perCase;
+    const carbonNow = calculateCarbon(clinic, results);
+    const carbonTrust = previousPerCase && carbonNow.perCase ? clamp((previousPerCase - carbonNow.perCase) / previousPerCase * (sm.carbonTrustWeight || 0), -(sm.carbonTrustCap || 0), sm.carbonTrustCap || 0) : 0;
+    const trustParts = { served: honoredRate * tm.servedGain - (1 - honoredRate) * tm.refusedLoss, communication: communication.trust * communicationStrength(clinic), access: accessTrust, pace: paceTrust, price: priceTrust, refused: refusedTrust, carbon: carbonTrust, dropoff: dropoffActive(clinic) ? tm.dropoffTrust : 0, stockouts: -Math.min(tm.stockoutCap, stockoutShare * tm.stockoutWeight) };
     social.clientTrust = clamp(social.clientTrust + Object.values(trustParts).reduce((sum, value) => sum + value, 0), 0, 100);
-    const climateParts = { hr: hr.climate, openingHours: periodClimate, pay: payClimate, overtime: overtimeClimate, workload: staffUse > .94 ? -3 : staffUse >= .45 ? 1 : -1, departure: effects.climateShock || 0 };
+    // Rushing wears the team: each service run at a fast pace costs climate every year.
+    const paceClimate = D.services.reduce((sum, service) => sum + (clinic.services[service.id]?.active ? (servicePace(clinic, service.id).climate || 0) : 0), 0);
+    const climateParts = { hr: hr.climate, openingHours: periodClimate, pay: payClimate, overtime: overtimeClimate, workload: staffUse > D.climateModel.workloadHigh ? D.climateModel.workloadHighEffect : staffUse >= D.climateModel.workloadLow ? D.climateModel.workloadOkEffect : D.climateModel.workloadLowEffect, pace: paceClimate, departure: effects.climateShock || 0 };
     social.staffClimate = clamp(social.staffClimate + Object.values(climateParts).reduce((sum, value) => sum + value, 0), 0, 100);
     // Year-end resignations are deterministic so the forecast can warn about them.
     const retainedClimate = social.staffClimate + (hr.retention || 0);
     const payRatio = (person) => person.salary / Math.max(1, person.baseSalary);
-    const resignations = clinic.staff.filter((person) => retainedClimate < RESIGN_PAY_CLIMATE && payRatio(person) < RESIGN_PAY_RATIO - .001).map((person) => ({ id: person.id, name: person.name, reason: "pay" }));
-    if (!resignations.length && retainedClimate < RESIGN_CLIMATE && clinic.staff.length > 1) {
+    const resignations = clinic.staff.filter((person) => retainedClimate < D.staffModel.resignPayClimate && payRatio(person) < D.staffModel.resignPayRatio - .001).map((person) => ({ id: person.id, name: person.name, reason: "pay" }));
+    if (!resignations.length && retainedClimate < D.staffModel.resignClimate && clinic.staff.length > 1) {
       const overtimeRatio = (person) => {
         const row = resources.staffRows.find((item) => item.id === person.id);
         return row?.availableHours ? row.overtimeHours / row.availableHours : 0;
@@ -1204,14 +1461,27 @@
       resignations.push({ id: leaver.id, name: leaver.name, reason: "climate" });
     }
     const demandVariance = totalExpected ? totalDemand / totalExpected - 1 : 0;
-    social.referralSupport = clamp(social.referralSupport + (advancedServed > 0 ? honoredRate * 2 : -.5), 0, 100);
-    social.communityPressure = clamp(social.communityPressure + (1 - honoredRate) * 5 - (honoredRate > .84 ? 2 : 0), 0, 100);
+    const peersLast = lastCommitment(clinic, "peers");
+    const peersReaction = peersLast ? (peersLast.ok ? (D.commitmentModel?.referralKept || 0) : (D.commitmentModel?.referralMissed || 0)) : 0;
+    social.referralSupport = clamp(social.referralSupport + (advancedServed > 0 ? honoredRate * 2 : -.5) + peersReaction, 0, 100);
+    // Refused clients pile up: pressure moves halfway each year toward a level set by the share refused.
+    social.communityPressure = sm.pressureSpeed
+      ? clamp(social.communityPressure + ((sm.pressureBase ?? 40) + (1 - honoredRate) * (sm.pressureRefusedWeight ?? 150) - social.communityPressure) * sm.pressureSpeed, 0, 100)
+      : clamp(social.communityPressure + (1 - honoredRate) * (sm.pressureRise ?? 5) - (honoredRate > .84 ? (sm.pressureFall ?? 2) : 0), 0, 100);
     const segment = D.segments[clinic.marketFocus];
-    const reputation = clamp(clinic.reputation + honoredRate * 4 - (1 - honoredRate) * 5 + (netResult >= 0 ? .8 : -.7) + (social.clientTrust - 50) / 75 + paceReputation, 20, 95);
-    const clientGrowth = clamp(.9 + honoredRate * .13 + (reputation - 56) / 900 + segment.growth + (social.clientTrust - 50) / 900, .78, 1.16);
-    const clients = Math.round(clinic.clients * clientGrowth);
+    const rm = D.reputationModel;
+    const reputation = clamp(clinic.reputation + honoredRate * rm.served - (1 - honoredRate) * rm.refused + (netResult >= 0 ? rm.profit : rm.loss) + (social.clientTrust - 50) / rm.trustDivisor + paceReputation, rm.min, rm.max);
+    // Past a line, trust stops being a mood and becomes a movement of clients: they leave below 45,
+    // faster below 35, and bring others above 65. The same shape as the team climate's thresholds.
+    const trustMovement = social.clientTrust < (tm.fleeBelow ?? -1) ? (tm.fleeRate || 0) : social.clientTrust < (tm.leaveBelow ?? -1) ? (tm.leaveRate || 0) : social.clientTrust > (tm.referAbove ?? 101) ? (tm.referRate || 0) : 0;
+    const cm = D.clientModel;
+    const clientGrowth = clamp(cm.growthBase + honoredRate * cm.growthServedWeight + (reputation - 56) * (sm.reputationGrowthWeight ?? 1 / 900) + segment.growth + (social.clientTrust - 50) * (sm.trustGrowthWeight ?? 1 / 900) + trustMovement, cm.growthMin, cm.growthMax);
+    // A refused request is a family turned away; some of them go elsewhere for good, with all their
+    // other visits. The leavers are counted on their own so the results can say how many.
+    const refusedLeft = Math.round(Math.max(0, totalDemand - totalHonored) * (sm.refusedLeave || 0));
+    const clients = Math.max(0, Math.round(clinic.clients * clientGrowth) - refusedLeft);
     const avgContribution = results.filter((r) => r.active && r.contributionPerCase > 0).reduce((sum, r, _, rows) => sum + r.contributionPerCase / rows.length, 0);
-    const carbon = calculateCarbon(clinic, results);
+    const carbon = carbonNow;
     return {
       turn: clinic.year,
       scenarioId: clinic.scenarioId,
@@ -1220,9 +1490,9 @@
       legacyActions: [],
       clinicSnapshot: clinicSnapshot(clinic),
       serviceResults: results,
-      financial: { revenue, baseVariableCosts, variableCosts, payroll, socialCharges, overtimeHours, overtimePay, overtimeCost, ownedMaintenance, leaseCosts, roomRent, locationRent: location.rent, facilityCosts, openingCosts, dropoffCost, stockCost: stock.cost, hrCost, marketingCost, sustainabilityCost, admin, loanPayment, loanPrincipalPayment, loanInterest, oneTimeCosts: effects.oneTimeCosts, cashAdjustment: financingCashAdjustment, fixedCosts, totalCosts, operatingResult, tax, netResult, treasury, margin: revenue ? netResult / revenue : 0, breakEvenCases: avgContribution ? Math.ceil(fixedCosts / avgContribution) : 0 },
+      financial: { grant, revenue, baseVariableCosts, variableCosts, payroll, socialCharges, overtimeHours, overtimePay, overtimeCost, ownedMaintenance, leaseCosts, roomRent, locationRent: location.rent, facilityCosts, openingCosts, dropoffCost, stockCost: stock.cost, hrCost, marketingCost, sustainabilityCost, admin, loanPayment, loanPrincipalPayment, loanInterest, oneTimeCosts: effects.oneTimeCosts, cashAdjustment: financingCashAdjustment, fixedCosts, totalCosts, operatingResult, tax, netResult, treasury, margin: revenue ? netResult / revenue : 0, breakEvenCases: avgContribution ? Math.ceil(fixedCosts / avgContribution) : 0 },
       operational: { totalDemand, totalOpportunity, totalHonored, honoredRate, mainConstraint, staffUse, startVetHours: resources.totalVet, remainingVetHours: resources.remainingVet, startSupportHours: resources.totalSupport, remainingSupportHours: resources.remainingSupport, reservedSupportHours: resources.reservedSupport, roomUse: resourceUse(resources.startRooms, resources.rooms), equipmentUse: resourceUse(resources.startEquipment, resources.equipment), advancedServed, readyServices, facilityRows, staffRows: resources.staffRows, serviceHourRows, stockoutLost: totalStockoutLost, expectedDemand: totalExpected, demandVariance },
-      social: { before: clone(before.social || DEFAULT_SOCIAL), after: social, climateParts, trustParts },
+      social: { before: clone(before.social || DEFAULT_SOCIAL), after: social, climateParts, trustParts, clientMovement: trustMovement, refusedLeft },
       carbon,
       recruitment: effects.recruitment,
       resignations,
@@ -1272,7 +1542,8 @@
       constraintId: run.operational.mainConstraint,
       staffClimate: run.social.after.staffClimate,
       clientTrust: run.social.after.clientTrust,
-      carbonTotal: run.carbon?.total ?? null
+      carbonTotal: run.carbon?.total ?? null,
+      opportunity: run.operational.totalOpportunity ?? null
     };
   }
 
@@ -1286,6 +1557,7 @@
       shown,
       noActionBaseline: forecastSnapshot(baseline),
       realised,
+      frames: planFrames(baseline, planned).map(({ id, verdict, delta }) => ({ id, verdict, delta })),
       error: {
         netResult: realised.netResult - shown.netResult,
         served: realised.served - shown.served,
@@ -1300,6 +1572,46 @@
     const report = simulateYear(fresh, fresh, emptyEffects(), []);
     state.carbonBaseline = clone(report.carbon);
     state.carbonModelVersion = D.carbonModel.version;
+  }
+
+  // The promises a year kept or broke, grouped by who holds the clinic to them.
+  function commitmentsFor(report, clinic = state) {
+    const map = D.commitmentModel?.stakeholders || {};
+    const checks = goalChecks(report, clinic);
+    return Object.entries(map).map(([id, goalIds]) => {
+      const goals = checks.filter((goal) => goalIds.includes(goal.id));
+      if (!goals.length) return null;
+      // The municipality holds the clinic to its footprint *and* to acting on it: a service mix that
+      // happens to lower carbon per case is not a promise kept.
+      const invests = id === "commune" && D.commitmentModel?.grantNeedsInvestment ? investsInSustainability(clinic) : true;
+      return { id, ok: goals.every((goal) => goal.ok) && invests, goals: goals.map((goal) => ({ id: goal.id, ok: goal.ok })), ...(id === "commune" ? { invests } : {}) };
+    }).filter(Boolean);
+  }
+
+  function investsInSustainability(clinic) {
+    const su = clinic.sustainability || {};
+    return Boolean(su.energyUpgrade !== "none" || su.heatPump || su.solar || su.anaesthesiaProtocol !== "standard" || su.wasteStrategy !== "standard" || su.accessPlan);
+  }
+
+  // How many years in a row, ending with the last passed year, the bank promise was broken.
+  function bankMisses(clinic) {
+    let misses = 0;
+    for (let i = (clinic.history || []).length - 1; i >= 0; i--) {
+      const bank = (clinic.history[i].commitments || []).find((c) => c.id === "bank");
+      if (!bank || bank.ok) break;
+      misses++;
+    }
+    return misses;
+  }
+
+  function loanRate(clinic) {
+    const rates = D.commitmentModel?.bankRates || [.06];
+    return rates[Math.min(bankMisses(clinic), rates.length - 1)];
+  }
+
+  function lastCommitment(clinic, id) {
+    const last = (clinic.history || [])[clinic.history.length - 1];
+    return (last?.commitments || []).find((c) => c.id === id) || null;
   }
 
   function goalChecks(report, clinic = plannedState()) {
@@ -1338,6 +1650,10 @@
     actions.forEach((action) => combineEffects(effects, applyAction(state, action, true)));
     const report = simulateYear(state, before, effects, actions, { actual: true });
     report.forecastShown = forecastRecord(shownPlan, shownBaseline, report);
+    // When the year was passed: with the decision times, it shows how long a team stayed on a year.
+    report.passedAt = new Date().toISOString();
+    report.commitments = commitmentsFor(report, state);
+    logDecision("pass", `year:${report.turn}`);
     // Adjudicate BEFORE the new prediction replaces the old one: the student answers for year T+1
     // while passing year T, so at the moment year T resolves the pending slot still holds the
     // prediction made a year ago. No score is attached — the pairing is the whole of the teaching.
@@ -1451,7 +1767,7 @@
     if (payload.kind === "location") return t("actions.location", { name: itemLabel(D.locations[payload.targetId].name) });
     if (payload.kind === "parking") return t("actions.parking", { verb: verb(t("common.add"), t("common.remove")) });
     if (payload.kind === "marketing-strategy") return t("actions.marketing", { type: strategyLabel(payload.strategy), name: itemLabel(D.marketingStrategies[payload.strategy][payload.targetId].name) });
-    if (payload.kind === "social-action") return t("actions.social", { name: itemLabel(D.socialActions[payload.targetId].name) });
+    if (payload.kind === "social-action") return t("actions.social", { name: itemLabel(D.socialActions[payload.targetId]?.name || { en: payload.targetId, fr: payload.targetId }) });
     if (payload.kind === "loan") return t("actions.loan", { amount: money(payload.value) });
     if (payload.kind === "repay-loan") return t("actions.repay");
     if (payload.kind === "sustainability") {
@@ -1467,8 +1783,7 @@
   function strategyLabel(strategy) {
     const labels = {
       communication: { en: "communication", fr: "la communication" },
-      monitoring: { en: "competitive monitoring", fr: "la veille concurrentielle" },
-      geomarketing: { en: "local market research", fr: "l’étude du marché local" }
+      geomarketing: { en: "local market study", fr: "l’étude du marché local" }
     };
     return itemLabel(labels[strategy] || { en: strategy, fr: strategy });
   }
@@ -1494,6 +1809,13 @@
 
   // Requests the market made for services the clinic does not offer. The served rate counts only
   // open services, so without this the dashboard can read 100% while most of the market is refused.
+  // Requests the clinic could take on this year: services closed but ready to open (nothing missing).
+  // The rest of the market — surgery without a theatre — is not a lever yet, so it is not shown here.
+  function offerableRequests(forecast) {
+    const clinic = plannedState();
+    return Math.round((forecast.serviceResults || []).filter((r) => !r.active && !missingRequirements(SERVICE_BY_ID[r.id], clinic).length).reduce((sum, r) => sum + (r.demand || 0), 0));
+  }
+
   function unmetRequests(forecast) {
     return Math.max(0, Math.round((forecast.operational.totalOpportunity || 0) - (forecast.operational.totalDemand || 0)));
   }
@@ -1552,7 +1874,7 @@
       signals.push({
         key: "hoursOnClosedServices", status: "bad", destination: serviceDestination(first),
         title: L(`${onClosed.person.name}’s hours go to closed services`, `Les heures de ${onClosed.person.name} vont à des services fermés`),
-        text: L(`${number(onClosed.hours)} paid hours are assigned to ${names}, which ${onClosed.closed.length > 1 ? "are" : "is"} closed, so they produce nothing. Open the service or move the hours.`, `${number(onClosed.hours)} heures payées sont affectées à ${names}, actuellement fermé(s) : elles ne produisent rien. Ouvrez le service ou déplacez les heures.`),
+        text: L(`${number(onClosed.hours)} paid hours · ${names} closed`, `${number(onClosed.hours)} h payées · ${names} : fermé`),
         action: L(`Investigate ${serviceName(first)}`, `Examiner ${serviceName(first)}`),
         secondary: { label: L("Move the hours", "Déplacer les heures"), destination: { drawer: "staffAllocation", context: onClosed.person.id } }
       });
@@ -1562,12 +1884,12 @@
         key: "resignationRisk", status: "bad", destination: { drawer: "hr" },
         title: L(`${leaver.name} is set to resign at year end`, `${leaver.name} va démissionner en fin d’année`),
         text: leaver.reason === "pay"
-          ? L("They are paid below 95% of their benchmark while staff climate is low. Raise their pay, improve the HR strategy, or hold a staff meeting.", "Cette personne est payée sous 95 % de sa référence alors que le climat est bas. Augmentez son salaire, améliorez la stratégie RH ou organisez une réunion d’équipe.")
-          : L("Staff climate is forecast to fall too low. Reduce overtime or extra opening hours, improve the HR strategy, raise pay, or hold a staff meeting.", "Le climat de l’équipe devrait tomber trop bas. Réduisez les heures supplémentaires ou les horaires étendus, améliorez la stratégie RH, augmentez les salaires ou organisez une réunion d’équipe."),
+          ? L(`pay below ${Math.round(D.staffModel.resignPayRatio * 100)} % of benchmark · climate ${number(forecast.social.after.staffClimate)}`, `salaire sous ${Math.round(D.staffModel.resignPayRatio * 100)} % de la référence · climat ${number(forecast.social.after.staffClimate)}`)
+          : L(`climate ${number(forecast.social.after.staffClimate)}`, `climat ${number(forecast.social.after.staffClimate)}`),
         action: L("Review HR strategy", "Examiner la stratégie RH"),
         secondary: leaver.reason === "pay"
           ? { label: L(`Review ${leaver.name}’s pay`, `Examiner le salaire de ${leaver.name}`), destination: { drawer: "staffPerson", context: leaver.id } }
-          : { label: L("Hold a staff meeting", "Organiser une réunion d’équipe"), destination: { drawer: "relations" } }
+          : { label: L("Climate and trust", "Climat et confiance"), destination: { drawer: "relations" } }
       });
     });
     const unstaffed = forecast.serviceResults.find((row) => row.active && row.bottleneck.type === "unstaffed");
@@ -1579,29 +1901,29 @@
       signals.push({
         key: "unstaffedService", status: "bad", destination: candidate ? { drawer: "staffAllocation", context: candidate.id } : { drawer: "capabilities" },
         title: L(`${serviceName(unstaffed.id)} is open but nobody works on it`, `${serviceName(unstaffed.id)} est ouvert mais personne n’y travaille`),
-        text: L(`It serves 0 of ${number(unstaffed.demand)} requests because nobody is assigned to its ${needsVet ? "veterinary" : "support"} work.${candidate ? ` ${candidate.name} can do it.` : " Nobody on the team is qualified yet."}`, `Il traite 0 des ${number(unstaffed.demand)} demandes car personne n’est affecté à son travail ${needsVet ? "vétérinaire" : "de soutien"}.${candidate ? ` ${candidate.name} peut le faire.` : " Personne dans l’équipe n’est encore qualifié."}`),
-        action: candidate ? L(`Assign ${candidate.name}`, `Affecter ${candidate.name}`) : L("See who can do what", "Voir qui peut faire quoi")
+        text: L(`0 of ${number(unstaffed.demand)} requests served`, `0 des ${number(unstaffed.demand)} demandes traitées`),
+        action: candidate ? L(`${candidate.name}’s time`, `Temps de ${candidate.name}`) : L("See who can do what", "Voir qui peut faire quoi")
       });
     }
-    const full = (forecast.operational.facilityRows || []).filter((row) => row.full).sort((a, b) => b.turnedAway - a.turnedAway)[0];
-    if (full) {
+    // Measurements, not causes: the busiest room or machine, and the service refusing the most.
+    // Which of them limits the clinic is the students' call, confirmed in Résultats.
+    const busiest = (forecast.operational.facilityRows || []).filter((row) => row.capacity > 0 && row.rate >= .9).sort((a, b) => b.rate - a.rate)[0];
+    if (busiest) {
       signals.push({
-        key: "facilityFull", status: "bad", destination: { drawer: full.kind === "room" ? "rooms" : "equipment" },
-        title: L(`${facilityName(full)} is full`, `${facilityName(full)} : capacité saturée`),
-        text: L(`${number(full.turnedAway)} requests are turned away across ${full.services.map(serviceName).join(", ")}. Every service using it loses the same share. Add capacity, extend opening hours, or use a faster pace.`, `${number(full.turnedAway)} demandes sont refusées pour ${full.services.map(serviceName).join(", ")}. Chaque service concerné perd la même part. Ajoutez de la capacité, étendez les horaires ou accélérez le rythme.`),
-        action: full.kind === "room" ? L("Add a room", "Ajouter une salle") : L("Add equipment", "Ajouter un équipement"),
-        secondary: { label: L("Extend opening hours", "Étendre les horaires"), destination: { drawer: "opening" } }
+        key: "facilityBusy", status: "warn", destination: { drawer: busiest.kind === "room" ? "rooms" : "equipment" },
+        title: facilityName(busiest),
+        text: `${number(busiest.used)} / ${number(busiest.capacity)} h · ${pct(busiest.rate)}`,
+        action: busiest.kind === "room" ? L("See the rooms", "Voir les salles") : L("See the equipment", "Voir l’équipement")
       });
     }
-    const short = forecast.serviceResults.filter((row) => row.active && (row.bottleneck.type === "vetHours" || row.bottleneck.type === "supportHours")).map((row) => ({ row, unmet: row.demand - row.honored })).sort((a, b) => b.unmet - a.unmet)[0];
-    if (short && short.unmet > 0) {
-      const vetShort = short.row.bottleneck.type === "vetHours";
+    const mostRefused = forecast.serviceResults.filter((row) => row.active && row.demand - row.honored - stockoutsFor(forecast, row.id) > 0).sort((a, b) => (b.demand - b.honored) - (a.demand - a.honored))[0];
+    if (mostRefused) {
       signals.push({
-        key: "staffShort", status: "warn", destination: { drawer: "capabilities" },
-        title: L(`${serviceName(short.row.id)} runs out of ${vetShort ? "veterinary" : "staff"} hours`, `${serviceName(short.row.id)} manque d’heures ${vetShort ? "vétérinaires" : "du personnel"}`),
-        text: L(`${number(short.unmet)} requests go unserved. Move hours from a quieter service, allow overtime (up to 130%), or hire.`, `${number(short.unmet)} demandes restent sans réponse. Déplacez des heures d’un service plus calme, autorisez des heures supplémentaires (jusqu’à 130 %) ou recrutez.`),
-        action: L("See who can do what", "Voir qui peut faire quoi"),
-        secondary: { label: L("Post a vacancy", "Publier une offre"), destination: { drawer: "recruitment" } }
+        key: "serviceRefusing", status: "warn", destination: serviceDestination(mostRefused.id),
+        title: serviceName(mostRefused.id),
+        text: L(`${number(mostRefused.honored)} / ${number(mostRefused.demand)} served · ${number(mostRefused.demand - mostRefused.honored)} refused`, `${number(mostRefused.honored)} / ${number(mostRefused.demand)} traités · ${number(mostRefused.demand - mostRefused.honored)} refusées`),
+        action: L(`Investigate ${serviceName(mostRefused.id)}`, `Examiner ${serviceName(mostRefused.id)}`),
+        secondary: { label: L("Team", "Équipe"), destination: { domain: "team" } }
       });
     }
     if (forecast.financial.netResult < 0) {
@@ -1623,21 +1945,9 @@
       signals.push({
         key: "teamUnderused", status: "warn", destination: openable ? serviceDestination(openable.id) : { drawer: "services" },
         title: L("Much of the team’s paid time is unused", "Une grande partie du temps payé de l’équipe est inutilisée"),
-        text: L(
-          `${pct(1 - forecast.operational.staffUse)} of available work hours are unused${person ? `; ${person.name} has ${number(idlest.unusedHours)} spare hours` : ""}.${openable ? ` ${serviceName(openable.id)} could use their time.` : " Move hours to services that are short, or use spare support time for stock or market research."}`,
-          `${pct(1 - forecast.operational.staffUse)} des heures de travail disponibles sont inutilisées${person ? ` ; ${person.name} a ${number(idlest.unusedHours)} heures libres` : ""}.${openable ? ` ${serviceName(openable.id)} pourrait utiliser ce temps.` :" Déplacez des heures vers les services en manque, ou utilisez le temps de soutien libre pour le stock ou l’étude de marché."}`
-        ),
+        text: L(`${pct(1 - forecast.operational.staffUse)} of paid hours not worked${person ? ` · ${person.name} ${number(idlest.unusedHours)} h` : ""}`, `${pct(1 - forecast.operational.staffUse)} des heures payées non travaillées${person ? ` · ${person.name} ${number(idlest.unusedHours)} h` : ""}`),
         action: openable ? L(`Investigate ${serviceName(openable.id)}`, `Examiner ${serviceName(openable.id)}`) : L("Explore compatible services", "Explorer les services compatibles"),
         secondary: person ? { label: L(`Change ${person.name}’s time`, `Modifier le temps de ${person.name}`), destination: { drawer: "staffAllocation", context: person.id } } : null
-      });
-    }
-    if (signals.length < 3) {
-      const source = forecast.carbon.primaryDrivers[0];
-      signals.push({
-        key: "carbonOpportunity", status: "neutral", destination: { domain: "sustainability" },
-        title: L("There is a visible carbon opportunity", "Une possibilité de réduction carbone est visible"),
-        text: `${sourceLabel(source)}: ${tonnes(forecast.carbon.bySource[source])}`,
-        action: L("Inspect sustainability options", "Voir les options de durabilité")
       });
     }
     // Never show two primary buttons to the same place: a repeat falls back to its secondary action.
@@ -1703,7 +2013,7 @@
   }
 
   // Each drawer belongs to one work area; opening it moves the page behind it there.
-  const DRAWER_HOME = { relations: "team", services: "care", rooms: "care", equipment: "care", person: "team", staffAllocation: "team", staffPerson: "team", staffExit: "team", training: "team", capabilities: "team", hoursByService: "team", serviceLedger: "results", recruitment: "team", opening: "team", dropoff: "team", stock: "team", hr: "team", pricing: "business", finance: "business", market: "business", location: "business", marketing: "business", sustainability: "sustainability", plan: null, export: null, setup: null };
+  const DRAWER_HOME = { relations: "team", services: "care", rooms: "care", equipment: "care", person: "team", staffAllocation: "team", staffPerson: "team", staffExit: "team", training: "team", capabilities: "team", hoursByService: "team", serviceLedger: "results", recruitment: "team", opening: "team", dropoff: "team", stock: "team", hr: "team", pricing: "business", finance: "business", market: "business", location: "business", marketing: "business", sustainability: "sustainability", plan: null, export: null, setup: null, atelier: null };
   const AREAS = ["overview", "care", "team", "business", "sustainability", "results"];
   // Older per-person drawers now open the person hub on the matching tab.
   const PERSON_TABS = { staffAllocation: "time", staffPerson: "pay", staffExit: "exit", training: "training" };
@@ -1844,6 +2154,217 @@
     return `<div class="drawer-tabs" role="tablist">${tabs.map(([id, label]) => `<button role="tab" aria-selected="${id === tab}" class="${id === tab ? "active" : ""}" data-person-tab="${id}">${escapeHtml(label)}</button>`).join("")}</div>${body}`;
   }
 
+  // ---------- The workshop: the teacher changes the game, sees what it does, and hands it out ----------
+  const REGLES_KIND = "clinique-regles";
+  const ATELIER_SECTIONS = [
+    ["regles", { en: "Rules", fr: "Règles" }],
+    ["services", { en: "Services and prices", fr: "Services et prix" }],
+    ["equipe", { en: "Team and salaries", fr: "Équipe et salaires" }],
+    ["salles", { en: "Rooms and equipment", fr: "Salles et équipement" }],
+    ["fonctionnement", { en: "Operations", fr: "Fonctionnement" }],
+    ["depart", { en: "Starting clinic", fr: "Clinique de départ" }],
+    ["monnaie", { en: "Currency", fr: "Monnaie" }],
+    ["noms", { en: "Names", fr: "Noms" }]
+  ];
+  const nameOf = (v) => (typeof v === "string" ? v : isBilingual(v) ? itemLabel(v) : "");
+  // Originals are written in data.js's currency, euros; values used, in the chosen currency.
+  function ruleText(def, v, devise) {
+    if (def.affichage === "pourcent") return `${decimal(v * 100, Math.abs(v * 100) < 1 && v !== 0 ? 2 : 1).replace(/[.,]0+$/, "")} %`;
+    if (def.affichage === "euro") return money(v, devise);
+    if (def.affichage === "fois") return `×${decimal(v, 2)}`;
+    return decimal(v, Math.abs(v) < 1 && v !== 0 ? 3 : Math.abs(v) < 10 ? 2 : 0).replace(/[.,]0+$/, "");
+  }
+  // « Consultation générale › Prix de base », « Familles qui partent après un refus ».
+  function ruleLabel(def) {
+    if (def.section === "regles") return itemLabel(def.nomL);
+    const ligne = nameOf(readRule(`${def.ligne}.name`)) || def.ligne.split(".").pop();
+    if (def.table === "acceptes") return `${nameOf(SERVICE_BY_ID[def.champ]?.name) || def.champ} › ${ligne}`;
+    return `${ligne} › ${itemLabel(def.label)}`;
+  }
+  function nameLabel(chemin) {
+    const def = RULE_NAMES[chemin];
+    const table = (D.atelierCatalogue || []).find((t) => t.id === def.table);
+    return `${itemLabel(table?.titre || { en: def.table, fr: def.table })} › ${def.texte ? L("description", "description") : L("name", "nom")}`;
+  }
+  // Every change a set of rules makes, readable: for the exports, the file and the editor.
+  function rulesSummary(rules) {
+    const clean = cleanRules(rules);
+    if (!clean) return [];
+    const out = [];
+    if (clean.monnaie) out.push({ section: "monnaie", nom: L("Currency", "Monnaie"), texteOrigine: "EUR", texteValeur: `${clean.monnaie.code}${Math.abs(clean.monnaie.facteur - 1) > 1e-9 ? ` (${L("amounts", "montants")} ×${decimal(clean.monnaie.facteur, 2)})` : ""}` });
+    Object.entries(clean.valeurs).forEach(([chemin, v]) => { const def = RULE_SETTINGS[chemin]; out.push({ chemin, section: def.section, nom: ruleLabel(def), origine: RULE_DEFAULTS[chemin], valeur: v, texteOrigine: ruleText(def, RULE_DEFAULTS[chemin], "EUR"), texteValeur: ruleText(def, v) }); });
+    Object.keys(clean.delies).forEach((id) => out.push({ section: "services", nom: `${nameOf(SERVICE_BY_ID[id]?.name)} › ${L("accepted price", "prix accepté")}`, texteOrigine: L("follows the base price", "suit le prix de base"), texteValeur: L("unlinked", "délié") }));
+    Object.entries(clean.noms).forEach(([chemin, v]) => out.push({ chemin, section: "noms", nom: nameLabel(chemin), texteOrigine: nameOf(NAME_DEFAULTS[chemin]), texteValeur: typeof v === "string" ? v : L(v.en, v.fr) }));
+    return out;
+  }
+  // This year and the next for the clinic as planned, under given rules (with its starting values
+  // rebuilt if no year was played) — then the game's own rules are put back.
+  function rulePreview(rules) {
+    const clinic = clone(state);
+    clinic.modelRules = rules;
+    withStartingValues(clinic);
+    applyModelRules(rules);
+    const effects = emptyEffects();
+    const actions = pendingActions();
+    actions.forEach((action) => combineEffects(effects, applyAction(clinic, action, true)));
+    const first = simulateYear(clinic, clinic, effects, actions);
+    const second = clone(clinic);
+    second.social = clone(first.next.social);
+    second.clients = first.next.clients;
+    second.reputation = first.next.reputation;
+    second.treasury = first.financial.treasury;
+    second.finance.loan = first.next.loan;
+    second.year += 1;
+    second.history = [...(clinic.history || []), { ...first, commitments: commitmentsFor(first, clinic) }];
+    const next = simulateYear(second, second, emptyEffects(), []);
+    applyModelRules(state.modelRules);
+    return { first, next };
+  }
+  function rulesEffectLines(draft) {
+    const now = rulePreview(state.modelRules), then = rulePreview(draft);
+    const rows = [
+      [L("Cases served", "Cas traités"), (r) => r.operational.totalHonored, "number"],
+      [L("Requests refused", "Demandes refusées"), (r) => r.operational.totalDemand - r.operational.totalHonored, "number"],
+      [L("Net result", "Résultat net"), (r) => r.financial.netResult, "money"],
+      [L("End treasury", "Trésorerie finale"), (r) => r.financial.treasury, "money"],
+      [L("Client trust", "Confiance des clients"), (r) => r.social.after.clientTrust, "decimal"],
+      [L("Staff climate", "Climat de l’équipe"), (r) => r.social.after.staffClimate, "decimal"]
+    ];
+    // Amounts are shown in the draft's currency, then the game's own is put back.
+    const garde = ruleCurrency;
+    ruleCurrency = cleanRules(draft)?.monnaie?.code || "EUR";
+    const fmt = (v, type) => type === "money" ? signed(Math.round(v), "money") : type === "decimal" ? `${v >= 0 ? "+" : "−"}${decimal(Math.abs(v), 1)}` : signed(Math.round(v));
+    const year = (a, b) => rows.map(([label, get, type]) => { const d = get(b) - get(a); return Math.abs(d) >= (type === "decimal" ? .05 : .5) ? [label, fmt(d, type)] : null; }).filter(Boolean);
+    const foyers = then.first.next.clients - now.first.next.clients;
+    const out = { cette: year(now.first, then.first), suivante: [...(Math.abs(foyers) >= .5 ? [[L("Client households", "Foyers clients"), signed(Math.round(foyers))]] : []), ...year(now.next, then.next)] };
+    ruleCurrency = garde;
+    return out;
+  }
+  function renderRulesSection() {
+    const summary = rulesSummary(state.modelRules);
+    const status = summary.length ? L(`Rules « ${state.modelRules.nom || "untitled"} »: ${summary.length} change${summary.length > 1 ? "s" : ""}`, `Règles « ${state.modelRules.nom || "sans nom"} » : ${summary.length} changement${summary.length > 1 ? "s" : ""}`) : L("Original rules", "Règles d’origine");
+    return `<div class="rules-setup"><h3>${escapeHtml(L("Rules of the model", "Règles du modèle"))}</h3><p><strong>${escapeHtml(status)}</strong></p>${summary.length ? `<ul class="rules-list">${summary.slice(0, 8).map((r) => `<li>${escapeHtml(r.nom)} : ${escapeHtml(r.texteOrigine)} → <strong>${escapeHtml(r.texteValeur)}</strong></li>`).join("")}${summary.length > 8 ? `<li>${escapeHtml(L(`and ${summary.length - 8} more`, `et ${summary.length - 8} autres`))}</li>` : ""}</ul>` : ""}
+      ${state.history.length ? `<p><small>${escapeHtml(L("Rules from your teacher are loaded before Year 1.", "Les règles de votre enseignant se chargent avant l’année 1."))}</small></p>` : `<label class="button secondary file-button">${escapeHtml(L("Load rules from your teacher", "Charger des règles de l’enseignant"))}<input type="file" accept="application/json,.json" data-charger-regles hidden></label>`}
+      <details class="atelier-entry"><summary>${escapeHtml(L("Teacher’s workshop", "Atelier de l’enseignant"))}</summary>${ui.atelierUnlocked ? `<button class="button primary" data-atelier-show>${escapeHtml(L("Open the workshop", "Ouvrir l’atelier"))}</button>` : `<label><span>${escapeHtml(L("Workshop code", "Code de l’atelier"))}</span><input type="password" autocomplete="off" data-atelier-code></label><button class="button secondary" data-atelier-open>${escapeHtml(L("Open", "Ouvrir"))}</button>`}</details></div>`;
+  }
+
+  // The values a field shows and takes: shares in %, everything else as is.
+  const ruleShown = (def, v) => (def.affichage === "pourcent" ? Math.round(v * 10000) / 100 : Math.round(v * 1000) / 1000);
+  const ruleTaken = (def, texte) => { const n = Number(String(texte).replace(/\s/g, "").replace(",", ".")); return Number.isFinite(n) ? (def.affichage === "pourcent" ? n / 100 : n) : null; };
+  function atelierCell(chemin) {
+    const def = RULE_SETTINGS[chemin];
+    if (!def) return "<td></td>";
+    const draft = ui.rulesDraft;
+    const v = draft.valeurs[chemin] ?? RULE_DEFAULTS[chemin];
+    const lie = def.table === "acceptes" && !(chemin in draft.valeurs) ? linkedAccepted(chemin) : null;
+    const shown = lie ?? v;
+    const modifie = Math.abs(shown - RULE_DEFAULTS[chemin]) > 1e-9;
+    return `<td class="${modifie ? "changed" : ""}"><input type="text" inputmode="decimal" value="${ruleShown(def, shown)}" data-rule-cell="${escapeHtml(chemin)}" aria-label="${escapeHtml(ruleLabel(def))}">${def.affichage === "pourcent" ? "<span class=\"unit\">%</span>" : ""}<small>${escapeHtml(L("orig.", "orig."))} ${escapeHtml(ruleText(def, RULE_DEFAULTS[chemin], "EUR"))}${lie != null && modifie ? ` · ${escapeHtml(L("follows the price", "suit le prix"))}` : ""}${chemin in draft.valeurs ? ` · <button class="text-button" data-rule-reset="${escapeHtml(chemin)}">${escapeHtml(L("reset", "rétablir"))}</button>` : ""}</small></td>`;
+  }
+  // What a linked accepted price becomes when its service's base price is changed in the draft.
+  function linkedAccepted(chemin) {
+    const m = chemin.match(/^segments\.[^.]+\.willingness\.(.+)$/);
+    const prix = `services.${m?.[1]}.price`;
+    if (!m || ui.rulesDraft.delies[m[1]] || !(prix in ui.rulesDraft.valeurs)) return null;
+    return RULE_DEFAULTS[chemin] * ui.rulesDraft.valeurs[prix] / RULE_DEFAULTS[prix];
+  }
+  function atelierTable(table) {
+    const q = (ui.atelierSearch || "").trim().toLowerCase();
+    const rows = atelierRows(table).filter((row) => !q || nameOf(row.objet.name).toLowerCase().includes(q) || row.cle.toLowerCase().includes(q));
+    if (table.matrice) {
+      const segs = rows;
+      const services = D.services.filter((s) => segs.some((seg) => `${seg.cle}.${table.matrice}.${s.id}` in RULE_SETTINGS));
+      return `<h3>${escapeHtml(itemLabel(table.titre))}</h3><p class="muted">${escapeHtml(L("Each accepted price follows its service’s base price unless you untick « linked ».", "Chaque prix accepté suit le prix de base de son service, sauf si vous décochez « lié »."))}</p><div class="atelier-scroll"><table class="atelier-table"><thead><tr><th>${escapeHtml(L("Service", "Service"))}</th>${segs.map((seg) => `<th>${escapeHtml(nameOf(seg.objet.name))}</th>`).join("")}<th>${escapeHtml(L("Linked", "Lié"))}</th></tr></thead><tbody>${services.map((s) => `<tr><th>${escapeHtml(nameOf(s.name))}</th>${segs.map((seg) => atelierCell(`${seg.cle}.${table.matrice}.${s.id}`)).join("")}<td><input type="checkbox" ${ui.rulesDraft.delies[s.id] ? "" : "checked"} data-rule-link="${s.id}" aria-label="${escapeHtml(L("Linked to the base price", "Lié au prix de base"))}"></td></tr>`).join("")}</tbody></table></div>`;
+    }
+    if (!rows.length) return "";
+    return `<h3>${escapeHtml(itemLabel(table.titre))}</h3><div class="atelier-scroll"><table class="atelier-table"><thead><tr><th></th>${table.champs.map((c) => `<th>${escapeHtml(itemLabel(c.label))}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr><th>${escapeHtml(nameOf(row.objet.name) || row.cle.split(".").pop())}${row.scenarios && row.scenarios.length < Object.keys(D.scenarios).length ? `<small>${escapeHtml(row.scenarios.map((sc) => nameOf(D.scenarios[sc].name)).join(", "))}</small>` : ""}</th>${table.champs.map((c) => atelierCell(`${row.cle}.${c.cle}`)).join("")}</tr>`).join("")}</tbody></table></div>`;
+  }
+  function atelierRules() {
+    const draft = ui.rulesDraft;
+    const groupes = [...new Set((D.atelierSettings || []).map((s) => s.groupe))];
+    const q = (ui.atelierSearch || "").trim().toLowerCase();
+    const slider = (s) => {
+      const def = RULE_SETTINGS[s.chemin];
+      const v = draft.valeurs[s.chemin] ?? RULE_DEFAULTS[s.chemin];
+      const modifie = Math.abs(v - RULE_DEFAULTS[s.chemin]) > 1e-9;
+      return `<div class="rule-row ${modifie ? "changed" : ""}"><div><strong>${escapeHtml(itemLabel(def.nomL))}</strong><small>${escapeHtml(itemLabel(def.texteL))}</small></div><div class="rule-control"><input type="range" min="${def.min}" max="${def.max}" step="${def.pas}" value="${v}" data-rule="${escapeHtml(s.chemin)}" aria-label="${escapeHtml(itemLabel(def.nomL))}"><output>${escapeHtml(ruleText(def, v))}</output><small>${escapeHtml(L("original", "origine"))} ${escapeHtml(ruleText(def, RULE_DEFAULTS[s.chemin], "EUR"))}${modifie ? ` · <button class="text-button" data-rule-reset="${escapeHtml(s.chemin)}">${escapeHtml(L("reset", "rétablir"))}</button>` : ""}</small></div></div>`;
+    };
+    const groupesEn = { Clients: "Clients", Confiance: "Trust", "Équipe": "Team", Argent: "Money", Fonctionnement: "Operations", Promesses: "Promises" };
+    return groupes.map((g) => { const items = (D.atelierSettings || []).filter((s) => s.groupe === g && (!q || itemLabel(RULE_SETTINGS[s.chemin].nomL).toLowerCase().includes(q))); return items.length ? `<h3>${escapeHtml(L(groupesEn[g] || g, g))}</h3>${items.map(slider).join("")}` : ""; }).join("");
+  }
+  function atelierCurrency() {
+    const draft = ui.rulesDraft;
+    const code = draft.monnaie?.code || "EUR";
+    const facteur = draft.monnaie?.facteur ?? 1;
+    const consult = RULE_DEFAULTS["services.consult.price"];
+    const apercu = (() => { const garde = ruleCurrency; ruleCurrency = code; const t = money(Math.round(consult * facteur)); ruleCurrency = garde; return t; })();
+    return `<h3>${escapeHtml(L("Currency", "Monnaie"))}</h3><label class="atelier-field"><span>${escapeHtml(L("Currency shown in the game", "Monnaie affichée dans le jeu"))}</span><select data-rule-currency>${RULE_CURRENCIES.map((c) => `<option value="${c}" ${c === code ? "selected" : ""}>${c}</option>`).join("")}</select></label>
+      <label class="atelier-field"><span>${escapeHtml(L("Convert every amount by", "Convertir tous les montants par"))}</span><input type="text" inputmode="decimal" value="${facteur}" data-rule-factor></label>
+      <p>${escapeHtml(L(`Example: the consultation, ${money(consult)} today, would be ${apercu}.`, `Exemple : la consultation, ${money(consult)} aujourd’hui, passerait à ${apercu}.`))}</p>
+      <button class="button primary" data-rule-convert>${escapeHtml(L("Convert all amounts", "Convertir tous les montants"))}</button>
+      <p class="muted">${escapeHtml(L("Converting sets every amount (prices, salaries, rents, equipment, costs, treasury) to its original × the factor. You can then adjust each one in its section.", "Convertir remplace chaque montant (prix, salaires, loyers, équipements, coûts, trésorerie) par son original × le facteur. Vous pouvez ensuite ajuster chacun dans sa section."))}</p>`;
+  }
+  function atelierNames() {
+    const q = (ui.atelierSearch || "").trim().toLowerCase();
+    const rows = Object.keys(RULE_NAMES).filter((c) => !q || nameOf(NAME_DEFAULTS[c]).toLowerCase().includes(q));
+    const draftName = (c) => ui.rulesDraft.noms[c] ?? NAME_DEFAULTS[c];
+    return `<h3>${escapeHtml(L("Names", "Noms"))}</h3><p class="muted">${escapeHtml(L("The workbook and the model map use the original names.", "Le carnet et la carte du modèle utilisent les noms d’origine."))}</p><div class="atelier-scroll"><table class="atelier-table names"><thead><tr><th></th><th>Français</th><th>English</th></tr></thead><tbody>${rows.map((c) => { const o = NAME_DEFAULTS[c], d = draftName(c); const changed = JSON.stringify(o) !== JSON.stringify(d); return `<tr class="${changed ? "changed" : ""}"><th><small>${escapeHtml(nameLabel(c))}</small>${escapeHtml(nameOf(o))}</th>${typeof o === "string" ? `<td colspan="2"><input type="text" maxlength="120" value="${escapeHtml(typeof d === "string" ? d : d.fr)}" data-name-single="${escapeHtml(c)}"></td>` : `<td data-langue="Français"><input type="text" maxlength="120" value="${escapeHtml(d.fr)}" data-name-fr="${escapeHtml(c)}" aria-label="${escapeHtml(nameOf(o))} · Français"></td><td data-langue="English"><input type="text" maxlength="120" value="${escapeHtml(d.en)}" data-name-en="${escapeHtml(c)}" aria-label="${escapeHtml(nameOf(o))} · English"></td>`}</tr>`; }).join("")}</tbody></table></div>`;
+  }
+  function renderAtelierPage() {
+    if (!ui.rulesDraft) { const c = cleanRules(state.modelRules); ui.rulesDraft = { nom: c?.nom || "", valeurs: { ...(c?.valeurs || {}) }, noms: { ...(c?.noms || {}) }, delies: { ...(c?.delies || {}) }, monnaie: c?.monnaie ? { ...c.monnaie } : null }; }
+    const draft = ui.rulesDraft;
+    const section = ui.atelierSection || "regles";
+    const changes = rulesSummary(draft);
+    const parSection = (id) => changes.filter((r) => r.section === id).length;
+    const effets = rulesEffectLines(draft);
+    const ligne = (titre, items) => `<div class="effect-year"><h4>${escapeHtml(titre)}</h4>${items.length ? `<ul>${items.map(([label, v]) => `<li><span>${escapeHtml(label)}</span><strong>${escapeHtml(v)}</strong></li>`).join("")}</ul>` : `<p class="muted">${escapeHtml(L("nothing moves on your clinic as it is", "rien ne bouge sur votre clinique telle qu’elle est"))}</p>`}</div>`;
+    const contenu = section === "regles" ? atelierRules()
+      : section === "monnaie" ? atelierCurrency()
+      : section === "noms" ? atelierNames()
+      : (D.atelierCatalogue || []).filter((t) => t.section === section).map(atelierTable).join("");
+    return `<div class="atelier-page">
+      <header class="atelier-top"><div><h1>${escapeHtml(L("Teacher’s workshop", "Atelier de l’enseignant"))}</h1><span>${escapeHtml(L(`${changes.length} change${changes.length === 1 ? "" : "s"}`, `${changes.length} changement${changes.length > 1 ? "s" : ""}`))}</span></div>
+        <label class="rules-name"><span>${escapeHtml(L("Name of these rules", "Nom de ces règles"))}</span><input type="text" maxlength="60" value="${escapeHtml(draft.nom || "")}" data-rule-name placeholder="${escapeHtml(L("e.g. Clinic in Geneva", "ex. Clinique à Genève"))}"></label>
+        <div class="language-switch"><button data-language="fr" class="${state.language === "fr" ? "active" : ""}" aria-pressed="${state.language === "fr"}">FR</button><button data-language="en" class="${state.language === "en" ? "active" : ""}" aria-pressed="${state.language === "en"}">EN</button></div>
+        <div class="button-row"><button class="button primary" data-rules-apply>${escapeHtml(L("Apply to my game", "Appliquer à ma partie"))}</button><button class="button secondary" data-rules-download ${changes.length ? "" : "disabled"}>${escapeHtml(L("Download for students", "Télécharger pour les étudiants"))}</button><button class="button secondary" data-rules-reset-all>${escapeHtml(L("Original rules", "Règles d’origine"))}</button><button class="button secondary" data-atelier-close>${escapeHtml(L("Close", "Fermer"))}</button></div></header>
+      <div class="atelier-cols">
+        <nav class="atelier-nav" aria-label="${escapeHtml(L("Sections", "Sections"))}">${ATELIER_SECTIONS.map(([id, label]) => `<button data-atelier-section="${id}" class="${id === section ? "active" : ""}">${escapeHtml(itemLabel(label))}${parSection(id) ? `<span class="badge">${parSection(id)}</span>` : ""}</button>`).join("")}</nav>
+        <main class="atelier-main">${section === "monnaie" ? "" : `<input type="search" class="atelier-search" value="${escapeHtml(ui.atelierSearch || "")}" placeholder="${escapeHtml(L("Search…", "Chercher…"))}" data-atelier-search>`}${state.history.length && ["services", "equipe", "depart"].includes(section) ? `<p class="callout">${escapeHtml(L("Your game has started: starting values (prices, salaries, treasury, households) apply to a game not yet started — such as your students’.", "Votre partie a commencé : les valeurs de départ (prix, salaires, trésorerie, foyers) s’appliquent à une partie pas encore commencée — comme celle de vos étudiants."))}</p>` : ""}${contenu}</main>
+        <aside class="atelier-effect" aria-live="polite"><h2>${escapeHtml(L("What these rules change on your clinic", "Ce que ces règles changent sur votre clinique"))}</h2>${changes.length || cleanRules(state.modelRules) ? `${ligne(L("This year", "Cette année"), effets.cette)}${ligne(L("Next year", "L’an prochain"), effets.suivante)}` : `<p class="muted">${escapeHtml(L("Original rules: change something to see its effect.", "Règles d’origine : changez quelque chose pour voir son effet."))}</p>`}<p class="muted">${escapeHtml(L("Compared with the rules your game uses now, as planned. The workbook’s figures assume the original rules.", "Comparé aux règles de votre partie, telle que planifiée. Les chiffres du carnet supposent les règles d’origine."))}</p></aside>
+      </div></div>`;
+  }
+  function telechargerRegles() {
+    const clean = cleanRules(ui.rulesDraft);
+    if (!clean) return;
+    const fichier = { kind: REGLES_KIND, ...clean, changements: rulesSummary(clean).map(({ section, nom, texteOrigine, texteValeur }) => ({ section, nom, origine: texteOrigine, valeur: texteValeur })) };
+    const blob = new Blob([JSON.stringify(fichier, null, 1)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `regles-${(clean.nom || "clinique").normalize("NFD").replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase() || "clinique"}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    toast(L("Rules downloaded: give this file to the students, who load it in the game setup.", "Règles téléchargées : donnez ce fichier aux étudiants, qui le chargent dans le paramétrage."), "good");
+  }
+  function appliquerRegles(rules, source) {
+    const clean = cleanRules(rules);
+    state.modelRules = clean;
+    withStartingValues(state);
+    logDecision("rules", `rules:${source}`, clean ? `${clean.nom || ""} (${rulesSummary(clean).length})` : "origine");
+    saveState();
+    return clean;
+  }
+  function chargerRegles(texte) {
+    let fichier;
+    try { fichier = JSON.parse(texte); } catch (e) { toast(L("That file is not readable.", "Ce fichier n’est pas lisible."), "warn"); return false; }
+    if (!fichier || fichier.kind !== REGLES_KIND) { toast(L("That is not a rules file from the workshop.", "Ce n’est pas un fichier de règles de l’atelier."), "warn"); return false; }
+    if (state.history.length) { toast(L("Rules are loaded before Year 1.", "Les règles se chargent avant l’année 1."), "warn"); return false; }
+    const clean = appliquerRegles(fichier, "load");
+    render();
+    toast(clean ? L(`Rules « ${clean.nom} » loaded: ${rulesSummary(clean).length} changes.`, `Règles « ${clean.nom} » chargées : ${rulesSummary(clean).length} changements.`) : L("Original rules.", "Règles d’origine."), "good");
+    return true;
+  }
+
   function renderSetupDrawer() {
     if (!ui.settingsDraft) ui.settingsDraft = { actionLimit: state.rules.unlimited ? "unlimited" : String(state.rules.actionLimit), targetYear: state.rules.targetYear, bankruptcyThreshold: state.rules.bankruptcyThreshold, startingTreasury: state.setup.startingTreasury, forecastPrecision: state.setup.forecastPrecision, classCode: state.setup.classCode, studyGroup: state.setup.studyGroup };
     const settings = ui.settingsDraft;
@@ -1856,15 +2377,14 @@
         <label><span>${escapeHtml(t("app.actionLimit"))}</span><select data-settings-field="actionLimit">${Array.from({ length: 12 }, (_, index) => index + 1).map((count) => `<option value="${count}" ${String(settings.actionLimit) === String(count) ? "selected" : ""}>${count} ${escapeHtml(count === 1 ? L("action", "action") : L("actions", "actions"))}</option>`).join("")}<option value="unlimited" ${settings.actionLimit === "unlimited" ? "selected" : ""}>${escapeHtml(t("app.unlimited"))}</option></select></label>
         <label><span>${escapeHtml(t("app.targetYear"))}</span><input type="number" min="${state.year}" max="12" value="${settings.targetYear}" data-settings-field="targetYear"></label>
         <label><span>${escapeHtml(t("app.bankruptcy"))}</span><input type="number" min="-1000000" max="0" step="10000" value="${settings.bankruptcyThreshold}" data-settings-field="bankruptcyThreshold"></label>
-      </div></fieldset></div><div class="setup-actions"><button class="button primary" data-save-settings>${escapeHtml(L("Save settings", "Enregistrer les paramètres"))}</button></div>${ui.settingsError ? `<p class="form-error" role="alert">${escapeHtml(ui.settingsError)}</p>` : ""}${renderCashAdjuster()}<h3>${escapeHtml(L("Scenario", "Scénario"))}</h3><div class="scenario-grid compact">${Object.entries(D.scenarios).map(([id, scenario]) => `<article class="choice-card ${state.scenarioId === id ? "selected" : ""}"><h3>${escapeHtml(itemLabel(scenario.name))}</h3><p>${escapeHtml(itemLabel(scenario.description))}</p><button class="button ${state.scenarioId === id ? "secondary" : "danger"}" data-scenario="${id}" ${state.scenarioId === id ? "disabled" : ""}>${escapeHtml(state.scenarioId === id ? t("common.current") : t("dashboard.chooseScenario"))}</button></article>`).join("")}</div><div class="button-row"><button class="button secondary" data-export>${escapeHtml(t("app.export"))}</button><button class="button danger" data-reset>${escapeHtml(t("app.reset"))}</button></div>`;
+      </div></fieldset></div><div class="setup-actions"><button class="button primary" data-save-settings>${escapeHtml(L("Save settings", "Enregistrer les paramètres"))}</button></div>${ui.settingsError ? `<p class="form-error" role="alert">${escapeHtml(ui.settingsError)}</p>` : ""}${renderRulesSection()}${renderCashAdjuster()}<h3>${escapeHtml(L("Scenario", "Scénario"))}</h3><div class="scenario-grid compact">${Object.entries(D.scenarios).map(([id, scenario]) => `<article class="choice-card ${state.scenarioId === id ? "selected" : ""}"><h3>${escapeHtml(itemLabel(scenario.name))}</h3><p>${escapeHtml(itemLabel(scenario.description))}</p><button class="button ${state.scenarioId === id ? "secondary" : "danger"}" data-scenario="${id}" ${state.scenarioId === id ? "disabled" : ""}>${escapeHtml(state.scenarioId === id ? t("common.current") : t("dashboard.chooseScenario"))}</button></article>`).join("")}</div><div class="button-row"><button class="button secondary" data-export>${escapeHtml(t("app.export"))}</button><button class="button danger" data-reset>${escapeHtml(t("app.reset"))}</button></div>`;
   }
 
   function serviceChip(row) {
     if (!row.active) return ["", L("Closed", "Fermé")];
     if (row.missing?.length) return ["warn", L("Blocked", "Bloqué")];
     if (row.bottleneck.type === "unstaffed") return ["bad", L("Nobody assigned", "Personne d’affecté")];
-    if (row.bottleneck.type === "roomFull" || row.bottleneck.type === "equipmentFull") return ["warn", L("Full", "Saturé")];
-    return ["good", L("Running", "En service")];
+        return ["good", L("Running", "En service")];
   }
 
   function renderNav() {
@@ -1891,7 +2411,9 @@
       ["forecast.treasury", baseline.financial.treasury, forecast.financial.treasury, "money", true],
       ["forecast.served", baseline.operational.totalHonored, forecast.operational.totalHonored, "number", true],
       ["forecast.staffUse", baseline.operational.staffUse, forecast.operational.staffUse, "percent", true],
-      ["carbon.total", baseline.carbon.total, forecast.carbon.total, "carbon", true]
+      ["carbon.total", baseline.carbon.total, forecast.carbon.total, "carbon", true],
+      ["social.clientTrust", baseline.social.after.clientTrust, forecast.social.after.clientTrust, "number", true],
+      ["social.staffClimate", baseline.social.after.staffClimate, forecast.social.after.staffClimate, "number", true]
     ];
   }
 
@@ -1955,6 +2477,8 @@
   }
 
   function planRowLabel(key) {
+    if (key === "social.clientTrust") return L("Client trust", "Confiance des clients");
+    if (key === "social.staffClimate") return L("Staff climate", "Climat de l’équipe");
     return key === "carbon.total" ? L("Carbon footprint", "Empreinte carbone") : t(key);
   }
 
@@ -1963,15 +2487,22 @@
     return options.signed ? signed(value, type) : formatMetric(value, type);
   }
 
+  // The gap column is the difference of the two figures printed beside it, not of the unrounded
+  // values: a student who checks −59 081 − (−64 969) must find the 5 888 on the screen, and the
+  // same 5 888 in Analyse différentielle and in the export once rounded.
+  function ecartAffiche(type, base, plan) {
+    const pas = type === "percent" ? 100 : type === "carbon" ? 10 : 1;
+    return (Math.round(plan * pas) - Math.round(base * pas)) / pas;
+  }
+
   function renderPlanPanel(baseline, forecast) {
     const rows = planRows(baseline, forecast);
     return `<aside class="plan-panel" aria-label="${escapeHtml(t("forecast.title"))}">
-      <button class="mobile-plan-toggle" data-open-drawer="plan"><strong>${escapeHtml(L("Plan", "Plan"))} · ${pendingActions().length} ${escapeHtml(pendingActions().length === 1 ? t("common.action") : t("common.actions"))}</strong><span>${escapeHtml(t("forecast.treasury"))} ${escapeHtml(forecastText(forecast.financial.treasury - baseline.financial.treasury, "money", { signed: true }))}</span></button>
+      <button class="mobile-plan-toggle" data-open-drawer="plan"><strong>${escapeHtml(L("Plan", "Plan"))} · ${pendingActions().length} ${escapeHtml(pendingActions().length === 1 ? t("common.action") : t("common.actions"))}</strong><span>${escapeHtml(t("forecast.treasury"))} ${escapeHtml(forecastText(forecast.financial.treasury, "money"))} <em>(${escapeHtml(forecastText(forecast.financial.treasury - baseline.financial.treasury, "money", { signed: true }))})</em></span></button>
       <div class="panel-heading"><div><h2>${escapeHtml(t("forecast.title"))}</h2><details class="note-repliee" data-pli="noteOpen" ${ui.noteOpen ? "open" : ""}><summary>${escapeHtml(L("How to read this", "Comment lire ceci"))}</summary><p>${escapeHtml(forecastNote())}</p></details></div></div>
       <div class="forecast-table">
         <div class="forecast-head"><span></span><span>${escapeHtml(t("common.baseline"))}</span><span>${escapeHtml(t("common.planned"))}</span><span>${escapeHtml(t("common.delta"))}</span></div>
-        ${rows.map(([key, base, plan, type, outcome]) => `<div class="forecast-row"><strong>${escapeHtml(planRowLabel(key))}</strong><span>${escapeHtml(planValue(type, outcome, base))}</span><span>${escapeHtml(planValue(type, outcome, plan))}</span><em>${escapeHtml(planValue(type, outcome, plan - base, { signed: true }))}</em></div>`).join("")}
-        <div class="forecast-row constraint"><strong>${escapeHtml(t("forecast.constraint"))}</strong><span>${escapeHtml(blockerText(baseline.operational.mainConstraint))}</span><span>${escapeHtml(blockerText(forecast.operational.mainConstraint))}</span><em>${baseline.operational.mainConstraint.type === forecast.operational.mainConstraint.type ? "=" : "↻"}</em></div>
+        ${rows.map(([key, base, plan, type, outcome]) => `<div class="forecast-row"><strong>${escapeHtml(planRowLabel(key))}</strong><span>${escapeHtml(planValue(type, outcome, base))}</span><span>${escapeHtml(planValue(type, outcome, plan))}</span><em>${escapeHtml(planValue(type, outcome, ecartAffiche(type, base, plan), { signed: true }))}</em></div>`).join("")}
       </div>
       <div class="plan-actions">
         ${pendingActions().length ? pendingActions().map((action) => `<div class="plan-action${isFreeAction(action.payload) ? " free-action" : ""}"><span>${escapeHtml(actionLabel(action.payload))}${isFreeAction(action.payload) ? ` <small>${escapeHtml(L("does not use an action", "ne consomme pas d’action"))}</small>` : ""}</span><button data-remove-action="${escapeHtml(action.key)}" aria-label="${escapeHtml(t("common.remove"))}">×</button></div>`).join("") : `<p class="empty">${escapeHtml(t("forecast.noActions"))}</p>`}
@@ -2043,6 +2574,7 @@
     return [
       [L("Starting treasury", "Trésorerie de départ"), money(setup.startingTreasury)],
       [L("Forecast precision", "Précision des prévisions"), precisionLabel(setup.forecastPrecision)],
+      [L("Rules of the model", "Règles du modèle"), (() => { const r = rulesSummary(state.modelRules); return r.length ? `« ${state.modelRules.nom || L("untitled", "sans nom")} » — ${r.map((x) => `${x.nom} : ${x.texteOrigine} → ${x.texteValeur}`).join(" ; ")}` : L("original", "d’origine"); })()],
       [L("Class code", "Code de classe"), setup.classCode || L("Default", "Par défaut")],
       [L("Study group", "Groupe d’étude"), setup.studyGroup || L("Not set", "Non défini")],
       [L("Action limit", "Limite d’actions"), state.rules.unlimited ? L("Unlimited", "Illimitée") : String(state.rules.actionLimit)],
@@ -2074,11 +2606,11 @@
     const person = planned.staff.find((item) => item.id === ui.drawerContext);
     if (!person) return `<p>${escapeHtml(L("This person is no longer on the planned team.", "Cette personne ne fait plus partie de l’équipe planifiée."))}</p>`;
     const row = forecast.operational.staffRows.find((item) => item.id === person.id);
-    const severance = person.salary * SEVERANCE_SHARE;
+    const severance = person.salary * D.staffModel.severanceShare;
     const services = normalizeAllocations(person).filter((item) => item.share > 0).map((item) => serviceName(item.serviceId)).join(", ");
     const key = `fire:${person.id}`;
     const payload = { kind: "fire", targetId: person.id };
-    return `<div class="staff-editor"><h3>${escapeHtml(person.name)}</h3><p>${escapeHtml(L(`Letting ${person.name} go costs ${money(severance)} in severance (3 months’ salary), removes their ${number(row?.availableHours || 0)} available hours this year, and lowers the team’s climate by ${Math.abs(DEPARTURE_CLIMATE)}. Their annual salary of ${money(person.salary)} stops.`, `Se séparer de ${person.name} coûte ${money(severance)} d’indemnité (3 mois de salaire), retire ses ${number(row?.availableHours || 0)} heures disponibles cette année et baisse le climat de l’équipe de ${Math.abs(DEPARTURE_CLIMATE)}. Son salaire annuel de ${money(person.salary)} s’arrête.`))}</p><p><strong>${escapeHtml(L("Services they work on", "Services concernés"))}:</strong> ${escapeHtml(services || "—")}</p><p class="no-effect">${escapeHtml(L("Services left without anyone show as “Nobody assigned”. A former applicant cannot be rehired for a year.", "Les services laissés sans personne apparaissent « Personne d’affecté ». Un ancien candidat ne peut pas être réembauché pendant un an."))}</p>${consequencePreview(key, payload)}${reviewButton(key, payload, L("Let go", "Se séparer"))}</div>`;
+    return `<div class="staff-editor"><h3>${escapeHtml(person.name)}</h3><p>${escapeHtml(L(`Letting ${person.name} go costs ${money(severance)} in severance (3 months’ salary), removes their ${number(row?.availableHours || 0)} available hours this year, and lowers the team’s climate by ${Math.abs(D.staffModel.departureClimate)}. Their annual salary of ${money(person.salary)} stops.`, `Se séparer de ${person.name} coûte ${money(severance)} d’indemnité (3 mois de salaire), retire ses ${number(row?.availableHours || 0)} heures disponibles cette année et baisse le climat de l’équipe de ${Math.abs(D.staffModel.departureClimate)}. Son salaire annuel de ${money(person.salary)} s’arrête.`))}</p><p><strong>${escapeHtml(L("Services they work on", "Services concernés"))}:</strong> ${escapeHtml(services || "—")}</p><p class="no-effect">${escapeHtml(L("Services left without anyone show as “Nobody assigned”. A former applicant cannot be rehired for a year.", "Les services laissés sans personne apparaissent « Personne d’affecté ». Un ancien candidat ne peut pas être réembauché pendant un an."))}</p>${consequencePreview(key, payload)}${reviewButton(key, payload, L("Let go", "Se séparer"))}</div>`;
   }
 
   function previewAction(key, payload) {
@@ -2116,65 +2648,104 @@
     ["operating", () => L("Operating costs", "Coûts d’exploitation")]
   ];
 
+  // What this one choice moves, and nothing else: signed changes, only where something changes. The
+  // plan panel carries the whole picture once the choice is added (owner, 2026-10-19).
+  // The indicators a kind of decision acts on directly — the reason someone would choose it.
+  function directIndicators(payload) {
+    const k = payload?.kind;
+    if (k === "sustainability" || k === "parking") return new Set(["carbon"]);
+    if (k === "location") return new Set(["carbon", "clientTrust"]);
+    if (k === "social-action") return new Set(Object.keys(D.socialActions[payload.targetId]?.deltas || {}));
+    if (k === "marketing-strategy") return new Set(payload.strategy === "communication" ? ["clientTrust"] : []);
+    if (k === "salary" || k === "hr" || k === "opening-period" || k === "fire") return new Set(["staffClimate"]);
+    if (k === "price") return new Set(["clientTrust"]);
+    if (k === "service-pace") return new Set(["clientTrust", "staffClimate"]);
+    if (k === "dropoff") return new Set(["clientTrust"]);
+    return new Set();
+  }
+
   function consequencePreview(key, payload, options = {}) {
     const { before, after, settledBefore, settledAfter } = previewAction(key, payload);
     const hidden = forecastPrecision() === "costs";
-
-    // --- What this decision costs. Exact, always, and split by the line it lands on. ---
+    const cells = [];
+    // Costs, by the line they land on, with the second year when it differs.
     const once = after.financial.oneTimeCosts - before.financial.oneTimeCosts;
     const firstYear = costBuckets(after), baseYear = costBuckets(before);
     const settled = settledAfter ? costBuckets(settledAfter) : null;
     const settledBase = settledBefore ? costBuckets(settledBefore) : null;
-    const costCells = [];
-    if (Math.abs(once) >= 1) costCells.push([L("One-time costs", "Coûts ponctuels"), signed(once, "money"), ""]);
+    if (Math.abs(once) >= 1) cells.push([L("One-time costs", "Coûts ponctuels"), signed(once, "money"), "", "cost"]);
     COST_LINES.forEach(([id, label]) => {
       const now = firstYear[id] - baseYear[id];
       const later = settled ? settled[id] - settledBase[id] : now;
       if (Math.abs(now) < 1 && Math.abs(later) < 1) return;
-      // The second figure is the whole point for a service or a hire: the first year is the cheap
-      // one, and a decision judged on it is judged on its most flattering year.
-      const note = Math.abs(later - now) >= 1 ? L(`${money(later)} from year two`, `${money(later)} ensuite`) : "";
-      costCells.push([label(), signed(now, "money"), note]);
+      cells.push([label(), signed(now, "money"), Math.abs(later - now) >= 1 ? L(`${money(later)} from year two`, `${money(later)} ensuite`) : "", "cost"]);
     });
-
-    // --- What it does to the clinic. Plan-level, and filtered by the forecast precision. ---
-    const moved = (a, b, threshold) => Math.abs(a - b) >= threshold;
-    const compareRows = [
-      [L("Net result", "Résultat net"), before.financial.netResult, after.financial.netResult, "money", true],
-      [L("End treasury", "Trésorerie finale"), before.financial.treasury, after.financial.treasury, "money", true],
-      [L("Cases served", "Cas traités"), before.operational.totalHonored, after.operational.totalHonored, "number", true],
-      ...(moved(after.operational.staffUse, before.operational.staffUse, .005) ? [[L("Team workload", "Charge de l’équipe"), before.operational.staffUse, after.operational.staffUse, "percent", false]] : []),
-      ...(moved(after.carbon.total, before.carbon.total, .05) ? [[L("Carbon footprint", "Empreinte carbone"), before.carbon.total, after.carbon.total, "carbon", false]] : []),
-      ...(moved(after.social.after.staffClimate, before.social.after.staffClimate, .5) ? [[L("Staff climate", "Climat de l’équipe"), Math.round(before.social.after.staffClimate), Math.round(after.social.after.staffClimate), "number", false]] : []),
-      ...(moved(after.social.after.clientTrust, before.social.after.clientTrust, .5) ? [[L("Client trust", "Confiance des clients"), Math.round(before.social.after.clientTrust), Math.round(after.social.after.clientTrust), "number", false]] : []),
-      ...(moved(after.social.after.referralSupport, before.social.after.referralSupport, .5) ? [[itemLabel(D.socialIndicators.referralSupport), Math.round(before.social.after.referralSupport), Math.round(after.social.after.referralSupport), "number", false]] : []),
-      ...(moved(after.social.after.communityPressure, before.social.after.communityPressure, .5) ? [[itemLabel(D.socialIndicators.communityPressure), Math.round(before.social.after.communityPressure), Math.round(after.social.after.communityPressure), "number", false]] : [])
-    ];
-
+    // Outcomes this choice moves.
+    const refused = (run) => run.operational.totalDemand - run.operational.totalHonored;
+    const refusedCause = () => {
+      const was = Object.fromEntries(refusalSplit(before).map((p) => [p.key, p.count]));
+      const grew = refusalSplit(after).map((p) => ({ ...p, delta: p.count - (was[p.key] || 0) })).filter((p) => p.delta > 0).sort((a, b) => b.delta - a.delta)[0];
+      return grew && grew.key === "stock" ? grew.label : "";
+    };
+    const outcome = (label, a, b, type, threshold, note = "") => { if (Math.abs(b - a) >= threshold) cells.push([label, type === "carbon" ? `${b - a >= 0 ? "+" : "−"}${tonnes(Math.abs(b - a))}` : type === "percent" ? `${b - a >= 0 ? "+" : "−"}${Math.abs(Math.round((b - a) * 100))} pts` : signed(Math.round(b - a), type), note, "outcome"]); };
+    if (!hidden) {
+      // What it does to activity — what the choice is for. Money totals, workload and the social
+      // indicators are in « Impact du plan »; one is repeated here only when the choice acts on it
+      // directly (a meeting on climate, communication on trust, a measure on carbon).
+      const direct = directIndicators(payload);
+      // Requests = cases + refusals, so one of the three is always redundant. Cases always; refusals
+      // only when demand itself moves — otherwise they are just the mirror of the cases (owner,
+      // 2026-10-19). The requests line, their sum, is not shown.
+      outcome(L("Cases served", "Cas traités"), before.operational.totalHonored, after.operational.totalHonored, "number", .5);
+      if (Math.abs(after.operational.totalDemand - before.operational.totalDemand) >= .5) outcome(L("Requests refused", "Demandes refusées"), refused(before), refused(after), "number", .5, refused(after) > refused(before) ? refusedCause() : "");
+      outcome(L("Households next year", "Foyers l’an prochain"), before.next.clients, after.next.clients, "number", .5);
+      if (direct.has("carbon")) outcome(L("Carbon footprint", "Empreinte carbone"), before.carbon.total, after.carbon.total, "carbon", .05);
+      if (direct.has("staffClimate")) outcome(L("Staff climate", "Climat de l’équipe"), before.social.after.staffClimate, after.social.after.staffClimate, "number", .5);
+      if (direct.has("clientTrust")) outcome(L("Client trust", "Confiance des clients"), before.social.after.clientTrust, after.social.after.clientTrust, "number", .5);
+      if (direct.has("referralSupport")) outcome(itemLabel(D.socialIndicators.referralSupport), before.social.after.referralSupport, after.social.after.referralSupport, "number", .5);
+      if (direct.has("communityPressure")) outcome(itemLabel(D.socialIndicators.communityPressure), before.social.after.communityPressure, after.social.after.communityPressure, "number", .5);
+    }
     const served = after.operational.totalHonored - before.operational.totalHonored;
     const workload = after.operational.staffUse - before.operational.staffUse;
-    const note = options.note === false ? "" : (Math.abs(served) < .5 && Math.abs(workload) < .0001 ? noEffectReason(payload) : "");
-
-    // Showing what happens without the decision beside what happens with it makes the direction
-    // intrinsic, so the old "Improves / Worsens" column is gone: six phrases per card that only
-    // restated the sign of the number next to them.
-    const comparison = hidden
-      ? `<p class="no-effect">${escapeHtml(L("Revealed at year end", "Révélé en fin d’année"))}</p>`
-      : `<div class="comparison-list" aria-label="${escapeHtml(L("Expected consequences", "Conséquences attendues"))}">${compareRows.map(([label, base, plan, type]) => `<div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(formatMetric(base, type))}</span><em>→ ${escapeHtml(formatMetric(plan, type))}</em></div>`).join("")}</div>`;
-
-    // The duration marker rides with the preview so every decision surface gets it from one place:
-    // the option cards, and the nine hand-built cards that never went through optionCard.
+    const note = options.note === false ? [] : (Math.abs(served) < .5 && Math.abs(workload) < .0001 ? noEffectReason(payload) : []);
+    // The duration marker rides with the preview so every decision surface gets it from one place.
     return `<small class="lasts">${escapeHtml(durationLabel(payload))}</small>`
-      + (costCells.length ? `<p class="preview-label">${escapeHtml(L("What this decision costs", "Ce que cette décision coûte"))}</p><div class="consequence-grid" aria-label="${escapeHtml(L("Cost of this decision", "Coût de cette décision"))}" data-cost-block>${costCells.map(([label, value, extra]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><em>${escapeHtml(extra)}</em></div>`).join("")}</div>` : "")
-      + `<p class="preview-label">${escapeHtml(L("Without this decision → with it", "Sans cette décision → avec"))}</p>${comparison}`
-      + (note ? `<p class="no-effect"><strong>${escapeHtml(L("No effect on cases yet", "Pas encore d’effet sur les cas"))}:</strong> ${escapeHtml(note)}</p>` : "");
+      + (cells.length ? `<div class="consequence-grid delta-list" aria-label="${escapeHtml(L("What this choice changes", "Ce que ce choix change"))}" data-cost-block>${cells.map(([label, value, extra, kind]) => `<div class="${kind}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>${extra ? `<em>${escapeHtml(extra)}</em>` : ""}</div>`).join("")}</div>` : `<p class="no-effect">${escapeHtml(L("Changes nothing this year", "Ne change rien cette année"))}</p>`)
+      + (hidden ? `<p class="no-effect">${escapeHtml(L("Outcomes revealed at year end", "Effets révélés en fin d’année"))}</p>` : "")
+      + needsTags(note);
   }
 
-  // Explains why a decision leaves cases and workload unchanged, naming what is still missing.
+
+  // Why a decision leaves cases unchanged, as marks rather than a sentence: per service, each
+  // condition still missing. Empty when nothing is missing — the unchanged « Cas traités » row says
+  // the rest.
+  // Several versions of one decision, compared on one table: a column per version, a row per effect
+  // that moves in at least one of them, signed. Replaces one full preview block per version.
+  function compareOptions(options) {
+    const runs = options.map((o) => ({ ...o, ...previewAction(o.key, o.payload) }));
+    const d = (r, get) => get(r.after) - get(r.before);
+    const recurring = (run) => run.financial.totalCosts - run.financial.oneTimeCosts;
+    const rows = [
+      [L("One-time costs", "Coûts ponctuels"), (r) => d(r, (x) => x.financial.oneTimeCosts), "money", false],
+      [L("Recurring costs", "Coûts récurrents"), (r) => d(r, recurring), "money", false],
+      [L("Net result", "Résultat net"), (r) => d(r, (x) => x.financial.netResult), "money", true],
+      [L("End treasury", "Trésorerie finale"), (r) => d(r, (x) => x.financial.treasury), "money", true],
+      [L("Cases served", "Cas traités"), (r) => d(r, (x) => x.operational.totalHonored), "number", true],
+      [L("Carbon footprint", "Empreinte carbone"), (r) => d(r, (x) => x.carbon.total), "carbon", false]
+    ].filter(([, get, , always]) => always || runs.some((r) => Math.abs(get(r)) >= (1)));
+    const cell = (v, type) => type === "carbon" ? `${v >= 0 ? "+" : "−"}${tonnes(Math.abs(v))}` : signed(Math.round(v), type);
+    if (forecastPrecision() === "costs") return "";
+    return `<table class="compare-options"><thead><tr><th></th>${runs.map((r) => `<th>${escapeHtml(r.label)}</th>`).join("")}</tr></thead><tbody>${rows.map(([label, get, type]) => `<tr><th>${escapeHtml(label)}</th>${runs.map((r) => { const v = get(r); return `<td class="${Math.round(v) > 0 && type !== "money" ? "good-text" : ""}">${escapeHtml(cell(v, type))}</td>`; }).join("")}</tr>`).join("")}</tbody><tfoot><tr><th><small class="lasts">${escapeHtml([...new Set(runs.map((r) => durationLabel(r.payload)))].join(" / "))}</small></th>${runs.map((r) => `<td>${reviewButton(r.key, r.payload, r.button)}</td>`).join("")}</tr></tfoot></table>`;
+  }
+
+  function needsTags(note) {
+    return note && note.length ? `<div class="needs" aria-label="${escapeHtml(L("Still missing", "Manque encore"))}">${note.map((n) => `<p>${n.service ? `<strong>${escapeHtml(serviceName(n.service))}</strong>` : ""}${n.missing.map((m) => `<span class="need-tag">✗ ${escapeHtml(m)}</span>`).join("")}</p>`).join("")}</div>` : "";
+  }
+
   function noEffectReason(payload) {
     const planned = plannedState();
     const serviceKinds = ["price", "service-pace"];
-    if (serviceKinds.includes(payload.kind) && !planned.services[payload.targetId]?.active) return L("the service is closed. Open it first.", "le service est fermé. Ouvrez-le d’abord.");
+    if (serviceKinds.includes(payload.kind) && !planned.services[payload.targetId]?.active) return [{ service: payload.targetId, missing: [L("service closed", "service fermé")] }];
     const serviceIds = payload.kind === "room-add" ? D.services.filter((service) => service.roomIds.includes(payload.targetId)).map((service) => service.id)
       : payload.kind === "equipment-acquire" ? D.services.filter((service) => service.equipmentIds.includes(payload.targetId)).map((service) => service.id)
       : payload.kind === "training" ? D.services.filter((service) => service.vetSkills.includes(payload.targetId) || service.supportSkills.includes(payload.targetId)).map((service) => service.id)
@@ -2182,20 +2753,17 @@
     if (serviceIds.length) {
       const after = clone(planned);
       applyAction(after, { payload }, false);
-      const needs = serviceIds.map((id) => {
-        const missing = missingRequirements(SERVICE_BY_ID[id], after).map(blockerText);
-        if (!after.services[id].active) missing.push(L("open the service", "ouvrir le service"));
-        return missing.length ? `${serviceName(id)} ${L("still needs", "a encore besoin de")}: ${missing.join(", ")}` : null;
-      }).filter(Boolean).slice(0, 2);
-      if (needs.length) return needs.join(" · ");
-      return L("this capacity is not what limits these services right now; demand or staff hours do.", "cette capacité ne limite pas ces services pour l’instant ; la demande ou les heures du personnel le font.");
+      return serviceIds.map((id) => {
+        const short = (r) => r.type === "missingRoom" ? roomName(r.id) : r.type === "missingEquipment" ? equipmentName(r.id) : r.type === "missingVetSkill" || r.type === "missingSupportSkill" ? L(`skill: ${skillName(r.id)}`, `compétence : ${skillName(r.id)}`) : blockerText(r);
+        const missing = missingRequirements(SERVICE_BY_ID[id], after).map(short);
+        if (!after.services[id].active) missing.push(L("service open", "service ouvert"));
+        return missing.length ? { service: id, missing } : null;
+      }).filter(Boolean).slice(0, 3);
     }
-    if (payload.kind === "dropoff" && planned.staff.filter((person) => person.role === "support").length < 2) return L("the drop-off workflow needs two support staff; hire another first.", "le parcours de dépôt exige deux membres du soutien ; recrutez-en un autre d’abord.");
-    if (payload.kind === "parking" && !["routine", "budget"].includes(planned.marketFocus) && !planned.services.boarding.active) return L("parking only raises demand for routine- or budget-focused clinics and for boarding.", "le parking n’augmente la demande que pour une clinique orientée soins courants ou prix, et pour la pension.");
-    if (payload.kind === "social-action" && D.socialActions[payload.targetId]?.advancedDemand && !D.services.some((service) => ADVANCED_SERVICES.has(service.id) && planned.services[service.id].active)) return L("this raises demand for advanced care, but no advanced service is open.", "cela augmente la demande de soins avancés, mais aucun service avancé n’est ouvert.");
-    if (payload.kind === "price") return L("cases here are limited by staff or rooms, not demand, so the price changes income per case rather than the number of cases.", "les cas sont limités par le personnel ou les salles, pas par la demande : le prix change la recette par cas, pas le nombre de cas.");
-    if (["staff-allocation", "hire", "salary"].includes(payload.kind)) return L("the services involved are limited by demand, rooms, or missing requirements, not by staff hours.", "les services concernés sont limités par la demande, les salles ou des conditions manquantes, pas par les heures du personnel.");
-    return L("this decision changes costs or longer-term indicators rather than this year’s cases.", "cette décision modifie les coûts ou des indicateurs de plus long terme plutôt que les cas de cette année.");
+    if (payload.kind === "dropoff" && planned.staff.filter((person) => person.role === "support").length < 2) return [{ missing: [L("two support staff", "deux personnes de soutien")] }];
+    if (payload.kind === "parking" && !["routine", "budget"].includes(planned.marketFocus) && !planned.services.boarding.active) return [{ missing: [L("routine or budget clients, or boarding", "clients soins courants ou prix, ou pension")] }];
+    if (payload.kind === "social-action" && D.socialActions[payload.targetId]?.advancedDemand && !D.services.some((service) => ADVANCED_SERVICES.has(service.id) && planned.services[service.id].active)) return [{ missing: [L("an advanced service open", "un service avancé ouvert")] }];
+    return [];
   }
 
   function encodedPayload(payload) {
@@ -2240,12 +2808,272 @@
     return once;
   }
 
+  // The choice already in force is shown as such: no preview, no button. Choosing it again used to
+  // be a real action — moving to the neighbourhood you are in cost 20 000 € (owner, 2026-10-19).
+  function choiceCard(current, title, description, key, payload, meta = "", id = null) {
+    if (!current) return optionCard(title, description, key, payload, meta, id);
+    return `<article class="choice-card current"><h3>${escapeHtml(title)} <span class="badge good">${escapeHtml(L("Current", "Actuel"))}</span></h3><p>${escapeHtml(description)}</p>${meta ? `<small>${escapeHtml(meta)}</small>` : ""}</article>`;
+  }
+
   function optionCard(title, description, key, payload, meta = "", id = null) {
     return `<article${id ? targetCard(id) : ' class="choice-card"'}><h3>${escapeHtml(title)}</h3><p>${escapeHtml(description)}</p>${meta ? `<small>${escapeHtml(meta)}</small>` : ""}${consequencePreview(key, payload)}${reviewButton(key, payload)}</article>`;
   }
 
   function sourceLabel(id) {
     return ({ building: L("Building and energy", "Bâtiment et énergie"), clinical: L("Clinical care", "Soins cliniques"), waste: L("Materials and waste", "Matériaux et déchets"), travel: L("Client travel", "Déplacements des clients") })[id] || id;
+  }
+
+  const DRIVER_LABELS = () => ({
+    served: L("requests served", "demandes servies"), communication: L("communication", "communication"), access: L("access plan", "plan d’accès"), pace: L("pace", "rythme"), price: L("prices too high", "prix trop élevés"), refused: L("refusals piling up", "refus accumulés"), carbon: L("footprint per case", "empreinte par cas"), dropoff: L("drop-off", "dépôt"), stockouts: L("stock-outs", "ruptures"),
+    hr: L("HR strategy", "stratégie RH"), openingHours: L("opening hours", "horaires"), pay: L("pay", "salaires"), overtime: L("overtime", "heures sup."), workload: L("workload", "charge"), departure: L("departure", "départ")
+  });
+  // Where each cause is acted on: a drawer, or a work area.
+  const DRIVER_TARGET = { price: { drawer: "pricing" }, pace: { drawer: "services" }, refused: { drawer: "rooms" }, served: { drawer: "rooms" }, carbon: { domain: "sustainability" }, access: { domain: "sustainability" }, communication: { drawer: "marketing" }, stockouts: { drawer: "stock" }, dropoff: { drawer: "dropoff" }, hr: { drawer: "hr" }, openingHours: { drawer: "opening" }, pay: { domain: "team" }, overtime: { domain: "team" }, workload: { domain: "team" }, departure: { domain: "team" } };
+
+  // ---------- Where a person's hours went ----------
+  // One bar, one ruler: worked hours, then each share of the assigned hours that was not worked,
+  // grouped by what stopped it, with a mark at the hours available. Left of the mark is paid; right
+  // of it is paid only if worked (overtime). The bar shows it; it does not explain it.
+
+
+  function capLabel(b) {
+    if (b?.type === "roomFull" || b?.type === "equipmentFull") return blockerText(b);
+    return "";
+  }
+
+  // Refused requests, split by what refused them. One number everywhere, and its parts add up.
+  function refusalCause(reason) {
+    const r = reason || {};
+    if (r.type === "roomFull") return { key: `room:${r.id}`, label: capLabel(r), target: { drawer: "rooms" } };
+    if (r.type === "equipmentFull") return { key: `eq:${r.id}`, label: capLabel(r), target: { drawer: "equipment" } };
+    if (r.type === "vetHours" || r.type === "supportHours" || r.type === "unstaffed") return { key: r.type === "unstaffed" ? `unstaffed:${r.id}` : r.type, label: blockerText(r), target: { domain: "team" } };
+    if (r.type === "stockout") return { key: "stock", label: blockerText(r), target: { drawer: "stock" } };
+    return { key: `${r.type}:${r.id || ""}`, label: blockerText(r), target: { drawer: "services" } };
+  }
+
+  // Before the year is passed, screens show measurements, not the cause of refusals — finding it is
+  // the students' diagnosis, given in Résultats. Stock-outs are the exception: they belong to the
+  // stock strategy, not to a constraint, and naming them keeps a first opening understandable.
+  function stockoutsFor(report, serviceId) {
+    return refusalSplit(report, serviceId).find((p) => p.key === "stock")?.count || 0;
+  }
+
+  function refusalSplit(report, serviceId) {
+    const parts = {};
+    (report.serviceResults || []).filter((r) => r.active && (!serviceId || r.id === serviceId)).forEach((r) => (r.lostBy || []).forEach((l) => {
+      const c = refusalCause(l.reason);
+      parts[c.key] = parts[c.key] || { ...c, count: 0 };
+      parts[c.key].count += l.count;
+    }));
+    return Object.values(parts).filter((p) => p.count > 0).sort((a, b) => b.count - a.count);
+  }
+
+  // The same split as a bar with its legend, on the scale of the refusals themselves.
+  function refusalBar(report, serviceId) {
+    const parts = refusalSplit(report, serviceId);
+    const total = parts.reduce((sum, p) => sum + p.count, 0);
+    if (!total) return "";
+    const cls = (i) => `hb-lost hb-lost-${Math.min(i, 2)}`;
+    return `<div class="hour-bar refusal-bar" role="img" aria-label="${escapeHtml(parts.map((p) => `${p.label} ${number(p.count)}`).join(", "))}"><div class="hb-track">${parts.map((p, i) => `<span class="hb-seg ${cls(i)}" style="width:${(p.count / total * 100).toFixed(2)}%"></span>`).join("")}</div><ul class="hb-legend">${parts.map((p, i) => `<li><b class="${cls(i)}"></b>${p.target ? `<button class="text-button" ${p.target.drawer ? `data-open-drawer="${p.target.drawer}"` : `data-domain="${p.target.domain}"`}>${escapeHtml(p.label)}</button>` : escapeHtml(p.label)} <strong>${number(p.count)}</strong></li>`).join("")}</ul></div>`;
+  }
+
+  // Why a person's assigned hours went unworked, split by cause. An assignment's idle hours first go
+  // to the requests its service lost to something other than this role's own hours (a full room,
+  // the other role, stock-outs) — those requests' time for this role, at this person's share of the
+  // service; whatever is left is hours beyond what the requests needed: not enough demand.
+  // Before the year, only causes that are not the year's constraint are named (closed service,
+  // missing skill, stock-outs, not enough demand); the rest reads « non travaillées ».
+  function hourSplit(row, report, attribute = false) {
+    const available = row?.availableHours || 0;
+    const used = row?.usedHours || 0;
+    const role = row?.role;
+    const lost = {};
+    const add = (cause, hours) => { if (hours < .5) return; const c = attribute || ["closed", "skill", "stock", "demand"].includes(cause.key) ? cause : { key: "unworked", label: L("not worked", "non travaillées") }; lost[c.key] = lost[c.key] || { ...c, hours: 0 }; lost[c.key].hours += hours; };
+    const pools = {};
+    (report.operational.staffRows || []).filter((r) => r.role === role).forEach((r) => (r.assignments || []).forEach((a) => { pools[a.serviceId] = (pools[a.serviceId] || 0) + (a.effectiveHours || 0); }));
+    (row?.assignments || []).forEach((a) => {
+      const gap = Math.max(0, (a.qualified ? a.effectiveHours : a.assignedHours || a.effectiveHours) - (a.usedHours || 0));
+      if (gap < .5) return;
+      if (!a.qualified) return add({ key: "skill", label: L("missing skill", "compétence manquante") }, gap);
+      const result = (report.serviceResults || []).find((r) => r.id === a.serviceId);
+      if (!result?.active) return add({ key: "closed", label: L("service closed", "service fermé"), target: { drawer: "services" } }, gap);
+      const ownHours = role === "vet" ? "vetHours" : "supportHours";
+      const perCase = role === "vet" ? (result.vetDuration || result.supportDuration || 0) : (result.supportDuration || 0);
+      const share = pools[a.serviceId] ? a.effectiveHours / pools[a.serviceId] : 0;
+      let left = gap;
+      (result.lostBy || []).filter((l) => l.reason.type !== ownHours).forEach((l) => {
+        const hours = Math.min(left, l.count * perCase * share);
+        if (hours >= .5) { add(refusalCause(l.reason), hours); left -= hours; }
+      });
+      add({ key: "demand", label: L("not enough demand", "pas assez de demande") }, left);
+    });
+    const lostList = Object.values(lost).sort((x, y) => y.hours - x.hours);
+    const assigned = used + lostList.reduce((sum, l) => sum + l.hours, 0);
+    // A vet's worked hours that went to support tasks (the support staff could not cover them).
+    const covered = role === "vet" ? (row?.assignments || []).reduce((sum, a) => { const r = (report.serviceResults || []).find((x) => x.id === a.serviceId); return sum + (r?.vetCoverHours && pools[a.serviceId] ? r.vetCoverHours * a.effectiveHours / pools[a.serviceId] : 0); }, 0) : 0;
+    return { available, used, overtime: Math.max(0, used - available), unassigned: Math.max(0, available - assigned), lost: lostList, assigned, covered: Math.min(covered, used) };
+  }
+
+
+  function hourBar(row, report) {
+    const h = hourSplit(row, report);
+    const scale = Math.max(h.available, h.assigned, h.used, 1);
+    const w = (v) => `${(v / scale * 100).toFixed(2)}%`;
+    const covered = Math.min(h.covered || 0, Math.min(h.used, h.available));
+    const worked = Math.min(h.used, h.available) - covered;
+    const seg = (cls, v, label) => v >= .5 ? `<span class="hb-seg ${cls}" style="width:${w(v)}" title="${escapeHtml(`${label} ${number(v)} h`)}"></span>` : "";
+    const legend = [
+      [`hb-worked`, worked, L("worked", "travaillées")],
+      [`hb-covered`, covered, L("support tasks covered", "soutien couvert")],
+      [`hb-over`, h.overtime, L("overtime", "heures sup.")],
+      ...h.lost.map((l, i) => [`hb-lost hb-lost-${Math.min(i, 2)}`, l.hours, l.label, l.target]),
+      [`hb-free`, h.unassigned, L("not assigned", "non affectées")]
+    ].filter(([, v]) => v >= .5);
+    const aria = `${L("Hours", "Heures")} : ${legend.map(([, v, label]) => `${label} ${number(v)}`).join(", ")} ; ${L("available", "disponibles")} ${number(h.available)}`;
+    return `<div class="hour-bar" role="img" aria-label="${escapeHtml(aria)}"><div class="hb-track">${seg("hb-worked", worked, L("worked", "travaillées"))}${seg("hb-covered", covered, L("support tasks covered", "soutien couvert"))}${seg("hb-over", h.overtime, L("overtime", "heures sup."))}${h.lost.map((l, i) => seg(`hb-lost hb-lost-${Math.min(i, 2)}`, l.hours, l.label)).join("")}${seg("hb-free", h.unassigned, L("not assigned", "non affectées"))}<i class="hb-mark ${h.available / scale > .8 ? "end" : ""}" style="left:${w(h.available)}"><em>${number(h.available)} h</em></i></div><ul class="hb-legend">${legend.map(([cls, v, label, target]) => `<li><b class="${cls.split(" ")[0]} ${cls.split(" ")[1] || ""}"></b>${target ? `<button class="text-button" data-open-drawer="${target.drawer}">${escapeHtml(label)}</button>` : escapeHtml(label)} <strong>${number(v)}</strong></li>`).join("")}</ul></div>`;
+  }
+
+  function tiredSlowdown(clinic) {
+    const sm = D.socialModel || {};
+    const climate = Number(clinic.social?.staffClimate ?? 50);
+    return climate < (sm.slowBelow ?? 0) ? (sm.slowBelow - climate) * (sm.slowPerPoint || 0) : 0;
+  }
+
+  // ---------- The year's signals: what moved, and what it does next ----------
+  // Plain lines, each a cause and its effect, with the screen where it is acted on. They are what
+  // the next year is diagnosed from; nothing here is a forecast of more than one year.
+  function signalLines(report) {
+    const op = report.operational;
+    const so = report.social;
+    const b = so.before || {};
+    const a = so.after || {};
+    const tm = D.trustModel || {};
+    const sm = D.socialModel || {};
+    const labels = DRIVER_LABELS();
+    const lines = [];
+    const add = (tone, cause, effect, target) => lines.push({ tone, cause, effect, target });
+    const mainCause = (parts, delta) => {
+      const entries = Object.entries(parts || {}).filter(([, v]) => Math.sign(v) === Math.sign(delta) && Math.abs(v) >= .3).sort((x, y) => Math.abs(y[1]) - Math.abs(x[1]));
+      return entries[0] ? { key: entries[0][0], label: labels[entries[0][0]] || entries[0][0] } : null;
+    };
+    const refused = Math.max(0, op.totalDemand - op.totalHonored);
+    if (refused > 0) add(so.refusedLeft > 0 ? "bad" : "", L(`${number(refused)} requests refused`, `${number(refused)} demandes refusées`), so.refusedLeft > 0 ? L(`${number(so.refusedLeft)} households went elsewhere for good · ${number(report.next.clients)} households next year`, `${number(so.refusedLeft)} foyers partis ailleurs pour de bon · ${number(report.next.clients)} foyers l’an prochain`) : L(`${number(report.next.clients)} households next year`, `${number(report.next.clients)} foyers l’an prochain`), { drawer: "rooms" });
+    const climateDelta = (a.staffClimate ?? 0) - (b.staffClimate ?? 0);
+    if (Math.abs(climateDelta) >= .5 || (a.staffClimate ?? 50) < (sm.slowBelow ?? 0)) {
+      const cause = mainCause(so.climateParts, climateDelta);
+      const slow = tiredSlowdown({ social: a });
+      const effect = (a.staffClimate ?? 50) < D.staffModel.resignClimate ? L("someone resigns at year end", "quelqu’un démissionne en fin d’année")
+        : slow > 0 ? L(`next year every case takes ${pct(slow)} more time, and absences rise`, `l’an prochain, chaque cas prend ${pct(slow)} de temps en plus, et les absences montent`)
+        : climateDelta < 0 ? L("still above the line: no cost yet", "encore au-dessus de la ligne : pas encore de coût") : L("absences fall", "les absences baissent");
+      add(slow > 0 ? "bad" : climateDelta < 0 ? "warn" : "good", L(`Staff climate ${number(b.staffClimate)} → ${number(a.staffClimate)}`, `Climat de l’équipe ${number(b.staffClimate)} → ${number(a.staffClimate)}`) + (cause ? ` (${cause.label})` : ""), effect, DRIVER_TARGET[cause?.key] || { domain: "team" });
+    }
+    (op.staffRows || []).forEach((row) => {
+      const lost = hourSplit(row, report, true).lost.filter((l) => l.key !== "demand" && l.hours >= 50)[0];
+      const name = (state.staff.find((p) => p.id === row.id) || {}).name || row.id;
+      if (lost) add("warn", L(`${number(lost.hours)} h of ${name}'s assigned time not worked`, `${number(lost.hours)} h affectées à ${name}, non travaillées`), lost.label, lost.target || { domain: "team" });
+    });
+    const returns = (report.serviceResults || []).filter((r) => (r.returnVisits || 0) > 0);
+    returns.forEach((r) => add("warn", L(`${number(r.returnVisits)} return visits (${serviceName(r.id)}, rushed)`, `${number(r.returnVisits)} retours de visites pressées (${serviceName(r.id)})`), L("unpaid, they take staff and room time, and cost trust", "non payés, ils reprennent du temps d’équipe et de salle, et coûtent de la confiance"), { drawer: "services" }));
+    const overpriced = (report.serviceResults || []).filter((r) => r.active && r.acceptedPrice && r.price > r.acceptedPrice + .5);
+    const knownAt = (r) => acceptedText(acceptedKnown(SERVICE_BY_ID[r.id], { marketing: report.clinicSnapshot?.marketing || state.marketing }, r.acceptedPrice));
+    overpriced.forEach((r) => add("warn", L(`${serviceName(r.id)} at ${money(r.price)}, clients accept ${knownAt(r)}`, `${serviceName(r.id)} à ${money(r.price)}, vos clients acceptent ${knownAt(r)}`), L("fewer requests, and trust falls every year", "moins de demandes, et la confiance baisse chaque année"), { drawer: "pricing" }));
+    const overtime = Math.round(report.financial.overtimeHours || 0);
+    if (overtime > 0) add("warn", L(`${number(overtime)} overtime hours`, `${number(overtime)} heures supplémentaires`), L("more absences next year", "plus d’absences l’an prochain"), { domain: "team" });
+    const trustDelta = (a.clientTrust ?? 0) - (b.clientTrust ?? 0);
+    if (Math.abs(trustDelta) >= .5) {
+      const cause = mainCause(so.trustParts, trustDelta);
+      const effect = (a.clientTrust ?? 50) < (tm.fleeBelow ?? -1) ? L("households leave fast", "les foyers partent vite")
+        : (a.clientTrust ?? 50) < (tm.leaveBelow ?? -1) ? L("households leave every year", "des foyers partent chaque année")
+        : (a.clientTrust ?? 50) > (tm.referAbove ?? 101) ? L("word of mouth brings households", "le bouche-à-oreille amène des foyers")
+        : trustDelta < 0 ? L("clients accept lower prices, and fewer of them come", "vos clients acceptent des prix plus bas, et viennent moins") : L("clients accept higher prices, and more of them come", "vos clients acceptent des prix plus hauts, et viennent plus");
+      add(trustDelta < 0 ? "warn" : "good", L(`Client trust ${number(b.clientTrust)} → ${number(a.clientTrust)}`, `Confiance des clients ${number(b.clientTrust)} → ${number(a.clientTrust)}`) + (cause ? ` (${cause.label})` : ""), effect, DRIVER_TARGET[cause?.key] || { drawer: "relations" });
+    }
+    const pressure = a.communityPressure ?? 0;
+    if (pressure > 50) add("warn", L(`Access pressure ${number(pressure)}`, `Pression d’accès ${number(pressure)}`), L(`costs ${decimal((pressure - 50) * (sm.pressureTrustSlope || 0), 1)} trust next year`, `coûte ${decimal((pressure - 50) * (sm.pressureTrustSlope || 0), 1)} de confiance l’an prochain`), { drawer: "rooms" });
+    const before = { ...state, history: state.history.filter((r) => r.turn < report.turn) };
+    (report.commitments || []).filter((c) => !c.ok).forEach((c) => add("bad", L(`Promise missed: ${stakeholderLabel(c.id)}`, `Promesse manquée : ${stakeholderLabel(c.id)}`), L(`next year: ${commitmentConsequence(c.id, false, before, report)}`, `l’an prochain : ${commitmentConsequence(c.id, false, before, report)}`), c.id === "bank" ? { drawer: "finance" } : c.id === "commune" ? { domain: "sustainability" } : c.id === "peers" ? { drawer: "services" } : c.id === "team" ? { domain: "team" } : { drawer: "rooms" }));
+    return lines;
+  }
+
+  function renderSignals(report) {
+    const lines = signalLines(report);
+    const link = (t) => t?.drawer ? `data-open-drawer="${t.drawer}"` : t?.domain ? `data-domain="${t.domain}"` : "";
+    return `<section class="card-section signals"><div class="panel-heading"><div><h2>${escapeHtml(L(`Signals from year ${report.turn}`, `Signaux de l’année ${report.turn}`))}</h2><p>${escapeHtml(L("What moved, and what it does next year. Diagnose the next year from here.", "Ce qui a bougé, et ce que cela fait l’an prochain. Diagnostiquez l’année suivante à partir d’ici."))}</p></div></div>
+      <ul class="signal-lines">${lines.length ? lines.map((l) => `<li class="${l.tone}"><span class="signal-cause">${escapeHtml(l.cause)}</span><span class="signal-arrow" aria-hidden="true">→</span><span class="signal-effect">${escapeHtml(l.effect)}</span>${link(l.target) ? `<button class="text-button" ${link(l.target)}>${escapeHtml(L("Act", "Agir"))} ›</button>` : ""}</li>`).join("") : `<li><span>${escapeHtml(L("Nothing moved enough to matter.", "Rien n’a assez bougé pour compter."))}</span></li>`}</ul></section>`;
+  }
+
+  // ---------- Households → requests → cases served ----------
+  function renderClientFlow(forecast, hideOutcomes) {
+    const op = forecast.operational;
+    const perHousehold = state.clients ? op.totalDemand / state.clients : 0;
+    const refused = Math.max(0, op.totalDemand - op.totalHonored);
+    const change = forecast.next.clients - state.clients;
+    const out = (v, type = "number") => hideOutcomes ? "?" : forecastText(v, type);
+    return `<section class="flow-strip" aria-label="${escapeHtml(L("Households, requests and cases served", "Foyers, demandes et cas traités"))}">
+      <div class="flow-step"><span>${escapeHtml(L("Client households", "Foyers clients"))}</span><strong>${number(state.clients)}</strong><em>${escapeHtml(L("the families who come to you", "les familles qui viennent chez vous"))}</em></div>
+      <div class="flow-arrow" aria-hidden="true">→<small>${escapeHtml(L(`≈ ${decimal(perHousehold, 1)} per household a year`, `≈ ${decimal(perHousehold, 1)} par foyer et par an`))}</small></div>
+      <div class="flow-step"><span>${escapeHtml(L("Requests", "Demandes"))}</span><strong>${number(op.totalDemand)}</strong><em>${escapeHtml(L("for the services you offer", "pour vos services"))}</em>${offerableRequests(forecast) ? `<em>+ ${number(offerableRequests(forecast))} ${escapeHtml(L("for services you could open now", "pour des services ouvrables maintenant"))}</em>` : ""}</div>
+      <div class="flow-arrow" aria-hidden="true">→<small>${hideOutcomes ? "?" : `${forecastText(op.honoredRate, "percent")} ${escapeHtml(L("of open requests served", "des demandes ouvertes servies"))}`}</small></div>
+      <div class="flow-step ${refused > 0 && !hideOutcomes ? "warn" : ""}"><span>${escapeHtml(L("Cases served", "Cas traités"))}</span><strong>${out(op.totalHonored)}</strong><em>${hideOutcomes ? "" : `${number(refused)} ${escapeHtml(L("refused", "refusées"))}${stockoutsFor(forecast) ? ` · ${escapeHtml(L(`incl. ${number(stockoutsFor(forecast))} stock-outs`, `dont ${number(stockoutsFor(forecast))} ruptures de stock`))}` : ""}`}</em></div>
+    </section>`;
+  }
+
+  // ---------- Promises: who holds the clinic to each goal, and what they do next year ----------
+  function stakeholderLabel(id) {
+    return ({ bank: L("The bank", "La banque"), clients: L("The clients", "Les clients"), team: L("The team", "L’équipe"), peers: L("Referring vets", "Les confrères"), commune: L("The municipality", "La commune") })[id] || id;
+  }
+
+  function commitmentConsequence(id, ok, clinic, run = null) {
+    const cm = D.commitmentModel || {};
+    if (id === "bank") {
+      const misses = ok ? 0 : bankMisses(clinic) + 1;
+      const rate = (cm.bankRates || [.06])[Math.min(misses, (cm.bankRates || [.06]).length - 1)];
+      return rate === null ? L("new loan refused", "nouvel emprunt refusé") : L(`loans at ${pct(rate)}`, `emprunt à ${pct(rate)}`);
+    }
+    if (id === "clients") {
+      // What the refusals leave behind is the pressure, and above 50 it costs trust whether or not
+      // the promise was kept: say what it does, not what the promise suggests.
+      const pressure = run?.social?.after?.communityPressure;
+      const cost = pressure > 50 ? (pressure - 50) * (D.socialModel?.pressureTrustSlope || 0) : 0;
+      if (pressure === undefined) return ok ? L("refusals settle", "les refus retombent") : L("refusals pile up: trust falls", "les refus s’accumulent : la confiance baisse");
+      return cost >= .05 ? L(`access pressure ${number(pressure)}: −${decimal(cost, 1)} trust`, `pression d’accès ${number(pressure)} : −${decimal(cost, 1)} de confiance`) : L(`access pressure ${number(pressure)}: no trust lost`, `pression d’accès ${number(pressure)} : pas de confiance perdue`);
+    }
+    if (id === "team") return ok ? L("climate holds", "le climat tient") : L("climate falls", "le climat baisse");
+    if (id === "peers") return ok ? L(`referral support +${cm.referralKept}`, `référents +${cm.referralKept}`) : L(`referral support ${cm.referralMissed}`, `référents ${cm.referralMissed}`);
+    if (id === "commune") return ok ? L(`grant of ${money(cm.grant)}`, `prime de ${money(cm.grant)}`) : L("no grant", "pas de prime");
+    return "";
+  }
+
+  function endEngagements() {
+    const ids = [...new Set(state.history.flatMap((r) => (r.commitments || []).map((c) => c.id)))];
+    return `<div class="goal-summary engagement-rows">${ids.map((id) => `<div class="engagement-row end"><strong>${escapeHtml(stakeholderLabel(id))}</strong><span class="engagement-track">${state.history.map((r) => { const c = (r.commitments || []).find((x) => x.id === id); return `<i class="${c ? (c.ok ? "ok" : "ko") : ""}">${c ? (c.ok ? "✓" : "✗") : "·"}</i>`; }).join("")}</span></div>`).join("")}</div>`;
+  }
+
+  // A goal in its figures, not its sentence.
+  function shortGoal(goal) {
+    const v = goal.value;
+    switch (goal.id) {
+      case "served": return L(`≥ ${pct(v)} of requests served`, `≥ ${pct(v)} des demandes servies`);
+      case "net": return L("net result ≥ 0", "résultat net ≥ 0");
+      case "cash": return L("treasury > 0", "trésorerie > 0");
+      case "staff": return L(`workload ${pct(v[0])}–${pct(v[1])}`, `charge ${pct(v[0])}–${pct(v[1])}`);
+      case "services": return L(`≥ ${v} services running`, `≥ ${v} services en service`);
+      case "climate": return L(`climate ≥ ${v}`, `climat ≥ ${v}`);
+      case "margin": return L(`net margin ≥ ${pct(v)}`, `marge nette ≥ ${pct(v)}`);
+      case "advanced": return L(`≥ ${number(v)} advanced cases`, `≥ ${number(v)} cas avancés`);
+      case "carbon": return L(`−${pct(v)} CO₂ per case, 80 % of volume kept`, `−${pct(v)} de CO₂ par cas, 80 % du volume gardé`);
+      default: return itemLabel(goal.label || { en: goal.id, fr: goal.id });
+    }
+  }
+
+  function renderEngagements(forecast, planned, hideOutcomes) {
+    const now = commitmentsFor(forecast, planned);
+    const goals = goalChecks(forecast, planned);
+    return `<section class="card-section engagements"><div class="panel-heading"><div><h2>${escapeHtml(L("Promises", "Engagements"))}</h2></div></div>
+      <div class="engagement-rows">${now.map((c) => {
+        const promise = c.goals.map((g) => shortGoal(goals.find((x) => x.id === g.id) || { id: g.id })).join(" · ");
+        return `<div class="engagement-row ${hideOutcomes ? "" : c.ok ? "ok" : "ko"}"><span class="engagement-mark" aria-hidden="true">${hideOutcomes ? "○" : c.ok ? "✓" : "✗"}</span><strong>${escapeHtml(stakeholderLabel(c.id))}</strong><span class="engagement-promise">${escapeHtml(promise)}</span><span class="engagement-next">${hideOutcomes ? "" : `→ ${escapeHtml(commitmentConsequence(c.id, c.ok, state, forecast))}`}</span></div>`;
+      }).join("")}</div></section>`;
   }
 
   function renderOverview(planned, forecast) {
@@ -2255,38 +3083,38 @@
     const signals = getBeginnerSignals(forecast, planned);
     const showGuide = (state.year === 1 && !state.uiPreferences.beginnerGuideDismissed) || ui.reopenBeginnerGuide;
     const hideOutcomes = forecastPrecision() === "costs";
-    return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Clinic overview", "Vue d’ensemble de la clinique"))}</h1><p>${escapeHtml(L("See the situation, choose one area, and check the consequences before acting.", "Observez la situation, choisissez un domaine et vérifiez les conséquences avant d’agir."))}</p></div></div>
+    return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Clinic overview", "Vue d’ensemble de la clinique"))}</h1></div></div>
       ${renderStartBanner()}
       ${showGuide ? `<section class="beginner-guide" aria-labelledby="beginner-guide-title"><div><span>${escapeHtml(L("Year 1 guide", "Guide de l’année 1"))}</span><h2 id="beginner-guide-title">${escapeHtml(L("Your first turn", "Votre premier tour"))}</h2></div><ol><li><strong>${escapeHtml(L("Read the clinic situation", "Comprenez la situation"))}</strong><span>${escapeHtml(L("Start with the signals below.", "Commencez par les signaux ci-dessous."))}</span></li><li><strong>${escapeHtml(L("Choose one priority", "Choisissez une priorité"))}</strong><span>${escapeHtml(L("Open only the area you want to improve.", "Ouvrez uniquement le domaine à améliorer."))}</span></li><li><strong>${escapeHtml(L("Compare before confirming", "Comparez avant de confirmer"))}</strong><span>${escapeHtml(L("Nothing is spent until you add a decision to the plan.", "Rien n’est dépensé avant l’ajout d’une décision au plan."))}</span></li></ol><button class="button secondary" data-dismiss-guide>${escapeHtml(L("Got it", "J’ai compris"))}</button></section>` : ""}
       ${forecastGridNote()}
+      ${renderClientFlow(forecast, hideOutcomes)}
       <div class="dashboard-grid compact-three">
         ${metricCard(L("Net result", "Résultat net"), forecastText(forecast.financial.netResult, "money"), forecastText(forecast.financial.margin, "percent"), hideOutcomes ? "" : forecast.financial.netResult >= 0 ? "good" : "bad")}
-        ${metricCard(L("Cases served", "Cas traités"), hideOutcomes ? forecastText(0, "number") : forecastPrecision() === "exact" ? `${number(forecast.operational.totalHonored)} / ${number(forecast.operational.totalDemand)}` : forecastText(forecast.operational.totalHonored, "number"), forecastPrecision() === "exact" ? `${pct(forecast.operational.honoredRate)} ${L("of open requests", "des demandes ouvertes")}${unmetRequests(forecast) ? ` · ${number(unmetRequests(forecast))} ${L("not offered", "non proposées")}` : ""}` : "", hideOutcomes ? "" : forecast.operational.honoredRate >= .82 ? "good" : "warn")}
-        ${metricCard(L("Team workload", "Charge de l’équipe"), forecastText(forecast.operational.staffUse, "percent"), "", forecast.operational.staffUse > .94 ? "bad" : "")}
-        ${metricCard(L("Carbon footprint", "Empreinte carbone"), forecastText(forecast.carbon.total, "carbon"), `${forecastText(carbonDelta, "carbon", { signed: true })} ${L("vs start", "par rapport au départ")}`, carbonDelta <= 0 ? "good" : "warn")}
-        ${metricCard(L("Staff climate", "Climat de l’équipe"), forecastText(forecast.social.after.staffClimate, "number"), "", hideOutcomes ? "" : forecast.social.after.staffClimate < 45 ? "bad" : forecast.social.after.staffClimate >= 60 ? "good" : "warn", { drawer: "relations", label: L("Act on this", "Agir là-dessus") })}
-        ${metricCard(L("Client trust", "Confiance des clients"), forecastText(forecast.social.after.clientTrust, "number"), "", hideOutcomes ? "" : forecast.social.after.clientTrust < 45 ? "warn" : forecast.social.after.clientTrust >= 60 ? "good" : "", { drawer: "relations", label: L("Act on this", "Agir là-dessus") })}
-      </div>
-      <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("What needs attention", "Points d’attention"))}</h2><p>${escapeHtml(L("Each signal explains what is happening and where you can investigate it.", "Chaque signal explique ce qui se passe et où l’examiner."))}</p></div></div><div class="priority-list">${signals.map((item) => `<article class="signal-${item.status}" data-signal-key="${item.key}"><div><span>${escapeHtml(item.title)}</span><strong>${escapeHtml(item.text)}</strong></div><div class="signal-actions">${signalButton(item.destination, item.action, "primary")}${item.secondary ? signalButton(item.secondary.destination, item.secondary.label, "secondary") : ""}</div></article>`).join("")}</div></section>
-      <section class="card-section goals"><div class="panel-heading"><h2>${escapeHtml(L("Scenario goals", "Objectifs du scénario"))}</h2><strong>${hideOutcomes ? "?" : `${passed}/${goals.length}`}</strong></div>${goals.map((goal) => hideOutcomes ? `<div class="goal-row"><span aria-hidden="true">○</span><strong>${escapeHtml(itemLabel(goal.label))}</strong><em>${escapeHtml(L("Revealed at year end", "Révélé en fin d’année"))}</em></div>` : `<div class="goal-row ${goal.ok ? "good" : "bad"}"><span aria-hidden="true">${goal.ok ? "✓" : "○"}</span><strong>${escapeHtml(itemLabel(goal.label))}</strong><em>${escapeHtml(goal.display)}</em></div>`).join("")}</section>
+                ${metricCard(L("Team workload", "Charge de l’équipe"), forecastText(forecast.operational.staffUse, "percent"), "", forecast.operational.staffUse > .94 ? "bad" : "")}
+        ${(() => { const goal = goals.find((g) => g.id === "carbon") || { value: .15 }; const base = state.carbonBaseline.perCase || 0; const red = base ? 1 - forecast.carbon.perCase / base : 0; return metricCard(L("Carbon per case", "Carbone par cas"), kilograms(forecast.carbon.perCase), `${red > 0 ? "−" : "+"}${pct(Math.abs(red))} ${L("vs start", "par rapport au départ")} · ${L("target", "objectif")} −${pct(goal.value)}`, hideOutcomes ? "" : red >= goal.value ? "good" : "warn"); })()}
+        ${metricCard(L("Staff climate", "Climat de l’équipe"), `${number(state.social.staffClimate)} → ${forecastText(forecast.social.after.staffClimate, "number")}`, L("start → end of year", "début → fin d’année"), hideOutcomes ? "" : forecast.social.after.staffClimate < 50 ? "bad" : forecast.social.after.staffClimate >= 60 ? "good" : "", { drawer: "relations", label: L("Act on this", "Agir là-dessus") })}
+        ${metricCard(L("Client trust", "Confiance des clients"), `${number(state.social.clientTrust)} → ${forecastText(forecast.social.after.clientTrust, "number")}`, L("start → end of year", "début → fin d’année"), hideOutcomes ? "" : forecast.social.after.clientTrust < 45 ? "bad" : forecast.social.after.clientTrust >= 65 ? "good" : "", { drawer: "relations", label: L("Act on this", "Agir là-dessus") })}
+                              </div>
+      <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("What needs attention", "Points d’attention"))}</h2></div></div><div class="priority-list">${signals.map((item) => `<article class="signal-${item.status}" data-signal-key="${item.key}"><div><span>${escapeHtml(item.title)}</span><strong>${escapeHtml(item.text)}</strong></div><div class="signal-actions">${signalButton(item.destination, item.action, "primary")}${item.secondary ? signalButton(item.secondary.destination, item.secondary.label, "secondary") : ""}</div></article>`).join("")}</div></section>
+      <h2 class="period-label">${escapeHtml(L("Next year", "L’an prochain"))}</h2>
+      ${hideOutcomes ? "" : `<div class="dashboard-grid compact-two">${metricCard(L("Client households", "Foyers clients"), `${number(state.clients)} → ${number(forecast.next.clients)}`, forecast.social.refusedLeft ? L(`${number(forecast.social.refusedLeft)} leave after a refusal`, `${number(forecast.social.refusedLeft)} partent après un refus`) : "", forecast.next.clients < state.clients ? "warn" : "")}</div>`}
+      ${renderEngagements(forecast, planned, hideOutcomes)}
     </section>`;
   }
 
   function renderFacilityUse(forecast) {
     const rows = (forecast.operational.facilityRows || []).filter((row) => row.capacity > 0);
     if (!rows.length) return "";
-    return `<section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Rooms & equipment use", "Utilisation des salles et équipements"))}</h2><p>${escapeHtml(L("When a room or machine is full, every service using it loses the same share of cases.", "Quand une salle ou un appareil est saturé, chaque service qui l’utilise perd la même part de cas."))}</p></div></div><div class="facility-list">${rows.map((row) => `<article class="${row.full ? "full" : ""}"><div class="facility-head"><strong>${escapeHtml(facilityName(row))}</strong>${row.full ? `<span class="badge bad">${escapeHtml(L("Full", "Saturé"))}</span>` : ""}<span>${number(row.used)} / ${number(row.capacity)} h · ${pct(row.rate)}</span></div>${meter(row.rate, row.full ? "bad" : row.rate > .85 ? "warn" : "good")}<small>${escapeHtml(row.services.length ? row.services.map(serviceName).join(", ") : L("Not used by any open service", "Utilisé par aucun service ouvert"))}</small>${row.full ? `<p class="bad-text">${escapeHtml(L(`${number(row.turnedAway)} requests turned away. Add capacity, extend opening hours, or use a faster pace.`, `${number(row.turnedAway)} demandes refusées. Ajoutez de la capacité, étendez les horaires ou accélérez le rythme.`))}</p><div class="button-row"><button class="button secondary" data-open-drawer="${row.kind === "room" ? "rooms" : "equipment"}">${escapeHtml(L("Add capacity", "Ajouter de la capacité"))}</button><button class="button secondary" data-open-drawer="opening">${escapeHtml(L("Opening hours", "Horaires d’ouverture"))}</button></div>` : ""}</article>`).join("")}</div></section>`;
+    return `<section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Rooms & equipment use", "Utilisation des salles et équipements"))}</h2><span class="panel-links"><button class="text-button" data-open-drawer="rooms">${escapeHtml(L("Manage rooms", "Gérer les salles"))} ›</button><button class="text-button" data-open-drawer="equipment">${escapeHtml(L("Manage equipment", "Gérer l’équipement"))} ›</button></span><p>${escapeHtml(L("When a room or machine is full, every service using it loses the same share of cases.", "Quand une salle ou un appareil est saturé, chaque service qui l’utilise perd la même part de cas."))}</p></div></div><div class="facility-list">${rows.map((row) => `<article class="${row.rate > .95 ? "full" : ""}"><div class="facility-head"><strong>${escapeHtml(facilityName(row))}</strong><span>${number(row.used)} / ${number(row.capacity)} h · ${pct(row.rate)}</span></div>${meter(row.rate, row.rate > .95 ? "bad" : row.rate > .85 ? "warn" : "good")}<small>${escapeHtml(row.services.length ? row.services.map(serviceName).join(", ") : L("Not used by any open service", "Utilisé par aucun service ouvert"))}</small></article>`).join("")}</div></section>`;
   }
 
   function renderCare(planned, forecast) {
     const active = D.services.filter((service) => planned.services[service.id].active);
-    const roomCount = Object.values(planned.rooms).reduce((sum, qty) => sum + qty, 0);
-    const equipmentCount = Object.values(planned.equipment).reduce((sum, qty) => sum + qty.owned + qty.leased, 0);
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Care & facilities", "Soins et installations"))}</h1></div></div>
       ${forecastGridNote()}
-      <div class="dashboard-grid compact-four">${metricCard(L("Active services", "Services actifs"), number(active.length), `${forecast.operational.readyServices} ${L("ready and staffed", "prêts et dotés en personnel")}`)}${metricCard(L("Cases served", "Cas traités"), forecastText(forecast.operational.totalHonored, "number"), `${forecastText(forecast.operational.honoredRate, "percent")} ${L("of open requests", "des demandes ouvertes")}${unmetRequests(forecast) ? ` · ${number(unmetRequests(forecast))} ${L("not offered", "non proposées")}` : ""}`)}${metricCard(L("Rooms", "Salles"), number(roomCount))}${metricCard(L("Clinical equipment", "Équipement clinique"), number(equipmentCount))}</div>
-      <section class="card-section split-actions"><article><h2>${escapeHtml(L("Rooms", "Salles"))}</h2><button class="button primary" data-open-drawer="rooms">${escapeHtml(L("Manage rooms", "Gérer les salles"))}</button></article><article><h2>${escapeHtml(L("Equipment", "Équipement"))}</h2><button class="button primary" data-open-drawer="equipment">${escapeHtml(L("Manage equipment", "Gérer l’équipement"))}</button></article></section><section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Current services", "Services actuels"))}</h2></div><span class="panel-links"><button class="text-button" data-toggle-closed>${escapeHtml(ui.showClosedServices ? L("Hide closed services", "Masquer les services fermés") : L("Show closed services", "Afficher les services fermés"))}</button><button class="button primary" data-open-drawer="services">${escapeHtml(L("Explore services", "Explorer les services"))}</button></span></div><div class="summary-list">${(ui.showClosedServices ? D.services : active).map((service) => { const row = forecast.serviceResults.find((item) => item.id === service.id); return `<article><div><strong>${escapeHtml(serviceName(service.id))}</strong><span>${escapeHtml(serviceStatusLabel(row))}</span></div><span>${row.active ? `${number(row.honored)} / ${number(row.demand)} ${escapeHtml(L("served", "traités"))}${row.rampUp ? ` · ${escapeHtml(L("first year · 60% of demand", "première année · 60 % de la demande"))}` : ""}` : `${number(row.demand)} ${escapeHtml(L("requests if opened", "demandes si ouvert"))}`}</span><em>${escapeHtml(row.active ? blockerText(row.bottleneck) : missingRequirements(service, planned).length ? L("Missing requirements", "Conditions manquantes") : L("Ready to open", "Prêt à ouvrir"))}</em><button class="text-button" data-open-drawer="services" data-service="${service.id}">${escapeHtml(L("Details", "Détails"))} ›</button></article>`; }).join("")}</div></section>
-      ${renderFacilityUse(forecast)}
+      <div class="dashboard-grid compact-two">${metricCard(L("Active services", "Services actifs"), number(active.length), `${forecast.operational.readyServices} ${L("ready and staffed", "prêts et dotés en personnel")}`)}${metricCard(L("Cases served", "Cas traités"), forecastText(forecast.operational.totalHonored, "number"), `${forecastText(forecast.operational.honoredRate, "percent")} ${L("of open requests", "des demandes ouvertes")}${offerableRequests(forecast) ? ` · +${number(offerableRequests(forecast))} ${L("for services you could open now", "pour des services ouvrables maintenant")}` : ""}`)}</div>
+      ${renderFacilityUse(forecast)}<section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Current services", "Services actuels"))}</h2></div><span class="panel-links"><button class="text-button" data-toggle-closed>${escapeHtml(ui.showClosedServices ? L("Hide closed services", "Masquer les services fermés") : L("Show closed services", "Afficher les services fermés"))}</button><button class="button primary" data-open-drawer="services">${escapeHtml(L("Explore services", "Explorer les services"))}</button></span></div><div class="summary-list">${(ui.showClosedServices ? D.services : active).map((service) => { const row = forecast.serviceResults.find((item) => item.id === service.id); return `<article><div><strong>${escapeHtml(serviceName(service.id))}</strong><span>${escapeHtml(serviceStatusLabel(row))}</span></div><span>${row.active ? `${number(row.honored)} / ${number(row.demand)} ${escapeHtml(L("served", "traités"))}${row.rampUp ? ` · ${escapeHtml(L("first year · 60% of demand", "première année · 60 % de la demande"))}` : ""}` : `${number(row.demand)} ${escapeHtml(L("requests if opened", "demandes si ouvert"))}`}</span><em>${row.active ? (stockoutsFor(forecast, service.id) ? `<span class="cause-tag">${escapeHtml(L(`${number(stockoutsFor(forecast, service.id))} stock-outs`, `${number(stockoutsFor(forecast, service.id))} ruptures de stock`))}</span>` : "") : escapeHtml(missingRequirements(service, planned).length ? L("Missing requirements", "Conditions manquantes") : L("Ready to open", "Prêt à ouvrir"))}</em><button class="text-button" data-open-drawer="services" data-service="${service.id}">${escapeHtml(L("Details", "Détails"))} ›</button></article>`; }).join("")}</div></section>
+
       
     </section>`;
   }
@@ -2308,9 +3136,9 @@
     if (blocked) signals.push({ icon: "△", text: L(`${number(blocked.blockedHours)} hours are blocked until training or another requirement is ready.`, `${number(blocked.blockedHours)} heures sont bloquées jusqu’à ce qu’une formation ou une autre condition soit prête.`) });
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Team & operations", "Équipe et opérations"))}</h1><p>${escapeHtml(L("See the team first; reveal applicants and operational alternatives only when needed.", "Voyez d’abord l’équipe ; affichez les candidats et les options uniquement si nécessaire."))}</p></div><button class="button primary" data-open-drawer="recruitment">${escapeHtml(L("Post a vacancy", "Publier une offre"))}</button></div>
       ${forecastGridNote()}
-      <div class="dashboard-grid compact-four">${metricCard(L("Veterinary hours available", "Heures vétérinaires disponibles"), number(vetHours))}${metricCard(L("Support hours available", "Heures de soutien disponibles"), number(supportHours))}${metricCard(L("Team workload", "Charge de l’équipe"), forecastText(forecast.operational.staffUse, "percent"))}${metricCard(L("Unused team hours", "Heures d’équipe inutilisées"), number(unusedHours))}</div>
-      ${signals.length ? `<section class="hour-signals" aria-label="${escapeHtml(L("Hours needing attention", "Heures à surveiller"))}">${signals.slice(0, 3).map((signal) => `<p><span aria-hidden="true">${signal.icon}</span>${escapeHtml(signal.text)}</p>`).join("")}</section>` : ""}
-      <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Current team", "Équipe actuelle"))}</h2><span class="panel-links"><button class="text-button" data-open-drawer="capabilities">${escapeHtml(L("Who can do what", "Qui peut faire quoi"))} ›</button><button class="text-button" data-open-drawer="hoursByService">${escapeHtml(L("See hours by service", "Voir les heures par service"))} ›</button></span></div><button class="button secondary" data-open-drawer="training">${escapeHtml(L("Plan training", "Planifier une formation"))}</button><button class="button secondary" data-open-drawer="relations">${escapeHtml(L("Act on climate and trust", "Agir sur le climat et la confiance"))}</button></div>${(() => { const partage = D.services.filter((service) => service.vetShare > 0 && service.supportShare > 0 && planned.services[service.id].active).map((service) => serviceName(service.id)); if (!partage.length) return ""; return `<p class="panel-note">${escapeHtml(L(`A case needing both a vet and a support worker is carried by both: ${partage.join(", ")}. Cases carried do not add up across the team — the clinic treated ${forecastText(forecast.operational.totalHonored, "number")} cases in total.`, `Un cas qui demande à la fois un vétérinaire et du soutien est porté par les deux : ${partage.join(", ")}. Les cas portés ne s’additionnent donc pas d’une personne à l’autre — la clinique traite ${forecastText(forecast.operational.totalHonored, "number")} cas au total.`))}</p>`; })()}<div class="staff-grid">${planned.staff.map((person) => { const row = rows[person.id]; const summary = normalizeAllocations(person).map((allocation) => `${serviceName(allocation.serviceId)} ${Math.round(allocation.share * 100)}%`).join(" · "); return `<article class="staff-card"><div class="staff-head"><div><h3>${escapeHtml(person.name)}</h3><span>${escapeHtml(person.role === "vet" ? L("Veterinarian", "Vétérinaire") : L("Support", "Soutien"))}</span></div><strong>${pct(row?.workload || 0)}</strong></div><div class="chips" aria-label="${escapeHtml(L("Skills", "Compétences"))}">${person.skills.length ? person.skills.map((skill) => `<span class="chip">${escapeHtml(skillName(skill))}</span>`).join("") : `<span class="chip">${escapeHtml(L("No specialist skills", "Aucune compétence spécialisée"))}</span>`}</div><p class="allocation-summary">${escapeHtml(summary)}</p>${(() => { const zone = allocationZone(row?.assignedShare ?? 1); return `<p class="staff-zone ${zone.tone}">${escapeHtml(zone.text)}</p>`; })()}${(() => { const closed = closedAssignments(person, planned); if (!closed.length) return ""; const hours = closed.reduce((sum, item) => sum + (row?.availableHours || 0) * item.share, 0); const names = closed.map((item) => serviceName(item.serviceId)).join(", "); return `<p class="staff-zone bad">△ ${escapeHtml(L(`${number(hours)} h on closed services (${names}) produce nothing`, `${number(hours)} h sur des services fermés (${names}) ne produisent rien`))}</p>`; })()}<div class="staff-hours-line"><span>${escapeHtml(L("Hours used", "Heures utilisées"))}</span><strong>${number(row?.usedHours || 0)} / ${number(row?.availableHours || 0)}${row?.overtimeHours > 0 ? ` · ${escapeHtml(L("overtime", "heures sup."))} ${number(row.overtimeHours)}` : ""}</strong></div>${(() => { const carried = casesCarried(forecast, person.id); if (carried.total < .5) return ""; return `<div class="staff-hours-line"><span>${escapeHtml(L("Cases carried", "Cas portés"))}</span><strong>${escapeHtml(forecastText(carried.total, "number"))}</strong></div>`; })()}${meter(row?.workload || 0, workloadTone(row?.workload || 0))}<div class="button-row"><button class="button primary" data-open-drawer="staffAllocation" data-context="${person.id}">${escapeHtml(L("Change time allocation", "Modifier l’affectation du temps"))}</button><button class="button secondary" data-open-drawer="staffPerson" data-context="${person.id}">${escapeHtml(L("Pay", "Salaire"))}</button>${pendingActions().some((action) => (action.payload.kind === "hire" && action.payload.targetId === person.id) || (action.payload.kind === "training" && action.payload.personId === person.id)) ? "" : `<button class="button secondary" data-open-drawer="staffExit" data-context="${person.id}">${escapeHtml(L("Let go", "Se séparer"))}</button>`}</div></article>`; }).join("")}</div></section>
+      <div class="dashboard-grid compact-four">${metricCard(L("Veterinary hours available", "Heures vétérinaires disponibles"), number(vetHours))}${metricCard(L("Support hours available", "Heures de soutien disponibles"), number(supportHours))}${metricCard(L("Team workload", "Charge de l’équipe"), forecastText(forecast.operational.staffUse, "percent"))}${metricCard(L("Paid hours not worked", "Heures payées non travaillées"), number(unusedHours))}</div>
+      ${signals.length ? `<section class="hour-signals" aria-label="${escapeHtml(L("Hours needing attention", "Heures à surveiller"))}">${signals.slice(0, 3).map((signal) => `<p><span aria-hidden="true">${signal.icon}</span>${escapeHtml(signal.text)}${signal.tag ? ` <span class="cause-tag">${escapeHtml(signal.tag)}</span>` : ""}</p>`).join("")}</section>` : ""}
+      <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Current team", "Équipe actuelle"))}</h2><span class="panel-links"><button class="text-button" data-open-drawer="capabilities">${escapeHtml(L("Who can do what", "Qui peut faire quoi"))} ›</button><button class="text-button" data-open-drawer="hoursByService">${escapeHtml(L("See hours by service", "Voir les heures par service"))} ›</button></span></div><button class="button secondary" data-open-drawer="training">${escapeHtml(L("Plan training", "Planifier une formation"))}</button><button class="button secondary" data-open-drawer="relations">${escapeHtml(L("Act on climate and trust", "Agir sur le climat et la confiance"))}</button></div>${(() => { const partage = D.services.filter((service) => service.vetShare > 0 && service.supportShare > 0 && planned.services[service.id].active).map((service) => serviceName(service.id)); if (!partage.length) return ""; return `<details class="panel-note note-repliee"><summary>${escapeHtml(L("Cases carried: why they do not add up", "Cas portés : pourquoi ils ne s’additionnent pas"))}</summary>${escapeHtml(L(`A case needing both a vet and a support worker is carried by both: ${partage.join(", ")}. Cases carried do not add up across the team — the clinic treated ${forecastText(forecast.operational.totalHonored, "number")} cases in total.`, `Un cas qui demande à la fois un vétérinaire et du soutien est porté par les deux : ${partage.join(", ")}. Les cas portés ne s’additionnent donc pas d’une personne à l’autre — la clinique traite ${forecastText(forecast.operational.totalHonored, "number")} cas au total.`))}</details>`; })()}<div class="staff-grid">${planned.staff.map((person) => { const row = rows[person.id]; const summary = normalizeAllocations(person).map((allocation) => `${serviceName(allocation.serviceId)} ${Math.round(allocation.share * 100)}%`).join(" · "); return `<article class="staff-card"><div class="staff-head"><div><h3>${escapeHtml(person.name)}</h3><span>${escapeHtml(person.role === "vet" ? L("Veterinarian", "Vétérinaire") : L("Support", "Soutien"))}</span></div><strong class="staff-workload"><small>${escapeHtml(L("workload", "charge"))}</small>${pct(row?.workload || 0)}</strong></div><div class="chips" aria-label="${escapeHtml(L("Skills", "Compétences"))}">${person.skills.length ? person.skills.map((skill) => `<span class="chip">${escapeHtml(skillName(skill))}</span>`).join("") : `<span class="chip">${escapeHtml(L("No specialist skills", "Aucune compétence spécialisée"))}</span>`}</div><p class="allocation-summary">${escapeHtml(summary)}</p>${(() => { const zone = allocationZone(row?.assignedShare ?? 1); const tone = zone.tone === "bad" && (row?.overtimeHours || 0) < 1 ? "warn" : zone.tone; return `<p class="staff-zone ${tone}">${escapeHtml(zone.text)}</p>`; })()}${hourBar(row, forecast)}${(() => { const carried = casesCarried(forecast, person.id); if (carried.total < .5) return ""; return `<div class="staff-hours-line"><span>${escapeHtml(L("Cases carried", "Cas portés"))}</span><strong>${escapeHtml(forecastText(carried.total, "number"))}</strong></div>`; })()}<div class="button-row"><button class="button primary" data-open-drawer="staffAllocation" data-context="${person.id}">${escapeHtml(L("Change time allocation", "Modifier l’affectation du temps"))}</button><button class="button secondary" data-open-drawer="staffPerson" data-context="${person.id}">${escapeHtml(L("Pay", "Salaire"))}</button>${pendingActions().some((action) => (action.payload.kind === "hire" && action.payload.targetId === person.id) || (action.payload.kind === "training" && action.payload.personId === person.id)) ? "" : `<button class="button secondary" data-open-drawer="staffExit" data-context="${person.id}">${escapeHtml(L("Let go", "Se séparer"))}</button>`}</div></article>`; }).join("")}</div></section>
       <section class="card-section"><div class="panel-heading"><h2>${escapeHtml(L("How the clinic operates", "Fonctionnement de la clinique"))}</h2></div><div class="operation-rows">
         <button data-open-drawer="opening"><span>${escapeHtml(L("Opening schedule", "Horaires d’ouverture"))}</span><strong>${escapeHtml(openingNames.join(", ") || L("Standard daytime", "Journée standard"))}</strong><em>›</em></button>
         <button data-open-drawer="dropoff"><span>${escapeHtml(L("Drop-off workflow", "Parcours de dépôt"))}</span><strong>${escapeHtml(planned.operations.dropoff ? L("Enabled", "Activé") : L("Disabled", "Désactivé"))}</strong><em>›</em></button>
@@ -2343,7 +3171,7 @@
   function allocationZone(share) {
     const percent = Math.round(share * 100);
     const tone = assignedTone(share);
-    if (percent > 100) return { tone, text: L(`${percent}% assigned · ${percent - 100}% overtime`, `${percent} % affectés · ${percent - 100} % d’heures supplémentaires`) };
+    if (percent > 100) return { tone, text: L(`${percent}% assigned`, `${percent} % affectés`) };
     if (percent < 100) return { tone, text: L(`${percent}% assigned · ${100 - percent}% idle but paid`, `${percent} % affectés · ${100 - percent} % inoccupés mais payés`) };
     return { tone, text: L("100% assigned", "100 % affectés") };
   }
@@ -2363,7 +3191,7 @@
       return `<td class="cap-train"><button class="text-button" data-open-drawer="person" data-context="${escapeHtml(person.id)}" data-tab="training">△ ${escapeHtml(L("Train", "Former"))}: ${escapeHtml(skillName(skill))}</button>${assigned}</td>`;
     };
     const facilityNote = (service) => missingRequirements(service, planned).filter((reason) => !reason.type.includes("Skill")).map((reason) => blockerText(reason)).join(" · ");
-    return `<p>${escapeHtml(L("Each service needs work from a veterinarian, support staff, or both, and sometimes a specific skill. Allocate people only where they show ✓; △ hours stay blocked until that person is trained. Vets can also cover support tasks, but their hours cost more.", "Chaque service demande du travail vétérinaire, de soutien, ou les deux, et parfois une compétence précise. Affectez les personnes là où elles ont ✓ ; les heures △ restent bloquées jusqu’à la formation de cette personne. Les vétérinaires peuvent aussi assurer les tâches de soutien, mais leurs heures coûtent plus cher."))}</p><p class="cap-legend"><span class="cap-yes">✓ ${escapeHtml(L("qualified now", "qualifié maintenant"))}</span><span class="cap-train">△ ${escapeHtml(L("needs training", "formation nécessaire"))}</span><span class="cap-none">— ${escapeHtml(L("role not used by this service", "fonction non utilisée par ce service"))}</span></p><div class="table-scroll"><table class="capability-table"><thead><tr><th scope="col">${escapeHtml(L("Service", "Service"))}</th>${planned.staff.map((person) => `<th scope="col">${escapeHtml(person.name)}<small>${escapeHtml(roleLabel(person.role))}</small></th>`).join("")}</tr></thead><tbody>${services.map((service) => { const note = facilityNote(service); return `<tr><th scope="row">${escapeHtml(serviceName(service.id))}<small>${escapeHtml(planned.services[service.id].active ? L("Open", "Ouvert") : L("Closed", "Fermé"))}${note ? ` · ${escapeHtml(note)}` : ""}</small></th>${planned.staff.map((person) => cell(person, service)).join("")}</tr>`; }).join("")}</tbody></table></div>`;
+    return `<details class="note-repliee"><summary>${escapeHtml(L("How qualifications work", "Comment lire ce tableau"))}</summary><p>${escapeHtml(L("Each service needs work from a veterinarian, support staff, or both, and sometimes a specific skill. Allocate people only where they show ✓; △ hours stay blocked until that person is trained. Vets can also cover support tasks, but their hours cost more.", "Chaque service demande du travail vétérinaire, de soutien, ou les deux, et parfois une compétence précise. Affectez les personnes là où elles ont ✓ ; les heures △ restent bloquées jusqu’à la formation de cette personne. Les vétérinaires peuvent aussi assurer les tâches de soutien, mais leurs heures coûtent plus cher."))}</p></details><p class="cap-legend"><span class="cap-yes">✓ ${escapeHtml(L("qualified now", "qualifié maintenant"))}</span><span class="cap-train">△ ${escapeHtml(L("needs training", "formation nécessaire"))}</span><span class="cap-none">— ${escapeHtml(L("role not used by this service", "fonction non utilisée par ce service"))}</span></p><div class="table-scroll"><table class="capability-table"><thead><tr><th scope="col">${escapeHtml(L("Service", "Service"))}</th>${planned.staff.map((person) => `<th scope="col">${escapeHtml(person.name)}<small>${escapeHtml(roleLabel(person.role))}</small></th>`).join("")}</tr></thead><tbody>${services.map((service) => { const note = facilityNote(service); return `<tr><th scope="row">${escapeHtml(serviceName(service.id))}<small>${escapeHtml(planned.services[service.id].active ? L("Open", "Ouvert") : L("Closed", "Fermé"))}${note ? ` · ${escapeHtml(note)}` : ""}</small></th>${planned.staff.map((person) => cell(person, service)).join("")}</tr>`; }).join("")}</tbody></table></div>`;
   }
 
   function renderTrainingDrawer(planned, embedded = false) {
@@ -2403,10 +3231,11 @@
     if (!planned.services[service.id].active) return `<small class="bad-text">△ ${escapeHtml(L("Service closed — these hours produce nothing until it opens.", "Service fermé — ces heures ne produisent rien tant qu’il n’est pas ouvert."))}</small>`;
     const row = report.operational.serviceHourRows.find((item) => item.serviceId === service.id && item.role === person.role);
     const parts = [];
+    const cap = (report.serviceResults || []).find((r) => r.id === service.id)?.bottleneck || {};
+    const capTag = "";
     if (row) {
-      parts.push(L(`Service needs ${number(row.neededHours)} h of ${person.role === "vet" ? "vet" : "support"} work; team assigned ${number(row.effectiveHours)} h`, `Le service demande ${number(row.neededHours)} h de travail ${person.role === "vet" ? "vétérinaire" : "de soutien"} ; l’équipe en affecte ${number(row.effectiveHours)} h`));
-      if (row.surplusHours > 1) parts.push(L(`${number(row.surplusHours)} h more than needed will go unused`, `${number(row.surplusHours)} h de plus que nécessaire resteront inutilisées`));
-      else if (row.shortageHours > 1) parts.push(L(`${number(row.shortageHours)} h short`, `${number(row.shortageHours)} h manquantes`));
+      parts.push(L(`needs ${number(row.neededHours)} h`, `demande ${number(row.neededHours)} h`));
+      if (row.shortageHours > 1 && !capTag) parts.push(L(`${number(row.shortageHours)} h short`, `${number(row.shortageHours)} h manquantes`));
       // Qui fournit le reste : sans cela on sait qu'il manque des heures sans savoir à qui les prendre.
       const others = report.operational.staffRows.filter((item) => item.role === person.role && item.id !== person.id)
         .map((item) => ({ item, hours: item.assignments.filter((assignment) => assignment.serviceId === service.id).reduce((sum, assignment) => sum + assignment.effectiveHours, 0) }))
@@ -2420,7 +3249,7 @@
       const supportRate = supportStaff.length ? supportStaff.reduce((sum, item) => sum + item.salary / item.capacity, 0) / supportStaff.length : 20;
       parts.push(L(`covering support work at vet cost (${money(person.salary / person.capacity)}/h vs about ${money(supportRate)}/h for support staff)`, `tâches de soutien au coût vétérinaire (${money(person.salary / person.capacity)}/h contre environ ${money(supportRate)}/h pour le soutien)`));
     }
-    return parts.length ? `<small>${escapeHtml(parts.join(" · "))}</small>` : "";
+    return parts.length || capTag ? `<small>${escapeHtml(parts.join(" · "))}</small>${capTag}` : "";
   }
 
   // These four cells read from the DRAFT, not from the saved allocation: they used to show the same
@@ -2463,8 +3292,7 @@
   // Where each reservation is set, and what to call it. The hours come from the model.
   const RESERVATION_ROUTES = {
     stock: { drawer: "stock", label: () => L("Stock strategy", "Stratégie de stock") },
-    monitoring: { drawer: "marketing", label: () => L("Market monitoring", "Veille de marché") },
-    geomarketing: { drawer: "marketing", label: () => L("Geomarketing", "Géomarketing") },
+    geomarketing: { drawer: "marketing", label: () => L("Market study", "Étude de marché") },
     waste: { drawer: "sustainability", label: () => L("Waste strategy", "Gestion des déchets") },
     accessPlan: { drawer: "sustainability", label: () => L("Access plan", "Offre d’accès") },
     planned: { drawer: "plan", label: () => L("Decisions already in the plan", "Décisions déjà au plan") }
@@ -2495,17 +3323,6 @@
     const used = Math.round(row?.usedHours || 0);
     const overtime = Math.round(row?.overtimeHours || 0);
     return { available, used, overtime, unused: Math.max(0, available + overtime - used), blocked: Math.round(row?.blockedHours || 0) };
-  }
-
-  function hoursCells(row) {
-    const h = displayedHours(row);
-    return [
-      [L("Available hours", "Heures disponibles"), h.available],
-      [L("Hours used", "Heures utilisées"), h.used],
-      ...(h.overtime >= 1 ? [[L("Overtime hours", "Heures supplémentaires"), h.overtime]] : []),
-      [L("Unused hours", "Heures inutilisées"), h.unused],
-      ...(h.blocked >= 1 ? [[L("Blocked by a missing skill", "Bloquées faute de compétence"), h.blocked]] : [])
-    ];
   }
 
   // A fresh clinic starts with its support person fully assigned to services that are not open, and
@@ -2547,7 +3364,7 @@
     const availableHours = currentRow?.availableHours || 0;
     const rowHours = draft.map((allocation) => Math.round(availableHours * allocation.share));
     const totalHours = rowHours.reduce((sum, value) => sum + value, 0);
-    const draftOvertimeCost = (draftRow?.overtimePay || 0) * (1 + SOCIAL_CHARGE_RATE);
+    const draftOvertimeCost = (draftRow?.overtimePay || 0) * (1 + D.financeModel.socialChargeRate);
     const draftHours = displayedHours(draftRow);
     const draftBlocked = draftHours.blocked;
     const draftUsed = draftHours.used;
@@ -2555,17 +3372,17 @@
     const meterText = percent === 0 ? L("0% assigned — give this person at least one service", "0 % affectés — donnez au moins un service à cette personne")
       : draftBlocked >= 1 && draftUsed < 1 ? L(`${percent}% assigned, but all ${number(draftBlocked)} h are blocked until training — no cases can be handled`, `${percent} % affectés, mais les ${number(draftBlocked)} h sont bloquées jusqu’à la formation — aucun cas ne peut être traité`)
       : draftBlocked >= 1 ? L(`${percent}% assigned · ${number(draftBlocked)} h blocked until training`, `${percent} % affectés · ${number(draftBlocked)} h bloquées jusqu’à la formation`)
-      : percent > 100 ? L(`${percent}% assigned, maximum ${Math.round(MAX_ALLOCATION * 100)}% · overtime forecast: ${number(draftRow?.overtimeHours || 0)} h ≈ ${money(draftOvertimeCost)}`, `${percent} % affectés, maximum ${Math.round(MAX_ALLOCATION * 100)} % · heures supplémentaires prévues : ${number(draftRow?.overtimeHours || 0)} h ≈ ${money(draftOvertimeCost)}`)
+      : percent > 100 ? L(`${percent}% assigned, maximum ${Math.round(D.staffModel.maxAllocation * 100)}% · overtime forecast: ${number(draftRow?.overtimeHours || 0)} h ≈ ${money(draftOvertimeCost)}`, `${percent} % affectés, maximum ${Math.round(D.staffModel.maxAllocation * 100)} % · heures supplémentaires prévues : ${number(draftRow?.overtimeHours || 0)} h ≈ ${money(draftOvertimeCost)}`)
       : draftUnused >= 1 ? L(`${percent}% assigned · ${number(draftUnused)} h paid and unused`, `${percent} % affectés · ${number(draftUnused)} h payées sans emploi`)
       : L("100% assigned — fully booked, no overtime", "100 % affectés — temps plein, sans heures supplémentaires");
-    const zoneClass = !valid ? "warn" : { good: "ready", warn: "idle", bad: "overtime" }[assignedTone(total)];
+    const zoneClass = !valid ? "warn" : (draftRow?.overtimeHours || 0) >= 1 ? "overtime" : total > 1.0001 ? "idle" : { good: "ready", warn: "idle", bad: "overtime" }[assignedTone(total)];
     const hoursFlow = currentRow ? L(`${number(currentRow.contractedHours)} contracted − ${number(currentRow.expectedAbsenceHours)} expected absence${absenceNote(currentRow)} − ${number(currentRow.trainingHours)} training${currentRow.onboardingHours > 1 ? ` − ${number(currentRow.onboardingHours)} onboarding` : ""} −${number(currentRow.nonClinicalHours)} other duties = ${number(currentRow.availableHours)} available hours`, `${number(currentRow.contractedHours)} contractuelles − ${number(currentRow.expectedAbsenceHours)} d’absence prévue${absenceNote(currentRow)} − ${number(currentRow.trainingHours)} de formation${currentRow.onboardingHours > 1 ? ` − ${number(currentRow.onboardingHours)} d’intégration` : ""} −${number(currentRow.nonClinicalHours)} d’autres tâches = ${number(currentRow.availableHours)} heures disponibles`) : "";
-    return `<div class="allocation-editor">${closedHoursWarning(person, planned, currentRow?.availableHours)}<details class="note-repliee regle-affectation" data-pli="regleOpen" ${ui.regleOpen ? "open" : ""}><summary>${escapeHtml(L("How the percentages work", "Comment fonctionnent les pourcentages"))}</summary><p>${escapeHtml(L(`Up to 100%, changing percentages moves existing hours; it does not create new hours. Above 100% is paid overtime (${OVERTIME_PREMIUM}× pay, maximum ${Math.round(MAX_ALLOCATION * 100)}%) and lowers staff climate. Below 100% is paid idle time.`, `Jusqu’à 100 %, modifier les pourcentages déplace des heures existantes ; cela ne crée pas de nouvelles heures. Au-delà de 100 %, ce sont des heures supplémentaires payées (${String(OVERTIME_PREMIUM).replace(".", ",")}× le salaire, ${Math.round(MAX_ALLOCATION * 100)} % maximum) qui dégradent le climat d’équipe. En dessous, le temps payé reste inoccupé.`))}</p></details>${hoursFlow ? `<p class="hours-flow">${escapeHtml(hoursFlow)}</p>` : ""}${reservationNote(person, planned, currentRow)}<div class="mini-hours">${hoursCells(draftRow).map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${number(value || 0)}</strong></div>`).join("")}</div><div class="allocation-total marque-cent ${zoneClass}"><strong>${escapeHtml(meterText)}</strong><span class="total-heures">${escapeHtml(L(`${number(totalHours)} h assigned of ${number(availableHours)} h available`, `${number(totalHours)} h affectées sur ${number(availableHours)} h disponibles`))}</span>${meter(total / MAX_ALLOCATION, !valid ? "warn" : assignedTone(total))}</div><div class="allocation-rows">${draft.map((allocation, index) => { const service = SERVICE_BY_ID[allocation.serviceId]; const qualified = personQualified(person, service); const hours = rowHours[index]; return `<article><div><strong>${escapeHtml(serviceName(service.id))}</strong>${qualified ? "" : `<span class="qualification-warning">△ ${escapeHtml(L("Needs training", "Formation nécessaire"))}</span>`}${qualified ? "" : `<small>${number(hours)} ${escapeHtml(L("hours blocked until training", "heures bloquées jusqu’à la formation"))}</small>`}${allocationRowNote(person, service, comparison.after, planned)}${allocationRemainder(draft, index) > 0 ? `<button class="text-button" data-allocation-fill="${index}">${escapeHtml(L(`Use remaining ${number((currentRow?.availableHours || 0) * allocationRemainder(draft, index))} h`, `Utiliser les ${number((currentRow?.availableHours || 0) * allocationRemainder(draft, index))} h restantes`))}</button>` : ""}</div><div class="stepper" role="group" aria-label="${escapeHtml(serviceName(service.id))}"><button data-allocation-adjust="-5" data-allocation-index="${index}" aria-label="${escapeHtml(L(`Reduce by ${number(availableHours * .05)} hours`, `Réduire de ${number(availableHours * .05)} heures`))}">−</button><span class="pas-heures"><input type="text" inputmode="numeric" autocomplete="off" value="${hours}" data-allocation-hours="${index}" aria-label="${escapeHtml(L(`Hours on ${serviceName(service.id)}`, `Heures sur ${serviceName(service.id)}`))}"><em>h</em></span><button data-allocation-adjust="5" data-allocation-index="${index}" ${total >= MAX_ALLOCATION - .0001 ? "disabled" : ""} aria-label="${escapeHtml(L(`Add ${number(availableHours * .05)} hours`, `Ajouter ${number(availableHours * .05)} heures`))}">+</button><button class="remove-allocation" data-remove-allocation="${index}" aria-label="${escapeHtml(L("Remove service", "Retirer le service"))}">×</button></div></article>`; }).join("")}</div>${ordered.length ? `<div class="add-allocation"><label><span>${escapeHtml(L("Add another service", "Ajouter un autre service"))}</span><select data-allocation-service>${optionGroup(L("Active and planned services", "Services actifs et planifiés"), activeOptions)}${optionGroup(L("Other services", "Autres services"), otherOptions)}${optionGroup(L("Needs training", "Formation nécessaire"), trainingOptions)}</select></label><button class="button secondary" data-add-allocation>${escapeHtml(L("Add at 0%", "Ajouter à 0 %"))}</button></div>` : ""}${remainingBlockers.length ? `<div class="requirement-list"><strong>${escapeHtml(L("Other blockers still apply", "D’autres blocages restent à résoudre"))}</strong>${remainingBlockers.map((item) => `<div><span>△ ${escapeHtml(serviceName(item.serviceId))}: ${escapeHtml(blockerText(item.reason))}</span></div>`).join("")}</div>` : ""}<section class="allocation-impact"><h3>${escapeHtml(L("Live impact", "Impact en direct"))}</h3><div class="comparison-list"><div><strong>${escapeHtml(L("This person’s workload", "Charge de cette personne"))}</strong><span>${pct(currentRow?.workload || 0)}</span><em>→ ${pct(draftRow?.workload || 0)}</em></div><div><strong>${escapeHtml(L("Cases this person carries", "Cas portés par cette personne"))}</strong><span>${escapeHtml(forecastText(casesCarried(comparison.before, person.id).total, "number"))}</span><em>→ ${escapeHtml(forecastText(casesCarried(comparison.after, person.id).total, "number"))}</em></div><div><strong>${escapeHtml(L("Team workload", "Charge de l’équipe"))}</strong><span>${escapeHtml(forecastText(comparison.before.operational.staffUse, "percent"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.operational.staffUse, "percent"))}</em></div><div><strong>${escapeHtml(L("Cases served", "Cas traités"))}</strong><span>${escapeHtml(forecastText(comparison.before.operational.totalHonored, "number"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.operational.totalHonored, "number"))}</em></div><div><strong>${escapeHtml(L("Net result", "Résultat net"))}</strong><span>${escapeHtml(forecastText(comparison.before.financial.netResult, "money"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.financial.netResult, "money"))}</em></div>${comparison.before.financial.overtimeCost >= 1 || comparison.after.financial.overtimeCost >= 1 ? `<div><strong>${escapeHtml(L("Overtime cost", "Coût des heures supplémentaires"))}</strong><span>${money(comparison.before.financial.overtimeCost)}</span><em>→ ${money(comparison.after.financial.overtimeCost)}</em></div>` : ""}<div><strong>${escapeHtml(L("Staff climate", "Climat de l’équipe"))}</strong><span>${escapeHtml(forecastText(comparison.before.social.after.staffClimate, "number"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.social.after.staffClimate, "number"))}</em></div><div><strong>${escapeHtml(L("Carbon footprint", "Empreinte carbone"))}</strong><span>${escapeHtml(forecastText(comparison.before.carbon.total, "carbon"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.carbon.total, "carbon"))}</em></div></div>${serviceDeltas.length ? `<ul>${serviceDeltas.map((row) => `<li><strong>${escapeHtml(serviceName(row.id))}:</strong> ${escapeHtml(row.cases > 0 ? L(`${row.cases} additional cases possible`, `${row.cases} cas supplémentaires possibles`) : L(`${Math.abs(row.cases)} fewer cases possible`, `${Math.abs(row.cases)} cas possibles en moins`))}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No change in cases served with this draft.", "Aucun changement des cas traités avec ce brouillon."))}</p>`}</section><button class="button primary" data-review-allocation="${person.id}" ${valid ? "" : "disabled"}>${escapeHtml(L("Review allocation", "Examiner l’affectation"))}</button></div>`;
+    return `<div class="allocation-editor">${closedHoursWarning(person, planned, currentRow?.availableHours)}<details class="note-repliee regle-affectation" data-pli="regleOpen" ${ui.regleOpen ? "open" : ""}><summary>${escapeHtml(L("How the percentages work", "Comment fonctionnent les pourcentages"))}</summary><p>${escapeHtml(L(`Up to 100%, changing percentages moves existing hours; it does not create new hours. Above 100% is paid overtime (${D.staffModel.overtimePremium}× pay, maximum ${Math.round(D.staffModel.maxAllocation * 100)}%) and lowers staff climate. Below 100% is paid idle time.`, `Jusqu’à 100 %, modifier les pourcentages déplace des heures existantes ; cela ne crée pas de nouvelles heures. Au-delà de 100 %, ce sont des heures supplémentaires payées (${String(D.staffModel.overtimePremium).replace(".", ",")}× le salaire, ${Math.round(D.staffModel.maxAllocation * 100)} % maximum) qui dégradent le climat d’équipe. En dessous, le temps payé reste inoccupé.`))}</p></details>${hoursFlow ? `<p class="hours-flow">${escapeHtml(hoursFlow)}</p>` : ""}${reservationNote(person, planned, currentRow)}<div class="allocation-total marque-cent ${zoneClass}"><strong>${escapeHtml(meterText)}</strong><span class="total-heures">${escapeHtml(L(`${number(totalHours)} h assigned of ${number(availableHours)} h available`, `${number(totalHours)} h affectées sur ${number(availableHours)} h disponibles`))}</span>${hourBar(draftRow, comparison.after)}<p class="draft-delta">${[[L("Cases served", "Cas traités"), comparison.before.operational.totalHonored, comparison.after.operational.totalHonored, "number"], [L("Net result", "Résultat net"), comparison.before.financial.netResult, comparison.after.financial.netResult, "money"]].map(([label, b, a, type]) => `<span>${escapeHtml(label)} <strong class="${Math.round(a - b) > 0 ? "good-text" : Math.round(a - b) < 0 ? "bad-text" : ""}">${escapeHtml(forecastText(a - b, type, { signed: true }))}</strong></span>`).join("")}</p></div><div class="allocation-rows">${draft.map((allocation, index) => { const service = SERVICE_BY_ID[allocation.serviceId]; const qualified = personQualified(person, service); const hours = rowHours[index]; return `<article><div><strong>${escapeHtml(serviceName(service.id))}</strong>${qualified ? "" : `<span class="qualification-warning">△ ${escapeHtml(L("Needs training", "Formation nécessaire"))}</span>`}${qualified ? "" : `<small>${number(hours)} ${escapeHtml(L("hours blocked until training", "heures bloquées jusqu’à la formation"))}</small>`}${allocationRowNote(person, service, comparison.after, planned)}${allocationRemainder(draft, index) > 0 ? `<button class="text-button" data-allocation-fill="${index}">${escapeHtml(L(`Use remaining ${number((currentRow?.availableHours || 0) * allocationRemainder(draft, index))} h`, `Utiliser les ${number((currentRow?.availableHours || 0) * allocationRemainder(draft, index))} h restantes`))}</button>` : ""}</div><div class="stepper" role="group" aria-label="${escapeHtml(serviceName(service.id))}"><button data-allocation-adjust="-5" data-allocation-index="${index}" aria-label="${escapeHtml(L(`Reduce by ${number(availableHours * .05)} hours`, `Réduire de ${number(availableHours * .05)} heures`))}">−</button><span class="pas-heures"><input type="text" inputmode="numeric" autocomplete="off" value="${hours}" data-allocation-hours="${index}" aria-label="${escapeHtml(L(`Hours on ${serviceName(service.id)}`, `Heures sur ${serviceName(service.id)}`))}"><em>h</em></span><button data-allocation-adjust="5" data-allocation-index="${index}" ${total >= D.staffModel.maxAllocation - .0001 ? "disabled" : ""} aria-label="${escapeHtml(L(`Add ${number(availableHours * .05)} hours`, `Ajouter ${number(availableHours * .05)} heures`))}">+</button><button class="remove-allocation" data-remove-allocation="${index}" aria-label="${escapeHtml(L("Remove service", "Retirer le service"))}">×</button></div></article>`; }).join("")}</div>${ordered.length ? `<div class="add-allocation"><label><span>${escapeHtml(L("Add another service", "Ajouter un autre service"))}</span><select data-allocation-service>${optionGroup(L("Active and planned services", "Services actifs et planifiés"), activeOptions)}${optionGroup(L("Other services", "Autres services"), otherOptions)}${optionGroup(L("Needs training", "Formation nécessaire"), trainingOptions)}</select></label><button class="button secondary" data-add-allocation>${escapeHtml(L("Add at 0%", "Ajouter à 0 %"))}</button></div>` : ""}${remainingBlockers.length ? `<div class="requirement-list"><strong>${escapeHtml(L("Other blockers still apply", "D’autres blocages restent à résoudre"))}</strong>${remainingBlockers.map((item) => `<div><span>△ ${escapeHtml(serviceName(item.serviceId))}: ${escapeHtml(blockerText(item.reason))}</span></div>`).join("")}</div>` : ""}<section class="allocation-impact"><h3>${escapeHtml(L("Live impact", "Impact en direct"))}</h3><div class="comparison-list"><div><strong>${escapeHtml(L("This person’s workload", "Charge de cette personne"))}</strong><span>${pct(currentRow?.workload || 0)}</span><em>→ ${pct(draftRow?.workload || 0)}</em></div><div><strong>${escapeHtml(L("Cases this person carries", "Cas portés par cette personne"))}</strong><span>${escapeHtml(forecastText(casesCarried(comparison.before, person.id).total, "number"))}</span><em>→ ${escapeHtml(forecastText(casesCarried(comparison.after, person.id).total, "number"))}</em></div><div><strong>${escapeHtml(L("Team workload", "Charge de l’équipe"))}</strong><span>${escapeHtml(forecastText(comparison.before.operational.staffUse, "percent"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.operational.staffUse, "percent"))}</em></div><div><strong>${escapeHtml(L("Cases served", "Cas traités"))}</strong><span>${escapeHtml(forecastText(comparison.before.operational.totalHonored, "number"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.operational.totalHonored, "number"))}</em></div><div><strong>${escapeHtml(L("Net result", "Résultat net"))}</strong><span>${escapeHtml(forecastText(comparison.before.financial.netResult, "money"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.financial.netResult, "money"))}</em></div>${comparison.before.financial.overtimeCost >= 1 || comparison.after.financial.overtimeCost >= 1 ? `<div><strong>${escapeHtml(L("Overtime cost", "Coût des heures supplémentaires"))}</strong><span>${money(comparison.before.financial.overtimeCost)}</span><em>→ ${money(comparison.after.financial.overtimeCost)}</em></div>` : ""}<div><strong>${escapeHtml(L("Staff climate", "Climat de l’équipe"))}</strong><span>${escapeHtml(forecastText(comparison.before.social.after.staffClimate, "number"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.social.after.staffClimate, "number"))}</em></div><div><strong>${escapeHtml(L("Carbon footprint", "Empreinte carbone"))}</strong><span>${escapeHtml(forecastText(comparison.before.carbon.total, "carbon"))}</span><em>→ ${escapeHtml(forecastText(comparison.after.carbon.total, "carbon"))}</em></div></div>${serviceDeltas.length ? `<ul>${serviceDeltas.map((row) => `<li><strong>${escapeHtml(serviceName(row.id))}:</strong> ${escapeHtml(row.cases > 0 ? L(`${row.cases} additional cases possible`, `${row.cases} cas supplémentaires possibles`) : L(`${Math.abs(row.cases)} fewer cases possible`, `${Math.abs(row.cases)} cas possibles en moins`))}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No change in cases served with this draft.", "Aucun changement des cas traités avec ce brouillon."))}</p>`}</section><button class="button primary" data-review-allocation="${person.id}" ${valid ? "" : "disabled"}>${escapeHtml(L("Review allocation", "Examiner l’affectation"))}</button></div>`;
   }
 
   function renderHoursByService(forecast) {
     const rows = forecast.operational.serviceHourRows.filter((row) => state.services[row.serviceId]?.active || row.assignedHours > 0);
-    return `<p>${escapeHtml(L("Hours assigned to a service remain there even when another room, skill, or equipment requirement blocks care.", "Les heures affectées à un service y restent même si une salle, une compétence ou un équipement bloque les soins."))}</p><div class="hours-table" role="table"><div role="row"><strong>${escapeHtml(L("Service", "Service"))}</strong><strong>${escapeHtml(L("Role", "Fonction"))}</strong><strong>${escapeHtml(L("Assigned", "Affectées"))}</strong><strong>${escapeHtml(L("Needed", "Nécessaires"))}</strong><strong>${escapeHtml(L("Used", "Utilisées"))}</strong><strong>${escapeHtml(L("Balance", "Solde"))}</strong></div>${rows.map((row) => `<div role="row"><span>${escapeHtml(serviceName(row.serviceId))}</span><span>${escapeHtml(row.role === "vet" ? L("Vet", "Vét.") : L("Support", "Soutien"))}</span><span>${number(row.assignedHours)}</span><span>${number(row.neededHours)}</span><span>${number(row.usedHours)}</span><strong class="${row.shortageHours > 0 ? "bad-text" : "good-text"}">${row.shortageHours > 0 ? `−${number(row.shortageHours)}` : `+${number(row.surplusHours)}`}</strong></div>`).join("")}</div>`;
+    return `<p>${escapeHtml(L("Hours assigned to a service remain there even when another room, skill, or equipment requirement blocks care.", "Les heures affectées à un service y restent même si une salle, une compétence ou un équipement bloque les soins."))}</p><div class="hours-table" role="table"><div role="row"><strong>${escapeHtml(L("Service", "Service"))}</strong><strong>${escapeHtml(L("Role", "Fonction"))}</strong><strong>${escapeHtml(L("Assigned", "Affectées"))}</strong><strong>${escapeHtml(L("Needed", "Nécessaires"))}</strong><strong>${escapeHtml(L("Worked", "Travaillées"))}</strong><strong>${escapeHtml(L("Balance", "Solde"))}</strong></div>${rows.map((row) => `<div role="row"><span>${escapeHtml(serviceName(row.serviceId))}</span><span>${escapeHtml(row.role === "vet" ? L("Vet", "Vét.") : L("Support", "Soutien"))}</span><span>${number(row.assignedHours)}</span><span>${number(row.neededHours)}</span><span>${number(row.usedHours)}</span><strong class="${row.shortageHours > 0 ? "bad-text" : "good-text"}">${row.shortageHours > 0 ? `−${number(row.shortageHours)}` : `+${number(row.surplusHours)}`}</strong></div>`).join("")}</div>`;
   }
 
   // Chaque rapport porte deja, par service, les cas honores, les recettes, les couts variables et
@@ -2607,7 +3424,7 @@
     };
     return `<p>${escapeHtml(L("Year", "Année"))} ${latest.turn}. ${escapeHtml(L("Margin per hour divides by one resource at a time — never by the two added together, which are not interchangeable.", "La marge par heure se divise par une seule ressource à la fois — jamais par les deux additionnées, qui ne sont pas interchangeables."))}</p>
       <div class="hours-table ledger" role="table">
-        <div role="row"><strong>${escapeHtml(L("Service", "Service"))}</strong><strong>${escapeHtml(t("common.cases"))}</strong><strong>${escapeHtml(t("forecast.revenue"))}</strong><strong>${escapeHtml(L("Variable costs", "Coûts variables"))}</strong><strong>${escapeHtml(L("Margin / case", "Marge / cas"))}</strong><strong>${escapeHtml(L("€ / vet hour", "€ / h vét."))}</strong><strong>${escapeHtml(L("€ / support hour", "€ / h soutien"))}</strong></div>
+        <div role="row"><strong>${escapeHtml(L("Service", "Service"))}</strong><strong>${escapeHtml(t("common.cases"))}</strong><strong>${escapeHtml(t("forecast.revenue"))}</strong><strong>${escapeHtml(L("Variable costs", "Coûts variables"))}</strong><strong>${escapeHtml(L("Margin / case", "Marge / cas"))}</strong><strong>${escapeHtml(L(`${currencySymbol()} / vet hour`, `${currencySymbol()} / h vét.`))}</strong><strong>${escapeHtml(L(`${currencySymbol()} / support hour`, `${currencySymbol()} / h soutien`))}</strong></div>
         ${lignes.map(cellule).join("")}
         ${montreStock ? `<div role="row" class="ajustement"><span>${escapeHtml(L("Stock strategy, applied to the whole", "Stratégie de stock, appliquée à l’ensemble"))}</span><span>—</span><span>—</span><span>${money(variablesAffichees[variablesAffichees.length - 1])}</span><span>—</span><span>—</span><span>—</span></div>` : ""}
         <div role="row" class="total"><strong>${escapeHtml(L("Total", "Total"))}</strong><strong>${number(totalCas)}</strong><strong>${money(totalRecettes)}</strong><strong>${money(latest.financial.variableCosts)}</strong><strong>${money(totalCas ? (totalRecettes - latest.financial.variableCosts) / totalCas : 0)}</strong><strong>—</strong><strong>—</strong></div>
@@ -2638,12 +3455,45 @@
     return L(`incl. ${money(overtime)} of overtime`, `dont ${money(overtime)} d’heures supplémentaires`);
   }
 
+  // Your price against the price your clients accept (or the range the clinic knows it to be in):
+  // the band is the uncertainty, the shaded zone is above it.
+  function priceScale(price, known) {
+    const top = Math.max(price, known.high) * 1.25 || 1;
+    const x = (v) => `${(v / top * 100).toFixed(1)}%`;
+    const state = price > known.high + .5 ? "over" : price > known.low + .5 ? "maybe" : "";
+    return `<div class="price-scale" role="img" aria-label="${escapeHtml(L(`Your price ${money(price)}, accepted ${acceptedText(known)}`, `Votre prix ${money(price)}, accepté ${acceptedText(known)}`))}"><span class="ps-over" style="left:${x(known.high)}"></span>${known.exact ? "" : `<span class="ps-band" style="left:${x(known.low)};width:${((known.high - known.low) / top * 100).toFixed(1)}%"></span>`}<i class="ps-accepted" style="left:${x(known.exact ? known.low : known.high)}"></i><b class="ps-price ${state}" style="left:${x(price)}"><em>${money(price)}</em></b></div>`;
+  }
+
+  // Where the year's money goes. Two bars on one scale: what came in (revenue), and under it what it
+  // paid for — variable costs, fixed costs, tax — and what is left. A loss is the cost bar running
+  // past the revenue bar. A bracket marks the margin, the part of revenue left to cover fixed costs.
+  function moneyBar(run) {
+    const f = run.financial;
+    const revenue = f.revenue + (f.grant || 0);
+    const variable = f.variableCosts;
+    const fixed = f.totalCosts - f.variableCosts;
+    const tax = Math.max(0, revenue - f.totalCosts - f.netResult);
+    const result = f.netResult;
+    const scale = Math.max(revenue, variable + fixed + tax, 1);
+    const pctOf = (v) => Math.max(0, v) / scale * 100;
+    const seg = (cls, v, label, extra = "") => v >= .5 ? `<span class="mb-seg ${cls} ${pctOf(v) < 16 ? "narrow" : ""}" style="width:${pctOf(v).toFixed(2)}%" title="${escapeHtml(`${label} ${money(v)}`)}"><em>${escapeHtml(label)}<b>${money(v)}</b>${extra}</em></span>` : "";
+    const margin = revenue - variable;
+    const narrow = [["mb-var", L("Variable costs", "Coûts variables"), variable], ["mb-fixed", L("Fixed costs", "Coûts fixes"), fixed], ["mb-tax", L("Tax", "Impôt"), tax], ["mb-result", L("Net result", "Résultat net"), Math.max(0, result)]].filter(([, , v]) => v >= .5 && pctOf(v) < 16);
+    const aria = `${L("Revenue", "Recettes")} ${money(revenue)}. ${L("Variable costs", "Coûts variables")} ${money(variable)}, ${L("Fixed costs", "Coûts fixes")} ${money(fixed)}, ${L("Tax", "Impôt")} ${money(tax)}, ${result >= 0 ? L("Net result", "Résultat net") : L("Loss", "Perte")} ${money(result)}. ${L("Contribution margin", "Marge sur coûts variables")} ${money(margin)}.`;
+    return `<section class="card-section money-bar" role="img" aria-label="${escapeHtml(aria)}">
+      <div class="mb-row"><span class="mb-label">${escapeHtml(L("Revenue", "Recettes"))}</span><div class="mb-track">${seg("mb-rev", revenue, L("Revenue", "Recettes"))}</div></div>
+      <div class="mb-row"><span class="mb-label">${escapeHtml(L("Where it goes", "Où elle va"))}</span><div class="mb-track">${seg("mb-var", variable, L("Variable costs", "Coûts variables"))}${seg("mb-fixed", fixed, L("Fixed costs", "Coûts fixes"))}${seg("mb-tax", tax, L("Tax", "Impôt"))}${result > 0 ? seg("mb-result", result, L("Net result", "Résultat net")) : ""}${result < 0 ? `<i class="mb-loss" style="left:${pctOf(revenue).toFixed(2)}%;width:${pctOf(-result).toFixed(2)}%"><em>${escapeHtml(L("Loss", "Perte"))} ${money(result)}</em></i>` : ""}</div></div>
+      <div class="mb-row"><span class="mb-label"></span><div class="mb-track mb-bracket-track"><i class="mb-bracket" style="left:${pctOf(variable).toFixed(2)}%;width:${pctOf(Math.max(0, margin)).toFixed(2)}%"><em>${escapeHtml(L("Contribution margin", "Marge sur coûts variables"))} <b>${money(margin)}</b></em></i></div></div>
+      <ul class="hb-legend">${narrow.map(([cls, label, v]) => `<li><b class="${cls}"></b>${escapeHtml(label)} <strong>${money(v)}</strong></li>`).join("")}<li>${escapeHtml(L("Total costs", "Coûts totaux"))} <strong>${money(f.totalCosts)}</strong></li>${f.variableCosts > 0 ? `<li><small>${escapeHtml(L("Variable costs", "Coûts variables"))} : ${escapeHtml(variableCostNote(run))}</small></li>` : ""}${overtimeNote(run) ? `<li><small>${escapeHtml(L("Fixed costs", "Coûts fixes"))} : ${escapeHtml(overtimeNote(run))}</small></li>` : ""}</ul>
+    </section>`;
+  }
+
   function renderBusiness(planned, forecast) {
     const location = D.locations[planned.location.sectorId];
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Business", "Gestion"))}</h1><p>${escapeHtml(L("Prices, financing, market position, and location—opened one decision at a time.", "Prix, financement, marché et implantation — une décision à la fois."))}</p></div></div>
       ${forecastGridNote()}
-      <div class="dashboard-grid compact-five">${metricCard(L("Revenue", "Recettes"), forecastText(forecast.financial.revenue, "money"))}${metricCard(L("Total costs", "Coûts totaux"), money(forecast.financial.totalCosts), overtimeNote(forecast))}${metricCard(L("Variable costs", "Coûts variables"), money(forecast.financial.variableCosts), variableCostNote(forecast))}${metricCard(L("Net result", "Résultat net"), forecastText(forecast.financial.netResult, "money"), forecastText(forecast.financial.margin, "percent"), forecast.financial.netResult >= 0 ? "good" : "bad")}${metricCard(L("End treasury", "Trésorerie finale"), forecastText(forecast.financial.treasury, "money"))}</div>
-      <section class="card-section action-menu"><button data-open-drawer="pricing"><span>${escapeHtml(L("Service prices", "Prix des services"))}</span><strong>${escapeHtml(L("Review price sensitivity and money left after supplies", "Voir la sensibilité au prix et l’argent restant après les fournitures"))}</strong><em>›</em></button><button data-open-drawer="finance"><span>${escapeHtml(L("Financing", "Financement"))}</span><strong>${escapeHtml(planned.finance.loan ? money(planned.finance.loan.remaining) : L("No outstanding loan", "Aucun emprunt"))}</strong><em>›</em></button><button data-open-drawer="market"><span>${escapeHtml(L("Market focus", "Marché cible"))}</span><strong>${escapeHtml(itemLabel(D.segments[planned.marketFocus].name))}</strong><em>›</em></button><button data-open-drawer="location"><span>${escapeHtml(L("Location and parking", "Implantation et parking"))}</span><strong>${escapeHtml(itemLabel(location.name))}</strong><em>›</em></button><button data-open-drawer="marketing"><span>${escapeHtml(L("Market strategies", "Stratégies de marché"))}</span><strong>${escapeHtml(L("Communication, competitor monitoring, and local market research", "Communication, veille concurrentielle et étude du marché local"))}</strong><em>›</em></button></section>
+      ${forecastPrecision() === "costs" ? "" : moneyBar(forecast)}<div class="dashboard-grid compact-two">${metricCard(L("Net result", "Résultat net"), forecastText(forecast.financial.netResult, "money"), forecastText(forecast.financial.margin, "percent"), forecast.financial.netResult >= 0 ? "good" : "bad")}${metricCard(L("End treasury", "Trésorerie finale"), forecastText(forecast.financial.treasury, "money"))}</div>
+      <section class="card-section action-menu"><button data-open-drawer="pricing"><span>${escapeHtml(L("Service prices", "Prix des services"))}</span><strong>${escapeHtml(L(`Your clients: ${itemLabel(D.segments[planned.marketFocus].name)} · accepted prices and sensitivity`, `Vos clients : ${itemLabel(D.segments[planned.marketFocus].name)} · prix acceptés et sensibilité`))}</strong><em>›</em></button><button data-open-drawer="finance"><span>${escapeHtml(L("Financing", "Financement"))}</span><strong>${escapeHtml(planned.finance.loan ? money(planned.finance.loan.remaining) : L("No outstanding loan", "Aucun emprunt"))}</strong><em>›</em></button><button data-open-drawer="market"><span>${escapeHtml(L("Market focus", "Marché cible"))}</span><strong>${escapeHtml(itemLabel(D.segments[planned.marketFocus].name))}</strong><em>›</em></button><button data-open-drawer="location"><span>${escapeHtml(L("Location and parking", "Implantation et parking"))}</span><strong>${escapeHtml(itemLabel(location.name))}</strong><em>›</em></button><button data-open-drawer="marketing"><span>${escapeHtml(L("Communication and market study", "Communication et étude de marché"))}</span><strong>${escapeHtml(`${itemLabel(D.marketingStrategies.communication[planned.marketing.communication]?.name || { en: "", fr: "" })} · ${itemLabel((D.marketingStrategies.geomarketing[planned.marketing.geomarketing] || D.marketingStrategies.geomarketing.none).name)}`)}</strong><em>›</em></button></section>
     </section>`;
   }
 
@@ -2651,11 +3501,26 @@
     const baseline = state.carbonBaseline;
     const delta = forecast.carbon.total - baseline.total;
     const reduction = baseline.perCase ? 1 - forecast.carbon.perCase / baseline.perCase : 0;
+    const carbonGoal = goalChecks(forecast, planned).find((g) => g.id === "carbon") || { value: .15 };
     const sources = ["building", "clinical", "waste", "travel"];
     return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Sustainability", "Durabilité"))}</h1><p>${escapeHtml(L("Choose a source, see the trade-off, and decide whether it fits the clinic.", "Choisissez une source, observez le compromis et décidez s’il convient à la clinique."))}</p></div></div>
       ${forecastGridNote()}
-      <div class="dashboard-grid compact-four">${metricCard(L("Carbon footprint", "Empreinte carbone"), forecastText(forecast.carbon.total, "carbon"), `${forecastText(delta, "carbon", { signed: true })} ${L("vs start", "par rapport au départ")}`, delta <= 0 ? "good" : "warn")}${metricCard(L("Per treated case", "Par cas traité"), kilograms(forecast.carbon.perCase), `${pct(reduction)} ${L("change", "d’évolution")}`, reduction > 0 ? "good" : "warn")}${metricCard(L("Largest source", "Source principale"), sourceLabel(forecast.carbon.primaryDrivers[0]), tonnes(forecast.carbon.bySource[forecast.carbon.primaryDrivers[0]]))}${metricCard(L("Scenario target", "Objectif du scénario"), pct(({ balanced: .15, rescue: .08, growth: .20 })[state.scenarioId]), L("reduction per case while retaining 80% of starting care", "de réduction par cas en conservant 80 % des soins initiaux"))}</div>
-      <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("Where the footprint comes from", "Origine de l’empreinte"))}</h2><p>${escapeHtml(L("Select one source to see only the relevant choices.", "Sélectionnez une source pour ne voir que les choix pertinents."))}</p></div></div><div class="source-list">${sources.map((id) => { const value = forecast.carbon.bySource[id]; const share = forecast.carbon.total ? value / forecast.carbon.total : 0; return `<article><div><strong>${escapeHtml(sourceLabel(id))}</strong><span>${tonnes(value)} · ${pct(share)}</span></div>${meter(share, id === forecast.carbon.primaryDrivers[0] ? "warn" : "good")}<button class="button secondary" data-open-drawer="sustainability" data-context="${id}">${escapeHtml(L("See options", "Voir les options"))}</button></article>`; }).join("")}</div></section>
+      <div class="dashboard-grid compact-two">${metricCard(L("Carbon footprint", "Empreinte carbone"), forecastText(forecast.carbon.total, "carbon"), `${forecastText(delta, "carbon", { signed: true })} ${L("vs start", "par rapport au départ")}`, delta <= 0 ? "good" : "warn")}${metricCard(L("Largest source", "Source principale"), sourceLabel(forecast.carbon.primaryDrivers[0]), tonnes(forecast.carbon.bySource[forecast.carbon.primaryDrivers[0]]))}</div>
+      ${(() => {
+        const volumeMin = Math.ceil((baseline.totalCases || 0) * .8);
+        const perCaseOk = reduction >= carbonGoal.value;
+        const volumeOk = forecast.operational.totalHonored >= volumeMin;
+        const invests = investsInSustainability(planned);
+        const needs = D.commitmentModel?.grantNeedsInvestment;
+        const kept = commitmentsFor(forecast, planned).find((c) => c.id === "commune")?.ok;
+        const row = (ok, label, detail) => `<li class="${ok ? "ok" : "ko"}"><span aria-hidden="true">${ok ? "✓" : "✗"}</span><strong>${escapeHtml(label)}</strong><span>${detail}</span></li>`;
+        return `<section class="card-section promise-check"><h2>${escapeHtml(kept ? L("Promise to the municipality: kept", "Promesse à la commune : tenue") : L("Promise to the municipality: not kept", "Promesse à la commune : non tenue"))}</h2><ul>
+          ${row(perCaseOk, L("Carbon per case", "Carbone par cas"), escapeHtml(`${kilograms(forecast.carbon.perCase)} · ${reduction > 0 ? "−" : "+"}${pct(Math.abs(reduction))} ${L("vs start", "par rapport au départ")} · ${L("target", "objectif")} −${pct(carbonGoal.value)}`))}
+          ${row(volumeOk, L("Volume kept", "Volume gardé"), escapeHtml(`${number(forecast.operational.totalHonored)} ${L("cases", "cas")} · ${L("minimum", "minimum")} ${number(volumeMin)} (${L("80% of the start", "80 % du départ")})`))}
+          ${needs ? row(invests, L("A sustainability measure", "Une mesure de durabilité"), invests ? escapeHtml(L("in the plan", "dans le plan")) : `${escapeHtml(L("none", "aucune"))} · <a href="#sources-empreinte">${escapeHtml(L("choose one from a source below", "en choisir une parmi les sources ci-dessous"))}</a>`) : ""}
+        </ul><p class="promise-next">→ ${escapeHtml(commitmentConsequence("commune", kept, state, forecast))} ${escapeHtml(L("next year", "l’an prochain"))}</p></section>`;
+      })()}
+      <section class="card-section" id="sources-empreinte"><div class="panel-heading"><div><h2>${escapeHtml(L("Where the footprint comes from", "Origine de l’empreinte"))}</h2><p>${escapeHtml(L("Select one source to see only the relevant choices.", "Sélectionnez une source pour ne voir que les choix pertinents."))}</p></div></div><div class="source-list">${sources.map((id) => { const value = forecast.carbon.bySource[id]; const share = forecast.carbon.total ? value / forecast.carbon.total : 0; return `<article><div><strong>${escapeHtml(sourceLabel(id))}</strong><span>${tonnes(value)} · ${pct(share)}</span></div>${meter(share, id === forecast.carbon.primaryDrivers[0] ? "warn" : "good")}<button class="button secondary" data-open-drawer="sustainability" data-context="${id}">${escapeHtml(L("See options", "Voir les options"))}</button></article>`; }).join("")}</div></section>
       <details class="card-section methodology"><summary>${escapeHtml(L("How is this calculated?", "Comment ce calcul est-il réalisé ?"))}</summary><p>${escapeHtml(L("The model combines building electricity and heating, volatile anaesthetic, waste treatment, and client travel. Official conversion factors are kept separate from the clinic activity assumptions used to make the simulation playable.", "Le modèle combine l’électricité et le chauffage du bâtiment, l’anesthésique volatil, le traitement des déchets et les déplacements des clients. Les facteurs de conversion officiels sont séparés des hypothèses d’activité qui rendent la simulation jouable."))}</p><dl><div><dt>${escapeHtml(L("Model version", "Version du modèle"))}</dt><dd>${escapeHtml(D.carbonModel.version)}</dd></div>${Object.values(D.carbonModel.factorRegistry).map((factor) => `<div><dt>${escapeHtml(itemLabel(factor.detail))}</dt><dd>${preciseNumber(factor.value)} ${escapeHtml(factor.unit)} · ${escapeHtml(String(factor.year))}<br>${escapeHtml(factor.source)}</dd></div>`).join("")}<div><dt>${escapeHtml(L("Simulation assumptions", "Hypothèses de simulation"))}</dt><dd>${escapeHtml(L("Energy and waste per service, building demand, room demand, client-trip patterns, and selected treatment routes.", "Énergie et déchets par service, besoins du bâtiment et des salles, déplacements des clients et filières de traitement retenues."))}</dd></div><div><dt>${escapeHtml(L("Not included", "Non inclus"))}</dt><dd>${escapeHtml(L("Medicines and other supply chains, staff commuting, equipment manufacture, construction, and refrigerants.", "Médicaments et autres chaînes d’approvisionnement, trajets du personnel, fabrication des équipements, construction et fluides frigorigènes."))}</dd></div></dl><p class="source-links"><a href="https://vetsustain.org/resources/the-veterinary-carbon-calculator-getting-started" target="_blank" rel="noreferrer">Vet Sustain</a><a href="https://www.eea.europa.eu/en/analysis/indicators/greenhouse-gas-emission-intensity-of-1-1751032678/greenhouse-gas-emission-intensity-of-electricity-generation-country-level" target="_blank" rel="noreferrer">EEA</a><a href="https://www.gov.uk/government/publications/greenhouse-gas-reporting-conversion-factors-2025" target="_blank" rel="noreferrer">UK 2025 factors</a><a href="https://www.gov.uk/guidance/fluorinated-gases-f-gases" target="_blank" rel="noreferrer">UK F-gas table</a><a href="https://dailymed.nlm.nih.gov/dailymed/lookup.cfm?setid=d27da7db-5c2c-4b9f-bf14-a4d18d3e6d4e" target="_blank" rel="noreferrer">DailyMed</a><a href="https://www.england.nhs.uk/long-read/nhs-clinical-waste-strategy/" target="_blank" rel="noreferrer">NHS clinical waste</a><a href="https://ghgprotocol.org/corporate-standard-frequently-asked-questions" target="_blank" rel="noreferrer">GHG Protocol</a></p></details>
     </section>`;
   }
@@ -2735,7 +3600,7 @@
     const active = planned.services[selectedId].active;
     const payload = { kind: "toggle-service", targetId: selectedId, value: !active };
     const next = order[(order.indexOf(selectedId) + 1) % order.length];
-    return `<article class="selected-service"><div class="card-status"><h3>${escapeHtml(serviceName(selectedId))}</h3><span>${escapeHtml(active ? L("Open", "Ouvert") : L("Closed", "Fermé"))}</span></div><div class="service-stats"><div><span>${escapeHtml(L("Expected requests", "Demandes prévues"))}</span><strong>${number(row.demand)}</strong></div><div><span>${escapeHtml(L("Current price", "Prix actuel"))}</span><strong>${money(planned.services[selectedId].price)}</strong><button class="text-button" data-open-drawer="pricing">${escapeHtml(L("Change prices", "Modifier les prix"))} ›</button></div><div><span>${escapeHtml(L("Money left after direct supplies", "Argent restant après les fournitures directes"))}</span><strong>${money(row.contributionPerCase)} · ${escapeHtml(L(`supplies ${pct(service.variableCost)}`, `fournitures ${pct(service.variableCost)}`))}</strong></div><div><span>${escapeHtml(L("Vet time per case", "Temps vétérinaire par cas"))}</span><strong>${decimal(vetDuration(service, planned), 2)} h</strong></div><div><span>${escapeHtml(L("Support time per case", "Temps de soutien par cas"))}</span><strong>${decimal(supportDuration(service, planned), 2)} h</strong></div></div><p class="service-time-note">${escapeHtml(L("Each case uses both at the same time. A vet can cover the support part; support staff cannot cover the vet part.", "Chaque cas consomme les deux en même temps. Un vétérinaire peut assurer la partie soutien ; le personnel de soutien ne peut pas assurer la partie vétérinaire."))}</p>${(() => { const staffers = planned.staff.filter((person) => roleCompatible(person, service)); const text = staffers.length ? staffers.map((person) => `${person.name} (${roleLabel(person.role).toLowerCase()}${personQualified(person, service) ? "" : `, ${L("needs training", "formation nécessaire")}`})`).join(", ") : L("Nobody on the current team", "Personne dans l’équipe actuelle"); return `<p class="who-can"><strong>${escapeHtml(L("Who can staff this", "Qui peut assurer ce service"))}:</strong> ${escapeHtml(text)}</p>`; })()}${requirementList(service, planned)}${consequencePreview(`service:${selectedId}:active`, payload)}${reviewButton(`service:${selectedId}:active`, payload, active ? L("Close service", "Fermer le service") : L("Open service", "Ouvrir le service"))}${renderPaceOptions(service, planned)}<button class="text-button next-service" data-select-service="${next}">${escapeHtml(L(`Next service: ${serviceName(next)}`, `Service suivant : ${serviceName(next)}`))} ›</button></article>`;
+    return `<article class="selected-service"><div class="card-status"><h3>${escapeHtml(serviceName(selectedId))}</h3><span>${escapeHtml(active ? L("Open", "Ouvert") : L("Closed", "Fermé"))}</span></div><div class="service-stats"><div><span>${escapeHtml(L("Expected requests", "Demandes prévues"))}</span><strong>${number(row.demand)}</strong></div><div><span>${escapeHtml(L("Current price", "Prix actuel"))}</span><strong>${money(planned.services[selectedId].price)}</strong><button class="text-button" data-open-drawer="pricing">${escapeHtml(L("Change prices", "Modifier les prix"))} ›</button></div><div><span>${escapeHtml(L("Money left after direct supplies", "Argent restant après les fournitures directes"))}</span><strong>${money(row.contributionPerCase)} · ${escapeHtml(L(`supplies ${pct(service.variableCost)}`, `fournitures ${pct(service.variableCost)}`))}</strong></div>${(() => { const v = vetDuration(service, planned), su = supportDuration(service, planned), tot = v + su || 1; return `<div class="case-split"><span>${escapeHtml(L("One case", "Un cas"))}</span><div class="cs-track">${v > 0 ? `<i class="cs-vet" style="width:${(v / tot * 100).toFixed(1)}%"></i>` : ""}${su > 0 ? `<i class="cs-support" style="width:${(su / tot * 100).toFixed(1)}%"></i>` : ""}</div><ul class="hb-legend"><li><b class="cs-vet"></b>${escapeHtml(L("Vet time per case", "Temps vétérinaire par cas"))} <strong>${decimal(v, 2)} h</strong></li><li><b class="cs-support"></b>${escapeHtml(L("Support time per case", "Temps de soutien par cas"))} <strong>${decimal(su, 2)} h</strong></li>${su > 0 ? `<li><small>${escapeHtml(L(`a vet can do the whole case: ${decimal(v + su, 2)} h of vet time`, `un vétérinaire peut faire tout le cas : ${decimal(v + su, 2)} h de temps vétérinaire`))}</small></li>` : ""}</ul></div>`; })()}${service.roomIds.length ? `<div><span>${escapeHtml(L("Room time per case", "Temps de salle par cas"))}</span><strong>${decimal(caseDuration(service, planned), 2)} h · ${escapeHtml(service.roomIds.map((id) => itemLabel(D.rooms[id].name)).join(", "))}</strong></div>` : ""}${row.returnVisits > 0 ? `<div><span>${escapeHtml(L("Return visits from rushed care", "Retours de visites pressées"))}</span><strong>${number(row.returnVisits)} ${escapeHtml(L("cases, unpaid", "cas, non payés"))}</strong></div>` : ""}</div><p class="service-time-note">${escapeHtml(L("Each case uses both at the same time. A vet can cover the support part; support staff cannot cover the vet part. Room time is how long the case occupies its room, whoever treats it.", "Chaque cas consomme les deux en même temps. Un vétérinaire peut assurer la partie soutien ; le personnel de soutien ne peut pas assurer la partie vétérinaire. Le temps de salle est la durée pendant laquelle le cas occupe sa salle, quelle que soit la personne qui le traite."))}</p>${(() => { const staffers = planned.staff.filter((person) => roleCompatible(person, service)); const text = staffers.length ? staffers.map((person) => `${person.name} (${roleLabel(person.role).toLowerCase()}${personQualified(person, service) ? "" : `, ${L("needs training", "formation nécessaire")}`})`).join(", ") : L("Nobody on the current team", "Personne dans l’équipe actuelle"); return `<p class="who-can"><strong>${escapeHtml(L("Who can staff this", "Qui peut assurer ce service"))}:</strong> ${escapeHtml(text)}</p>`; })()}${requirementList(service, planned)}${consequencePreview(`service:${selectedId}:active`, payload)}${reviewButton(`service:${selectedId}:active`, payload, active ? L("Close service", "Fermer le service") : L("Open service", "Ouvrir le service"))}${renderPaceOptions(service, planned)}<button class="text-button next-service" data-select-service="${next}">${escapeHtml(L(`Next service: ${serviceName(next)}`, `Service suivant : ${serviceName(next)}`))} ›</button></article>`;
   }
 
   function renderPaceOptions(service, planned) {
@@ -2761,24 +3626,26 @@
     if (ui.drawer === "capabilities") return renderCapabilitiesDrawer(planned);
     if (ui.drawer === "export") return renderExportDrawer();
     if (ui.drawer === "services") return renderServiceDrawer(planned, forecast);
-    if (ui.drawer === "rooms") return `<div class="drawer-cards">${focusFirst(Object.entries(D.rooms)).map(([id, room]) => { const qty = planned.rooms[id]; const add = { kind: "room-add", targetId: id }; return `<article${targetCard(id)}><h3>${escapeHtml(itemLabel(room.name))} · ${qty}</h3><p>${money(room.fitout)} ${escapeHtml(L("once", "une fois"))} · ${money(room.annualRent)}/${escapeHtml(L("year", "an"))}</p>${consequencePreview(`room:${id}`, add)}<div class="button-row">${reviewButton(`room:${id}`, add, L("Fit out a room", "Aménager une salle"))}${qty > room.baseIncluded ? reviewButton(`room:${id}`, { kind: "room-close", targetId: id }, L("Close a room", "Fermer une salle")) : ""}</div></article>`; }).join("")}</div>`;
-    if (ui.drawer === "equipment") return `<div class="drawer-cards">${focusFirst(Object.entries(D.equipment)).map(([id, item]) => { const counts = planned.equipment[id]; const buy = { kind: "equipment-acquire", targetId: id, mode: "buy" }; const lease = { kind: "equipment-acquire", targetId: id, mode: "lease" }; return `<article${targetCard(id)}><h3>${escapeHtml(itemLabel(item.name))}</h3><p>${escapeHtml(L("Owned", "Acheté"))}: ${counts.owned} · ${escapeHtml(L("Leased", "Loué"))}: ${counts.leased}</p><small>${money(item.purchase)} ${escapeHtml(L("buy once", "achat unique"))} · ${money(item.purchase * item.maintenanceRate)}/${escapeHtml(L("year upkeep if owned", "an d’entretien si acheté"))} · ${money(item.lease)}/${escapeHtml(L("year lease", "an de location"))}</small><div class="choice-subgrid"><div>${consequencePreview(`equipment:${id}:buy`, buy)}${reviewButton(`equipment:${id}:buy`, buy, L("Buy", "Acheter"))}</div><div>${consequencePreview(`equipment:${id}:lease`, lease, { note: false })}${reviewButton(`equipment:${id}:lease`, lease, L("Lease", "Louer"))}</div></div><div class="button-row">${counts.owned ? reviewButton(`equipment:${id}:buy`, { kind: "equipment-remove", targetId: id, mode: "buy" }, L("Sell one", "Vendre une unité")) : ""}${counts.leased ? reviewButton(`equipment:${id}:lease`, { kind: "equipment-remove", targetId: id, mode: "lease" }, L("Return one", "Restituer une unité")) : ""}</div></article>`; }).join("")}</div>`;
+    if (ui.drawer === "rooms") return `<div class="drawer-cards">${focusFirst(Object.entries(D.rooms)).map(([id, room]) => { const qty = planned.rooms[id]; const add = { kind: "room-add", targetId: id }; return `<article${targetCard(id)}><h3>${escapeHtml(itemLabel(room.name))} <span class="badge">${qty ? L(`${qty} in use`, `${qty} en service`) : L("none", "aucune")}</span></h3><p>${money(room.fitout)} ${escapeHtml(L("once", "une fois"))} · ${money(room.annualRent)}/${escapeHtml(L("year", "an"))}</p>${consequencePreview(`room:${id}`, add)}<div class="button-row">${reviewButton(`room:${id}`, add, L("Fit out a room", "Aménager une salle"))}${qty > room.baseIncluded ? reviewButton(`room:${id}`, { kind: "room-close", targetId: id }, L("Close a room", "Fermer une salle")) : ""}</div></article>`; }).join("")}</div>`;
+    if (ui.drawer === "equipment") return `<div class="drawer-cards">${focusFirst(Object.entries(D.equipment)).map(([id, item]) => { const counts = planned.equipment[id]; const buy = { kind: "equipment-acquire", targetId: id, mode: "buy" }; const lease = { kind: "equipment-acquire", targetId: id, mode: "lease" }; return `<article${targetCard(id)}><h3>${escapeHtml(itemLabel(item.name))}</h3><p>${escapeHtml(L("Owned", "Acheté"))}: ${counts.owned} · ${escapeHtml(L("Leased", "Loué"))}: ${counts.leased}</p>${compareOptions([{ label: L("Buy", "Acheter"), key: `equipment:${id}:buy`, payload: buy, button: L("Buy", "Acheter") }, { label: L("Lease", "Louer"), key: `equipment:${id}:lease`, payload: lease, button: L("Lease", "Louer") }])}${needsTags(noEffectReason(buy))}<div class="button-row">${counts.owned ? reviewButton(`equipment:${id}:buy`, { kind: "equipment-remove", targetId: id, mode: "buy" }, L("Sell one", "Vendre une unité")) : ""}${counts.leased ? reviewButton(`equipment:${id}:lease`, { kind: "equipment-remove", targetId: id, mode: "lease" }, L("Return one", "Restituer une unité")) : ""}</div></article>`; }).join("")}</div>`;
     if (ui.drawer === "training") return renderTrainingDrawer(planned);
     if (ui.drawer === "opening") return `<div class="drawer-cards">${focusFirst(Object.entries(D.openingPeriods)).map(([id, period]) => { const active = planned.operations.openingPeriods[id]; const payload = { kind: "opening-period", targetId: id, value: !active }; return optionCard(itemLabel(period.name), `${number(period.hours)} ${L("available room/equipment hours; no staff hours added", "heures de salle/équipement disponibles ; aucune heure de personnel ajoutée")}`, `opening:${id}`, payload, `${money(period.cost)}/${L("year", "an")}`, id); }).join("")}</div>`;
-    if (ui.drawer === "dropoff") { const payload = { kind: "dropoff", value: !planned.operations.dropoff }; return optionCard(L("Drop-off workflow", "Parcours de dépôt"), L("Animals are left for the day: vaccination, preventive care, lab and pharmacy use 30% less room time and 10% less vet time (10% more support time), and clients value the convenience (+1 trust). Worth it when a room is full. Needs two support staff.", "Les animaux sont déposés pour la journée : vaccination, prévention, laboratoire et pharmacie utilisent 30 % de temps de salle et 10 % de temps vétérinaire en moins (10 % de soutien en plus), et les clients apprécient la commodité (+1 de confiance). Utile quand une salle est saturée. Deux personnes de soutien sont nécessaires."), "operations:dropoff", payload, `${money(4000)}/${L("year", "an")}`); }
-    if (ui.drawer === "stock") return `<div class="drawer-cards">${Object.entries(D.stockStrategies).map(([id, choice]) => { const change = Math.round((choice.multiplier - 1) * 100); const spending = change === 0 ? L("No change in supply spending", "Aucun changement des dépenses de fournitures") : change > 0 ? L(`${change}% more supply spending`, `${change} % de dépenses de fournitures en plus`) : L(`${Math.abs(change)}% less supply spending`, `${Math.abs(change)} % de dépenses de fournitures en moins`); return optionCard(itemLabel(choice.name), `${spending} · ${L(`about ${pct(choice.stockoutRate || 0)} of cases in pharmacy, surgery, orthopedics, hospital, dentistry, vaccination and preventive care lost to stock-outs`, `environ ${pct(choice.stockoutRate || 0)} des cas en pharmacie, chirurgie, orthopédie, hospitalisation, dentisterie, vaccination et prévention perdus par rupture de stock`)}`, "operations:stock", { kind: "stock-strategy", targetId: id }, `${number(choice.supportHours)} ${L("support hours", "heures de soutien")} · ${money(choice.cost)}/${L("year", "an")}`); }).join("")}</div>`;
+    if (ui.drawer === "dropoff") { const payload = { kind: "dropoff", value: !planned.operations.dropoff }; return optionCard(L("Drop-off workflow", "Parcours de dépôt"), L("Animals left for the day · vaccination, preventive care, lab, pharmacy: −30% room time, −10% vet time, +10% support · +1 trust · two support staff.", "Animaux déposés pour la journée · vaccination, prévention, laboratoire, pharmacie : −30 % de temps de salle, −10 % de temps vétérinaire, +10 % de soutien · +1 de confiance · deux personnes de soutien."), "operations:dropoff", payload, `${money(4000)}/${L("year", "an")}`); }
+    if (ui.drawer === "stock") return `<div class="drawer-cards">${Object.entries(D.stockStrategies).map(([id, choice]) => { const change = Math.round((choice.multiplier - 1) * 100); const spending = change === 0 ? L("No change in supply spending", "Aucun changement des dépenses de fournitures") : change > 0 ? L(`${change}% more supply spending`, `${change} % de dépenses de fournitures en plus`) : L(`${Math.abs(change)}% less supply spending`, `${Math.abs(change)} % de dépenses de fournitures en moins`); return choiceCard(id === planned.operations.stockStrategy, itemLabel(choice.name), `${spending} · ${L(`about ${pct(choice.stockoutRate || 0)} of cases in pharmacy, surgery, orthopedics, hospital, dentistry, vaccination and preventive care lost to stock-outs`, `environ ${pct(choice.stockoutRate || 0)} des cas en pharmacie, chirurgie, orthopédie, hospitalisation, dentisterie, vaccination et prévention perdus par rupture de stock`)}`, "operations:stock", { kind: "stock-strategy", targetId: id }, `${number(choice.supportHours)} ${L("support hours", "heures de soutien")} · ${money(choice.cost)}/${L("year", "an")}`); }).join("")}</div>`;
     // These four were fully built — costs, effects, a reducer, an action label, a click handler —
     // and no screen ever rendered a button for them. They are the only direct answer to "how do I
     // change staff climate or client trust?", so without them the two indicators are read-only.
-    if (ui.drawer === "relations") return `<p>${escapeHtml(L("Staff climate changes absence and resignations. Client trust changes how many requests arrive. Both also move on their own with how much of the demand you serve.", "Le climat d’équipe modifie l’absentéisme et les démissions. La confiance des clients modifie le nombre de demandes reçues. Les deux évoluent aussi d’elles-mêmes selon la part de la demande que vous traitez."))}</p><div class="drawer-cards">${Object.entries(D.socialActions).map(([id, action]) => optionCard(itemLabel(action.name), itemLabel(action.note), `social:${id}`, { kind: "social-action", targetId: id }, `${money(action.cost)} ${L("once", "une fois")}${action.supportHours ? ` · ${number(action.supportHours)} ${L("support hours", "heures de soutien")}` : ""}`, id)).join("")}</div>`;
-    if (ui.drawer === "hr") return `<p>${escapeHtml(L("Staff climate changes absence and resignations: below 50 people are absent more, below 30 someone resigns at year end, and below 45 anyone paid under 95% of their benchmark resigns. Resignation protection counts as extra climate for those checks.", "Le climat de l’équipe modifie l’absence et les démissions : sous 50 les absences augmentent, sous 30 une personne démissionne en fin d’année, et sous 45 toute personne payée sous 95 % de sa référence démissionne. La protection contre les départs compte comme du climat en plus pour ces seuils."))}</p><div class="drawer-cards">${Object.entries(D.hrStrategies).map(([id, choice]) => optionCard(itemLabel(choice.name), `${pct(choice.absenteeism)} ${L("expected work time lost to absence", "de temps de travail susceptible d’être perdu pour absence")} · ${L("staff climate", "climat de travail")} ${signed(choice.climate)} · ${L("resignation protection", "protection contre les départs")} +${choice.retention || 0}`, "hr:strategy", { kind: "hr-strategy", targetId: id }, `${money(choice.cost)}/${L("year", "an")}`)).join("")}</div>`;
-    if (ui.drawer === "pricing") return `<p>${escapeHtml(L("Price sensitivity shows how strongly requests may change when the price changes. Only open services are listed: open a service first to price it.", "La sensibilité au prix indique dans quelle mesure les demandes peuvent changer lorsque le prix évolue. Seuls les services ouverts sont listés : ouvrez d’abord un service pour fixer son prix."))}</p><div class="price-editor">${D.services.filter((service) => planned.services[service.id].active).map((service) => { const current = ui.decisionDrafts[`price:${service.id}`] ?? planned.services[service.id].price; return `<article><div><strong>${escapeHtml(serviceName(service.id))}</strong><span>${escapeHtml(L("Price sensitivity", "Sensibilité au prix"))}: ${escapeHtml(priceSensitivity(service.elasticity))}</span><span>${escapeHtml(L("Money left after direct supplies", "Argent restant après les fournitures directes"))}: ${money(current * (1 - service.variableCost))} · ${escapeHtml(L(`supplies ${pct(service.variableCost)}`, `fournitures ${pct(service.variableCost)}`))}</span></div><label><span>${escapeHtml(L("Price", "Prix"))}</span><input type="number" min="1" max="5000" value="${current}" data-draft-price="${service.id}" data-draft-key="price:${service.id}"></label><button class="button primary" data-review-price="${service.id}">${escapeHtml(L("Review price", "Examiner le prix"))}</button></article>`; }).join("")}</div>`;
-    if (ui.drawer === "finance") { const loan = planned.finance.loan; return loan ? `${optionCard(L("Repay loan early", "Rembourser l’emprunt par anticipation"), `${money(loan.remaining)} ${L("remaining principal", "de capital restant")}`, "finance:loan", { kind: "repay-loan" })}` : `<div class="drawer-cards">${[30000, 50000, 100000].map((amount) => optionCard(L("Five-year loan", "Emprunt sur cinq ans"), L("6% interest on remaining principal; one outstanding loan at a time.", "Intérêt de 6 % sur le capital restant ; un seul emprunt à la fois."), "finance:loan", { kind: "loan", value: amount }, money(amount))).join("")}</div>`; }
-    if (ui.drawer === "market") return `<div class="drawer-cards">${Object.entries(D.segments).map(([id, segment]) => optionCard(itemLabel(segment.name), segmentAppetite(segment), "market:focus", { kind: "market-focus", targetId: id })).join("")}</div>`;
-    if (ui.drawer === "location") return `<div class="drawer-cards">${Object.entries(D.locations).map(([id, location]) => { const moving = id !== planned.location.sectorId; const note = moving && planned.location.parking ? ` ${L("Moving removes the current parking.", "Le déménagement supprime le parking actuel.")}` : ""; return optionCard(itemLabel(location.name), itemLabel(location.description) + note, "location:sector", { kind: "location", targetId: id }, `${moving ? `${money(location.moveCost)} ${L("once to move", "une fois pour déménager")} · ` : ""}${money(location.rent)}/${L("year", "an")} · ${decimal(location.averageRoundTripKm, 0)} km ${L("average return trip", "aller-retour moyen")}`); }).join("")}${optionCard(planned.location.parking ? L("Remove parking", "Supprimer le parking") : L("Add parking", "Ajouter un parking"), L("Parking improves access and some demand, but increases the modelled share of car travel.", "Le parking améliore l’accès et une partie de la demande, mais augmente la part modélisée des déplacements en voiture."), "location:parking", { kind: "parking", value: !planned.location.parking }, planned.location.parking ? "" : `${money(D.locations[planned.location.sectorId].parkingCost)} ${L("once", "une fois")} · ${money(D.locations[planned.location.sectorId].parkingMaintenance)}/${L("year", "an")}`)}</div>`;
+    if (ui.drawer === "relations") return `<p class="drawer-link"><button class="text-button" data-open-drawer="marketing">${escapeHtml(L("Communication with clients", "Communication avec les clients"))} ›</button></p><div class="drawer-cards">${Object.entries(D.socialActions).map(([id, action]) => optionCard(itemLabel(action.name), itemLabel(action.note), `social:${id}`, { kind: "social-action", targetId: id }, `${money(action.cost)} ${L("once", "une fois")}${action.supportHours ? ` · ${number(action.supportHours)} ${L("support hours", "heures de soutien")}` : ""}`, id)).join("")}</div>`;
+    if (ui.drawer === "hr") return `<details class="note-repliee"><summary>${escapeHtml(L("Climate thresholds", "Seuils du climat"))}</summary><p>${escapeHtml(L("Staff climate changes absence and resignations: below 50 people are absent more, below 30 someone resigns at year end, and below 45 anyone paid under 95% of their benchmark resigns. Resignation protection counts as extra climate for those checks.", "Le climat de l’équipe modifie l’absence et les démissions : sous 50 les absences augmentent, sous 30 une personne démissionne en fin d’année, et sous 45 toute personne payée sous 95 % de sa référence démissionne. La protection contre les départs compte comme du climat en plus pour ces seuils."))}</p></details><div class="drawer-cards">${Object.entries(D.hrStrategies).map(([id, choice]) => choiceCard(id === planned.hr.strategy, itemLabel(choice.name), `${pct(choice.absenteeism)} ${L("expected work time lost to absence", "de temps de travail susceptible d’être perdu pour absence")} · ${L("staff climate", "climat de travail")} ${signed(choice.climate)} · ${L("resignation protection", "protection contre les départs")} +${choice.retention || 0}`, "hr:strategy", { kind: "hr-strategy", targetId: id }, `${money(choice.cost)}/${L("year", "an")}`)).join("")}</div>`;
+    if (ui.drawer === "pricing") return `<p><strong>${escapeHtml(L("Your clients", "Vos clients"))}: ${escapeHtml(itemLabel(D.segments[planned.marketFocus].name))}</strong> — ${escapeHtml(L("the price they accept depends on the type of client and on their trust in the clinic.", "le prix qu’ils acceptent dépend du type de clients et de leur confiance dans la clinique."))}</p><details class="note-repliee"><summary>${escapeHtml(L("Price sensitivity", "Sensibilité au prix"))}</summary><p>${escapeHtml(L("Price sensitivity shows how strongly requests may change when the price changes. Only open services are listed: open a service first to price it.", "La sensibilité au prix indique dans quelle mesure les demandes peuvent changer lorsque le prix évolue. Seuls les services ouverts sont listés : ouvrez d’abord un service pour fixer son prix."))}</p></details><div class="price-editor">${D.services.filter((service) => planned.services[service.id].active).map((service) => { const current = ui.decisionDrafts[`price:${service.id}`] ?? planned.services[service.id].price; const accepte = acceptedPrice(service, planned); const known = acceptedKnown(service, planned, accepte); const au_dessus = Number(current) > known.high + .5; return `<article><div><strong>${escapeHtml(serviceName(service.id))}</strong><span class="${au_dessus ? "warn-text" : ""}">${escapeHtml(L("Price your clients accept", "Prix accepté par vos clients"))}: ${escapeHtml(acceptedText(known))}</span>${priceScale(Number(current), known)}<span>${escapeHtml(L("Price sensitivity", "Sensibilité au prix"))}: ${escapeHtml(priceSensitivity(service.elasticity))}</span><span>${escapeHtml(L("Money left after direct supplies", "Argent restant après les fournitures directes"))}: ${money(current * (1 - service.variableCost))} · ${escapeHtml(L(`supplies ${pct(service.variableCost)}`, `fournitures ${pct(service.variableCost)}`))}</span></div><label><span>${escapeHtml(L("Price", "Prix"))}</span><input type="number" min="1" max="5000" value="${current}" data-draft-price="${service.id}" data-draft-key="price:${service.id}"></label><button class="button primary" data-review-price="${service.id}">${escapeHtml(L("Review price", "Examiner le prix"))}</button></article>`; }).join("")}</div>`;
+    if (ui.drawer === "finance") { const loan = planned.finance.loan; const rate = loanRate(state); const misses = bankMisses(state); const bankLine = `<p class="bank-standing ${misses ? "warn-text" : ""}"><strong>${escapeHtml(L("The bank", "La banque"))}</strong> : ${escapeHtml(misses === 0 ? L("promise kept last year", "promesse tenue l’an dernier") : L(`promise broken ${misses} year${misses > 1 ? "s" : ""} in a row`, `promesse non tenue ${misses} an${misses > 1 ? "s" : ""} de suite`))} — ${escapeHtml(rate === null ? L("no new loan", "aucun nouvel emprunt") : L(`loans at ${pct(rate)}`, `emprunt à ${pct(rate)}`))}.</p>`; if (!loan && rate === null) return bankLine; return bankLine + (loan ? `${optionCard(L("Repay loan early", "Rembourser l’emprunt par anticipation"), `${money(loan.remaining)} ${L("remaining principal", "de capital restant")}`, "finance:loan", { kind: "repay-loan" })}` : `<div class="drawer-cards"><article class="choice-card"><h3>${escapeHtml(L("Five-year loan", "Emprunt sur cinq ans"))}</h3><p>${escapeHtml(L(`${pct(rate)} a year on the remaining principal · one loan at a time`, `${pct(rate)} par an sur le capital restant · un emprunt à la fois`))}</p>${compareOptions([30000, 50000, 100000].map((amount) => ({ label: money(amount), key: "finance:loan", payload: { kind: "loan", value: amount }, button: L("Borrow", "Emprunter") })))}</article></div>`); }
+    if (ui.drawer === "market") return `<div class="drawer-cards">${Object.entries(D.segments).map(([id, segment]) => choiceCard(id === planned.marketFocus, itemLabel(segment.name), segmentAppetite(segment), "market:focus", { kind: "market-focus", targetId: id })).join("")}</div>`;
+    if (ui.drawer === "location") return `<div class="drawer-cards">${Object.entries(D.locations).map(([id, location]) => { const moving = id !== planned.location.sectorId; const note = moving && planned.location.parking ? ` ${L("Moving removes the current parking.", "Le déménagement supprime le parking actuel.")}` : ""; return choiceCard(id === planned.location.sectorId, itemLabel(location.name), itemLabel(location.description) + note, "location:sector", { kind: "location", targetId: id }, `${moving ? `${money(location.moveCost)} ${L("once to move", "une fois pour déménager")} · ` : ""}${money(location.rent)}/${L("year", "an")} · ${decimal(location.averageRoundTripKm, 0)} km ${L("average return trip", "aller-retour moyen")}`); }).join("")}${optionCard(planned.location.parking ? L("Remove parking", "Supprimer le parking") : L("Add parking", "Ajouter un parking"), L("Parking improves access and some demand, but increases the modelled share of car travel.", "Le parking améliore l’accès et une partie de la demande, mais augmente la part modélisée des déplacements en voiture."), "location:parking", { kind: "parking", value: !planned.location.parking }, planned.location.parking ? "" : `${money(D.locations[planned.location.sectorId].parkingCost)} ${L("once", "une fois")} · ${money(D.locations[planned.location.sectorId].parkingMaintenance)}/${L("year", "an")}`)}</div>`;
     if (ui.drawer === "marketing") {
-      if (!ui.drawerContext || !D.marketingStrategies[ui.drawerContext]) return `<div class="drawer-menu">${Object.keys(D.marketingStrategies).map((id) => `<button data-drawer-context="${id}"><strong>${escapeHtml(strategyLabel(id))}</strong><span>${escapeHtml(itemLabel(D.marketingStrategies[id][planned.marketing[id]].name))}</span><em>›</em></button>`).join("")}</div>`;
-      return `<button class="text-button" data-drawer-context="">‹ ${escapeHtml(L("Market strategies", "Stratégies de marché"))}</button><div class="drawer-cards">${Object.entries(D.marketingStrategies[ui.drawerContext]).map(([id, choice]) => optionCard(itemLabel(choice.name), `${choice.demand ? signed(choice.demand, "percent") + " " + L("demand", "demande") : L("Demand unchanged", "Demande inchangée")}${choice.willingness ? ` · ${signed(choice.willingness, "percent")} ${L("price clients accept", "de prix accepté par les clients")}` : ""}`, `marketing:${ui.drawerContext}`, { kind: "marketing-strategy", strategy: ui.drawerContext, targetId: id }, `${money(choice.cost)}/${L("year", "an")} · ${number(choice.supportHours || 0)} ${L("support hours", "heures de soutien")}`)).join("")}</div>`;
+      const ladder = (strategy, describe) => `<h3 class="drawer-section">${escapeHtml(strategy === "communication" ? L("Communication with clients", "Communication avec les clients") : L("Local market study", "Étude du marché local"))}</h3><div class="drawer-cards">${Object.entries(D.marketingStrategies[strategy]).map(([id, choice]) => choiceCard(planned.marketing[strategy] === id, itemLabel(choice.name), describe(choice), `marketing:${strategy}`, { kind: "marketing-strategy", strategy, targetId: id }, `${money(choice.cost)}/${L("year", "an")}${choice.supportHours ? ` · ${number(choice.supportHours)} ${L("support hours", "heures de soutien")}` : ""}`)).join("")}</div>`;
+      const comm = (c) => c.trust ? [L(`+${c.trust} trust the first year, then ×${decimal(D.socialModel?.repeatDecay ?? 1, 1)} each year kept`, `+${c.trust} de confiance la première année, puis ×${decimal(D.socialModel?.repeatDecay ?? 1, 1)} chaque année maintenue`), `${signed(c.demand, "percent")} ${L("requests", "demandes")}`, `${signed(c.willingness || 0, "percent")} ${L("accepted price", "prix accepté")}`].join(" · ") : L("No programme", "Aucun programme");
+      const study = (c) => c.precision > 0 ? L(`Accepted prices known to within about ±${pct(c.precision)}`, `Prix acceptés connus à ±${pct(c.precision)} environ`) : L("Accepted prices known exactly", "Prix acceptés connus exactement");
+      return `${ladder("communication", comm)}${ladder("geomarketing", study)}<p class="drawer-link"><button class="text-button" data-open-drawer="market">${escapeHtml(L("Market focus", "Marché cible"))} ›</button></p>`;
     }
     if (ui.drawer === "sustainability") return renderSustainabilityOptions(planned);
     return "";
@@ -2799,7 +3666,7 @@
   }
 
   function drawerTitles() {
-    const titles = { relations: L("Team and clients", "Équipe et clients"), person: L("Team member", "Membre de l’équipe"), setup: L("Game setup", "Paramétrage de la partie"), plan: L("Current plan", "Plan actuel"), recruitment: L("Post a vacancy", "Publier une offre"), staffPerson: L("Manage pay", "Gérer le salaire"), staffExit: L("Let someone go", "Se séparer d’une personne"), staffAllocation: L("Change time allocation", "Modifier l’affectation du temps"), hoursByService: L("Hours by service", "Heures par service"), serviceLedger: L("What each service brings in", "Ce que rapporte chaque service"), export: L("Export report", "Exporter le rapport"), services: L("Explore services", "Explorer les services"), rooms: L("Manage rooms", "Gérer les salles"), equipment: L("Manage equipment", "Gérer l’équipement"), training: L("Plan training", "Planifier une formation"), capabilities: L("Who can do what", "Qui peut faire quoi"), opening: L("Opening schedule", "Horaires d’ouverture"), dropoff: L("Drop-off workflow", "Parcours de dépôt"), stock: L("Stock strategy", "Stratégie de stock"), hr: L("HR strategy", "Stratégie RH"), pricing: L("Service prices", "Prix des services"), finance: L("Financing", "Financement"), market: L("Market focus", "Marché cible"), location: L("Location and parking", "Implantation et parking"), marketing: L("Market strategies", "Stratégies de marché"), sustainability: L("Transition options", "Options de transition") };
+    const titles = { atelier: L("Teacher’s workshop", "Atelier de l’enseignant"), relations: L("Team and clients", "Équipe et clients"), person: L("Team member", "Membre de l’équipe"), setup: L("Game setup", "Paramétrage de la partie"), plan: L("Current plan", "Plan actuel"), recruitment: L("Post a vacancy", "Publier une offre"), staffPerson: L("Manage pay", "Gérer le salaire"), staffExit: L("Let someone go", "Se séparer d’une personne"), staffAllocation: L("Change time allocation", "Modifier l’affectation du temps"), hoursByService: L("Hours by service", "Heures par service"), serviceLedger: L("What each service brings in", "Ce que rapporte chaque service"), export: L("Export report", "Exporter le rapport"), services: L("Explore services", "Explorer les services"), rooms: L("Manage rooms", "Gérer les salles"), equipment: L("Manage equipment", "Gérer l’équipement"), training: L("Plan training", "Planifier une formation"), capabilities: L("Who can do what", "Qui peut faire quoi"), opening: L("Opening schedule", "Horaires d’ouverture"), dropoff: L("Drop-off workflow", "Parcours de dépôt"), stock: L("Stock strategy", "Stratégie de stock"), hr: L("HR strategy", "Stratégie RH"), pricing: L("Service prices", "Prix des services"), finance: L("Financing", "Financement"), market: L("Market focus", "Marché cible"), location: L("Location and parking", "Implantation et parking"), marketing: L("Communication and market study", "Communication et étude de marché"), sustainability: L("Transition options", "Options de transition") };
     return titles;
   }
 
@@ -2831,17 +3698,15 @@
     const caseItems = (p
       ? latest.serviceResults.map((row) => [row, row.honored - (previous.serviceResults.find((item) => item.id === row.id)?.honored || 0)]).filter(([, delta]) => delta).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
       : latest.serviceResults.filter((row) => row.active).map((row) => [row, row.honored]).sort((a, b) => b[1] - a[1])
-    ).slice(0, 3).map(([row, value]) => [`${serviceName(row.id)} — ${blockerText(row.bottleneck)}`, signed(value), value]);
+    ).slice(0, 3).map(([row, value]) => [serviceName(row.id), signed(value), value]);
     const variance = latest.operational.demandVariance;
     if (latest.operational.stockoutLost > 0) caseItems.push([L("Lost to stock-outs", "Perdus par rupture de stock"), signed(-latest.operational.stockoutLost), -latest.operational.stockoutLost]);
-    const climateLabels = { hr: L("HR strategy", "Stratégie RH"), openingHours: L("Extra opening hours", "Horaires étendus"), pay: L("Pay vs benchmark", "Salaire vs référence"), overtime: L("Overtime", "Heures supplémentaires"), workload: L("Workload level", "Niveau de charge"), departure: L("Someone was let go", "Départ imposé") };
-    const trustLabels = { served: L("Share of requests served", "Part des demandes traitées"), communication: L("Client communication", "Communication client"), access: L("Low-carbon access plan", "Plan d’accès bas carbone"), pace: L("Service pace", "Rythme des services"), dropoff: L("Drop-off convenience", "Commodité du dépôt"), stockouts: L("Stock-outs", "Ruptures de stock") };
+    const climateLabels = { hr: L("HR strategy", "Stratégie RH"), openingHours: L("Extra opening hours", "Horaires étendus"), pay: L("Pay vs benchmark", "Salaire vs référence"), overtime: L("Overtime", "Heures supplémentaires"), workload: L("Workload level", "Niveau de charge"), pace: L("Rushed pace", "Rythme pressé"), departure: L("Someone was let go", "Départ imposé") };
+    const trustLabels = { served: L("Share of requests served", "Part des demandes traitées"), communication: L("Client communication", "Communication client"), access: L("Low-carbon access plan", "Plan d’accès bas carbone"), pace: L("Service pace", "Rythme des services"), price: L("Prices judged too high", "Prix jugés trop élevés"), refused: L("Refused clients piling up", "Clients refusés qui s’accumulent"), carbon: L("Footprint per case", "Empreinte par cas"), dropoff: L("Drop-off convenience", "Commodité du dépôt"), stockouts: L("Stock-outs", "Ruptures de stock") };
     const partItems = (parts, labels) => top(Object.entries(parts || {}).map(([id, value]) => [labels[id] || id, value])).map(([label, value]) => [label, points(value), value]);
     const blocks = [
       [L("Net result", "Résultat net"), money(f.netResult), moneyItems],
       [L("Cases served", "Cas traités"), number(latest.operational.totalHonored), caseItems],
-      [L("Staff climate", "Climat de l’équipe"), number(latest.social.after.staffClimate), partItems(latest.social.climateParts, climateLabels)],
-      [L("Client trust", "Confiance des clients"), number(latest.social.after.clientTrust), partItems(latest.social.trustParts, trustLabels)]
     ];
     return `<section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(p ? L("Why each number changed", "Pourquoi chaque indicateur a changé") : L("How the result is built", "Comment le résultat se forme"))}</h2><p>${escapeHtml(p ? L("Largest contributions compared with the previous year.", "Principales contributions par rapport à l’année précédente.") : L("Largest contributions this year.", "Principales contributions cette année."))}</p></div></div><div class="why-grid">${blocks.map(([title, value, items]) => `<article><h3>${escapeHtml(title)}</h3><strong>${escapeHtml(value)}</strong><ul>${items.length ? items.map(([label, shown, raw]) => `<li><span>${escapeHtml(label)}</span><em class="${raw >= 0 ? "good-text" : "bad-text"}">${escapeHtml(shown)}</em></li>`).join("") : `<li><span>${escapeHtml(L("No notable change", "Aucun changement notable"))}</span></li>`}</ul></article>`).join("")}</div></section>`;
   }
@@ -2862,15 +3727,15 @@
     const previous = state.history[state.history.length - 2];
     const carbon = latest.carbon;
     const changes = [
-      { label: L("Net result", "Résultat net"), value: money(latest.financial.netResult), good: latest.financial.netResult >= 0 },
-      { label: L("Cases served", "Cas traités"), value: `${number(latest.operational.totalHonored)} / ${number(latest.operational.totalDemand)}`, good: latest.operational.honoredRate >= .82 },
+      { label: L("Net result", "Résultat net"), value: money(latest.financial.netResult), good: latest.financial.netResult >= 0, delta: previous ? signed(latest.financial.netResult - previous.financial.netResult, "money") : "" },
+      { label: L("Cases served", "Cas traités"), value: `${number(latest.operational.totalHonored)} / ${number(latest.operational.totalDemand)}`, good: latest.operational.honoredRate >= .82, delta: previous ? signed(latest.operational.totalHonored - previous.operational.totalHonored) : "" },
       // Judged on the rounded figure the card actually shows: a half-point drift that rounds to the
       // same number must not carry a warning badge, or the badge contradicts the value beside it.
-      { label: L("Staff climate", "Climat de l’équipe"), value: number(latest.social.after.staffClimate), good: Math.round(latest.social.after.staffClimate) >= Math.round(latest.social.before.staffClimate) },
-      { label: L("Carbon footprint", "Empreinte carbone"), value: carbon ? tonnes(carbon.total) : L("Not available for migrated year", "Non disponible pour l’année migrée"), good: carbon ? (!previous?.carbon || carbon.total <= previous.carbon.total) : false },
+      { label: L("Staff climate", "Climat de l’équipe"), value: number(latest.social.after.staffClimate), good: Math.round(latest.social.after.staffClimate) >= Math.round(latest.social.before.staffClimate), delta: signed(Math.round(latest.social.after.staffClimate) - Math.round(latest.social.before.staffClimate)) },
+      { label: L("Carbon footprint", "Empreinte carbone"), value: carbon ? tonnes(carbon.total) : L("Not available for migrated year", "Non disponible pour l’année migrée"), good: carbon ? (!previous?.carbon || carbon.total <= previous.carbon.total) : false, delta: carbon && previous?.carbon ? `${carbon.total - previous.carbon.total >= 0 ? "+" : "−"}${tonnes(Math.abs(carbon.total - previous.carbon.total))}` : "" },
       // These two shift demand every year and previously had no surface anywhere in the interface.
-      { label: itemLabel(D.socialIndicators.referralSupport), value: number(latest.social.after.referralSupport), good: Math.round(latest.social.after.referralSupport) >= Math.round(latest.social.before.referralSupport) },
-      { label: itemLabel(D.socialIndicators.communityPressure), value: number(latest.social.after.communityPressure), good: Math.round(latest.social.after.communityPressure) <= Math.round(latest.social.before.communityPressure) }
+      { label: itemLabel(D.socialIndicators.referralSupport), value: number(latest.social.after.referralSupport), good: Math.round(latest.social.after.referralSupport) >= Math.round(latest.social.before.referralSupport), delta: signed(Math.round(latest.social.after.referralSupport) - Math.round(latest.social.before.referralSupport)) },
+      { label: itemLabel(D.socialIndicators.communityPressure), value: number(latest.social.after.communityPressure), good: Math.round(latest.social.after.communityPressure) <= Math.round(latest.social.before.communityPressure), delta: signed(Math.round(latest.social.after.communityPressure) - Math.round(latest.social.before.communityPressure)) }
     ];
     const costDrivers = [
       [L("Payroll and charges", "Salaires et charges"), latest.financial.payroll + latest.financial.socialCharges],
@@ -2902,12 +3767,13 @@
         : "";
       return `<section class="card-section prediction-verdict ${latest.prediction.match ? "matched" : "missed"}"><div class="panel-heading"><h2>${escapeHtml(L("What you expected, and what the clinic counted", "Ce que vous attendiez, et ce que la clinique a compté"))}</h2></div><div class="comparison-list"><div><strong>${escapeHtml(L("You predicted", "Vous aviez prédit"))}</strong><span>${escapeHtml(label(latest.prediction.predicted))}</span><em>→ ${escapeHtml(label(latest.prediction.actual))}</em></div></div><p><strong>${escapeHtml(L("Why the clinic answers this", "Pourquoi la clinique répond cela"))}</strong> ${escapeHtml(basis)}</p>${yours ? `<p>${escapeHtml(yours)}</p>` : ""}${margin ? `<p>${escapeHtml(margin)}</p>` : ""}<p class="arguable">${escapeHtml(L("The clinic counts requests, hours, rooms and equipment. It does not count what a case asks of the person treating it, what a refused client tells a neighbour, or what the work is for. If your reasoning rested on something in that second list, you are not wrong — you have found an edge of the model. Write it down with the figure that exposed it.", "La clinique compte des demandes, des heures, des salles et de l’équipement. Elle ne compte pas ce qu’un cas exige de la personne qui le traite, ce qu’un client refusé raconte autour de lui, ni ce à quoi sert le travail. Si votre raisonnement portait sur cette seconde liste, vous n’avez pas tort — vous avez trouvé une limite du modèle. Écrivez-la, avec le chiffre qui l’a révélée."))}</p><p class="no-effect">${escapeHtml(L("Nothing here is scored.", "Rien ici n’est noté."))}</p></section>`;
     })() : "";
-    const causeRows = `<article><span>${escapeHtml(L("Main constraint", "Contrainte principale"))}</span><strong>${escapeHtml(blockerText(latest.operational.mainConstraint))}</strong><em>${escapeHtml(L("Explains unmet requests or weak revenue", "Explique les demandes non traitées ou les recettes insuffisantes"))}</em></article><article><span>${escapeHtml(L("Largest cost", "Coût principal"))}</span><strong>${escapeHtml(costDrivers[0][0])}: ${money(costDrivers[0][1])}</strong><em>${escapeHtml(L("Largest annual financial pressure", "Principale pression financière annuelle"))}</em></article>${carbon ? `<article><span>${escapeHtml(L("Largest carbon source", "Principale source de carbone"))}</span><strong>${escapeHtml(sourceLabel(mainCarbon))}: ${tonnes(carbon.bySource[mainCarbon])}</strong><em>${escapeHtml(mainCarbon === "building" ? L("Opening hours, rooms, and energy choices", "Horaires, salles et choix énergétiques") : mainCarbon === "clinical" ? L("Anaesthetic use in eligible procedures", "Gaz anesthésiques des actes concernés") : mainCarbon === "waste" ? L("Waste produced by treated cases", "Déchets produits par les cas traités") : L("Client numbers, location, and parking", "Nombre de clients, implantation et parking"))}</em></article>` : ""}`;
-    return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Year results", "Résultats de l’année"))}</h1><p>${escapeHtml(L("See the outcome, identify the causes, then record what the team learned.", "Observez le résultat, identifiez les causes, puis consignez les apprentissages de l’équipe."))}</p></div><div class="button-row"><strong>${escapeHtml(t("app.year", { year: latest.turn, target: state.rules.targetYear }))}</strong><button class="button primary" data-domain="overview">${escapeHtml(L(`Plan Year ${state.year} →`, `Planifier l’année ${state.year} →`))}</button></div></div>
+    const causeRows = `<article><span>${escapeHtml(L("Main constraint", "Contrainte principale"))}</span><strong>${escapeHtml(blockerText(latest.operational.mainConstraint))}</strong></article><article><span>${escapeHtml(L("Largest cost", "Coût principal"))}</span><strong>${escapeHtml(costDrivers[0][0])}: ${money(costDrivers[0][1])}</strong></article>${carbon ? `<article><span>${escapeHtml(L("Largest carbon source", "Principale source de carbone"))}</span><strong>${escapeHtml(sourceLabel(mainCarbon))}: ${tonnes(carbon.bySource[mainCarbon])}</strong></article>` : ""}`;
+    return `<section class="page"><div class="page-heading"><div><h1>${escapeHtml(L("Year results", "Résultats de l’année"))}</h1><p>${escapeHtml(L("The year as played: its figures, its signals, its causes.", "L’année telle que jouée : ses chiffres, ses signaux, ses causes."))}</p></div><div class="button-row"><strong>${escapeHtml(t("app.year", { year: latest.turn, target: state.rules.targetYear }))}</strong><button class="button primary" data-domain="overview">${escapeHtml(L(`Plan Year ${state.year} →`, `Planifier l’année ${state.year} →`))}</button></div></div>
       ${resolvedGridNote(latest.turn)}
-      <div class="dashboard-grid compact-three">${changes.map((item) => metricCard(item.label, item.value, item.good ? L("Improved or on track", "Amélioration ou objectif atteint") : L("Needs attention", "À surveiller"), item.good ? "good" : "warn")).join("")}</div>
+      <div class="dashboard-grid compact-three">${changes.map((item) => metricCard(item.label, item.value, item.delta ? L(`${item.delta} in a year`, `${item.delta} sur un an`) : "", item.good ? "good" : "warn")).join("")}</div>
       ${verdict}
-      <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("What drove the result", "Origine du résultat"))}</h2></div><span class="panel-links"><button class="text-button" data-open-drawer="serviceLedger">${escapeHtml(L("What each service brings in", "Ce que rapporte chaque service"))} ›</button></span></div><div class="cause-list">${causeRows}</div><h3>${escapeHtml(L("Actions taken", "Actions réalisées"))}</h3><div class="chips">${latest.actions?.length ? latest.actions.map((action) => `<span class="chip">${escapeHtml(actionLabel(action))}</span>`).join("") : `<span class="chip">${escapeHtml(t("results.noAction"))}</span>`}</div>${(latest.departures || []).length ? `<div class="recruitment-results">${latest.departures.map((item) => `<p class="bad-text">${escapeHtml(item.name)}: ${escapeHtml(departureText(item.reason))}</p>`).join("")}</div>` : ""}${latest.recruitment?.length ? `<div class="recruitment-results">${latest.recruitment.map((row) => `<p class="${row.accepted ? "good-text" : "bad-text"}">${escapeHtml(candidateById(row.candidateId)?.name || row.candidateId)}: ${escapeHtml(row.accepted ? t("staff.accepted") : t("staff.refused"))}</p>`).join("")}</div>` : ""}</section>
+      ${renderSignals(latest)}
+      <section class="card-section"><div class="panel-heading"><div><h2>${escapeHtml(L("What drove the result", "Origine du résultat"))}</h2></div><span class="panel-links"><button class="text-button" data-open-drawer="serviceLedger">${escapeHtml(L("What each service brings in", "Ce que rapporte chaque service"))} ›</button></span></div><div class="cause-list">${causeRows}</div>${latest.operational.totalDemand > latest.operational.totalHonored ? `<h3>${escapeHtml(L(`${number(latest.operational.totalDemand - latest.operational.totalHonored)} requests refused, by cause`, `${number(latest.operational.totalDemand - latest.operational.totalHonored)} demandes refusées, par cause`))}</h3>${refusalBar(latest)}` : ""}<h3>${escapeHtml(L("Actions taken", "Actions réalisées"))}</h3><div class="chips">${latest.actions?.length ? latest.actions.map((action) => `<span class="chip">${escapeHtml(actionLabel(action))}</span>`).join("") : `<span class="chip">${escapeHtml(t("results.noAction"))}</span>`}</div>${(latest.departures || []).length ? `<div class="recruitment-results">${latest.departures.map((item) => `<p class="bad-text">${escapeHtml(item.name)}: ${escapeHtml(departureText(item.reason))}</p>`).join("")}</div>` : ""}${latest.recruitment?.length ? `<div class="recruitment-results">${latest.recruitment.map((row) => `<p class="${row.accepted ? "good-text" : "bad-text"}">${escapeHtml(candidateById(row.candidateId)?.name || row.candidateId)}: ${escapeHtml(row.accepted ? t("staff.accepted") : t("staff.refused"))}</p>`).join("")}</div>` : ""}</section>
       ${renderWhyChanged(latest, previous)}
       ${renderSetupRecord()}
       <section class="card-section"><div class="panel-heading"><h2>${escapeHtml(L("Earlier years", "Années précédentes"))}</h2></div><div class="history-accordions">${state.history.slice().reverse().map((report) => `<details ${report.turn === latest.turn ? "open" : ""}><summary><strong>${escapeHtml(t("app.year", { year: report.turn, target: state.rules.targetYear }))}</strong><span>${money(report.financial.netResult)} · ${number(report.operational.totalHonored)} ${escapeHtml(t("common.cases"))}${report.carbon ? ` · ${tonnes(report.carbon.total)}` : ""}</span></summary><p>${escapeHtml(blockerText(report.operational.mainConstraint))}</p></details>`).join("")}</div></section>
@@ -2924,8 +3790,6 @@
   function renderEndModal() {
     if (!state.endState) return "";
     const latest = state.history.find((report) => report.turn === state.endState.reportTurn) || state.history[state.history.length - 1];
-    const goals = goalChecks(latest, state);
-    const passed = goals.filter((goal) => goal.ok).length;
     const failed = state.endState.type === "failure";
     const strained = state.endState.type === "strained";
     const tone = failed ? "bad" : strained ? "warn" : "good";
@@ -2934,7 +3798,7 @@
     const textKey = failed ? "end.failureText" : strained ? "end.strainedText" : "end.successText";
     // The symbol is decorative; the verdict has to reach a screen reader as text, and the treasury
     // that produced it was shown nowhere at all.
-    return `<div class="modal-backdrop"><section class="modal end-modal" role="dialog" aria-modal="true" aria-labelledby="end-title"><div class="end-symbol ${tone}" aria-hidden="true">${symbol}</div><h2 id="end-title">${escapeHtml(t(titleKey))}</h2><p>${escapeHtml(t(textKey))}</p><p class="end-treasury ${tone}"><strong>${escapeHtml(t("end.endTreasury"))}: ${money(latest.financial.treasury)}</strong></p><strong>${escapeHtml(t("end.score", { passed, total: goals.length }))}</strong><div class="goal-summary">${goals.map((goal) => `<span class="${goal.ok ? "good" : "bad"}">${goal.ok ? "✓" : "○"} ${escapeHtml(itemLabel(goal.label))}</span>`).join("")}</div><div class="button-row"><button class="button primary" data-continue>${escapeHtml(t("app.continue"))}</button><button class="button secondary" data-export>${escapeHtml(t("app.export"))}</button><button class="button danger" data-reset>${escapeHtml(t("app.restart"))}</button></div></section></div>`;
+    return `<div class="modal-backdrop"><section class="modal end-modal" role="dialog" aria-modal="true" aria-labelledby="end-title"><div class="end-symbol ${tone}" aria-hidden="true">${symbol}</div><h2 id="end-title">${escapeHtml(t(titleKey))}</h2><p>${escapeHtml(t(textKey))}</p><p class="end-treasury ${tone}"><strong>${escapeHtml(t("end.endTreasury"))}: ${money(latest.financial.treasury)}</strong></p><strong>${(() => { const kept = latest.commitments || []; return escapeHtml(L(`${kept.filter((c) => c.ok).length} of ${kept.length} promises kept in the last year`, `${kept.filter((c) => c.ok).length} engagements tenus sur ${kept.length} la dernière année`)); })()}</strong>${endEngagements()}<div class="button-row"><button class="button primary" data-continue>${escapeHtml(t("app.continue"))}</button><button class="button secondary" data-export>${escapeHtml(t("app.export"))}</button><button class="button danger" data-reset>${escapeHtml(t("app.restart"))}</button></div></section></div>`;
   }
 
   function renderDomain(planned, forecast) {
@@ -2947,10 +3811,16 @@
   }
 
   function render() {
+    applyModelRules(state.modelRules);
     ensureCarbonBaseline();
     t = I18N.createTranslator(state.language);
     document.documentElement.lang = state.language;
     document.title = t("app.title");
+    if (ui.atelierView && ui.atelierUnlocked) {
+      document.querySelector("#app").innerHTML = renderAtelierPage();
+      restoreAtelierScroll();
+      return;
+    }
     const planned = plannedState();
     const { baseline, forecast } = forecastPair();
     document.querySelector("#app").innerHTML = `${renderHeader(planned)}${renderNav()}<div class="workspace"><main class="content">${renderDomain(planned, forecast)}</main>${renderPlanPanel(baseline, forecast)}</div>${renderHelp()}${renderEndModal()}${renderDrawer(planned, forecast)}${renderPassCheck(planned, forecast)}`;
@@ -3003,10 +3873,13 @@
       locale: locale(),
       scenario: { id: state.scenarioId, label: itemLabel(D.scenarios[state.scenarioId].name) },
       rules: clone(state.rules),
+      // The rules the game was played with: the original ones, or a teacher's changes, setting by setting.
+      modelRules: (() => { const c = cleanRules(state.modelRules); const r = rulesSummary(state.modelRules); return c ? { nom: c.nom || "", monnaie: c.monnaie ? c.monnaie.code : "EUR", regles: c, reglages: r.map(({ section, chemin, nom, origine, valeur, texteOrigine, texteValeur }) => ({ section, chemin: chemin || null, nom, origine: origine ?? texteOrigine, valeur: valeur ?? texteValeur })) } : { nom: "origine", monnaie: "EUR", reglages: [] }; })(),
       setup: clone(state.setup),
       setupLog: clone(state.setupLog || []),
       cashLog: clone(state.cashLog || []),
       decisionLog: clone(state.decisionLog || []),
+      runArchive: clone(state.runArchive || []),
       uiPreferences: clone(state.uiPreferences),
       playerTeam: clone(state.playerTeam),
       carbonMethod: { version: D.carbonModel.version, context: D.carbonModel.context, factors: Object.fromEntries(Object.entries(D.carbonModel.factorRegistry).map(([id, factor]) => [id, { value: factor.value, unit: factor.unit, year: factor.year, detail: itemLabel(factor.detail), source: factor.source }])), sources: D.carbonModel.sources, assumptions: D.carbonModel.assumptions, excluded: D.carbonModel.excluded },
@@ -3014,6 +3887,10 @@
       clinic: { year: state.year, treasury: state.treasury, clients: state.clients, reputation: state.reputation, services: state.services, staff: state.staff, operations: state.operations, hr: state.hr, location: state.location, marketing: state.marketing, finance: state.finance, sustainability: state.sustainability },
       years: state.history.map((report) => ({
         year: report.turn,
+        passedAt: report.passedAt || null,
+        commitments: clone(report.commitments || []),
+        signals: signalLines(report).map((l) => ({ tone: l.tone, cause: l.cause, effect: l.effect })),
+        grant: report.financial.grant || 0,
         actionIds: report.actions || [],
         actionLabels: (report.actions || []).map(actionLabel),
         legacyActions: report.legacyActions || [],
@@ -3029,10 +3906,9 @@
         predictedConstraint: report.prediction?.predicted || null,
         predictionMatched: report.prediction ? report.prediction.match : null,
         forecastShown: clone(report.forecastShown || null),
-        reflection: state.reflections[report.turn] || {},
         financial: clone(report.financial),
         operational: clone(report.operational),
-        serviceResults: clone(report.serviceResults),
+        serviceResults: clone(report.serviceResults).map((row) => ({ ...row, ...(row.acceptedPrice ? { acceptedPriceShown: acceptedText(acceptedKnown(SERVICE_BY_ID[row.id], { marketing: report.clinicSnapshot?.marketing || {} }, row.acceptedPrice)) } : {}) })),
         social: clone(report.social),
         recruitment: clone(report.recruitment || []),
         actionRecords: clone(report.actionRecords || []),
@@ -3043,6 +3919,28 @@
   }
 
   const SAUVEGARDE_KIND = "clinique-sauvegarde";
+
+  function resumeEssai(clinic) {
+    const archivedAt = new Date().toISOString();
+    return {
+      id: `${archivedAt}-${clinic.year}-${clinic.history.length}`,
+      archivedAt,
+      scenario: clinic.scenarioId,
+      teamCode: clinic.playerTeam?.teamCode || "",
+      yearReached: clinic.year,
+      years: clinic.history.map((report) => ({
+        year: report.turn,
+        netResult: report.financial.netResult,
+        treasury: report.financial.treasury,
+        demand: report.operational.totalDemand,
+        served: report.operational.totalHonored,
+        constraintId: report.operational.mainConstraint,
+        actionLabels: (report.actions || []).map(actionLabel),
+        forecastShown: clone(report.forecastShown || null)
+      })),
+      decisionLog: clone(clinic.decisionLog || [])
+    };
+  }
 
   function sauvegarderClinique() {
     saveState(); syncPlayerTeam();
@@ -3072,7 +3970,16 @@
       toast(L(`This save comes from another version of the game (${fichier.schemaVersion} against ${SCHEMA_VERSION}).`, `Cette sauvegarde vient d’une autre version du jeu (${fichier.schemaVersion} contre ${SCHEMA_VERSION}).`), "warn");
       return false;
     }
+    // Friday is played twice from one saved clinic — three years without the project, then three
+    // with it — and a load replaces the whole state. The run being replaced is summarised first and
+    // carried into the loaded clinic, so the comparison the week builds towards reaches the export.
+    const remplacee = state.history.length ? resumeEssai(state) : null;
+    const vus = new Set();
+    const archive = [...(Array.isArray(fichier.state.runArchive) ? fichier.state.runArchive : []), ...(state.runArchive || []), ...(remplacee ? [remplacee] : [])]
+      .filter((essai) => essai && !vus.has(essai.id) && vus.add(essai.id));
     state = hydrate(fichier.state);
+    state.runArchive = archive;
+    logDecision("load", `year:${state.year}`);
     ui.drawer = null; ui.drawerContext = null; ui.confirm = null; ui.originStack = [];
     saveState();
     render();
@@ -3097,30 +4004,77 @@
     return `<table><thead><tr>${headers.map((heading) => `<th>${escapeHtml(heading)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
   }
 
+  function heure(iso) {
+    if (!iso) return "—";
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "—";
+    return new Intl.DateTimeFormat(locale(), { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
+  }
+
+  function evenementLabel(event) {
+    return ({
+      add: L("Planned", "Planifiée"), revise: L("Changed", "Modifiée"), remove: L("Removed", "Retirée"),
+      prediction: L("Prediction made", "Prévision faite"), "prediction-resolved": L("Prediction checked", "Prévision vérifiée"),
+      pass: L("Year passed", "Année passée"), "undo-year": L("Year undone", "Année annulée"),
+      load: L("Saved clinic loaded", "Clinique enregistrée chargée"), rules: L("Model rules changed", "Règles du modèle changées"), sandbox: L("Play continued past the target year", "Partie poursuivie après l’année cible")
+    })[event] || event;
+  }
+
+  function detailEvenement(entry) {
+    const contrainte = (key) => { const [type, id] = String(key).split(":"); return blockerText({ type, id: id || undefined }); };
+    if (entry.event === "prediction") { const [, , ...reste] = String(entry.key).split(":"); return `${L("for year", "pour l’année")} ${String(entry.key).split(":")[1]} : ${contrainte(reste.join(":"))}`; }
+    if (entry.event === "prediction-resolved") { const [predite, reelle] = String(entry.key).split("→"); return `${contrainte(predite)} → ${contrainte(reelle)}`; }
+    if (["pass", "undo-year", "load", "sandbox"].includes(entry.event)) return "";
+    return entry.label || entry.key;
+  }
+
   function buildPrintableReportHtml() {
     const title = L("Veterinary clinic simulation report", "Rapport de simulation de clinique vétérinaire");
     const teamCode = state.playerTeam.teamCode || L("Not provided", "Non renseigné");
     const start = initialState(state.scenarioId, state.language, state.setup);
     const setupLines = setupLogLines();
     const goals = state.history.length ? goalChecks(state.history[state.history.length - 1], state) : [];
-    const reflectionFields = ["rationale", "expected", "observed", "surprise", "uncertainty"];
     const yearSections = state.history.map((report, reportIndex) => {
       const staffRows = report.operational.staffRows || [];
       const hourRows = report.operational.serviceHourRows || [];
-      const reflection = state.reflections[report.turn] || {};
       const snapshotStaff = report.clinicSnapshot?.staff || [];
-      const staffTable = staffRows.length ? reportTable([L("Person", "Personne"), L("Available", "Disponibles"), L("Assigned", "Affecté"), L("Used", "Utilisées"), L("Overtime", "Heures sup."), L("Unused", "Inutilisées"), L("Blocked", "Bloquées"), L("Workload", "Charge"), L("Allocations", "Affectations")], staffRows.map((row) => { const person = snapshotStaff.find((item) => item.id === row.id); return [escapeHtml(person?.name || row.id), number(row.availableHours), pct(row.assignedShare ?? 1), number(row.usedHours), number(row.overtimeHours || 0), number(row.unusedHours), number(row.blockedHours), pct(row.workload), escapeHtml((row.assignments || []).map((assignment) => `${serviceName(assignment.serviceId)} ${Math.round(assignment.share * 100)}%`).join(" · "))]; })) : `<p class="notice">${escapeHtml(L("Detailed staff allocation was not recorded for this migrated year.", "L’affectation détaillée du personnel n’a pas été enregistrée pour cette année migrée."))}</p>`;
+      const staffTable = staffRows.length ? reportTable([L("Person", "Personne"), L("Available", "Disponibles"), L("Assigned", "Affecté"), L("Worked", "Travaillées"), L("Overtime", "Heures sup."), L("Not worked", "Non travaillées"), L("Blocked", "Bloquées"), L("Workload", "Charge"), L("Allocations", "Affectations")], staffRows.map((row) => { const person = snapshotStaff.find((item) => item.id === row.id); return [escapeHtml(person?.name || row.id), number(row.availableHours), pct(row.assignedShare ?? 1), number(row.usedHours), number(row.overtimeHours || 0), number(row.unusedHours), number(row.blockedHours), pct(row.workload), escapeHtml((row.assignments || []).map((assignment) => `${serviceName(assignment.serviceId)} ${Math.round(assignment.share * 100)}%`).join(" · "))]; })) : `<p class="notice">${escapeHtml(L("Detailed staff allocation was not recorded for this migrated year.", "L’affectation détaillée du personnel n’a pas été enregistrée pour cette année migrée."))}</p>`;
       const serviceRows = report.serviceResults || [];
-      const services = serviceRows.length ? reportTable([L("Service", "Service"), L("Requests", "Demandes"), L("Served", "Traités"), L("Price", "Prix"), L("Revenue", "Recettes"), L("Variable costs", "Coûts variables"), L("Blocker", "Blocage")], serviceRows.filter((row) => row.active).map((row) => [escapeHtml(serviceName(row.id)), number(row.demand), number(row.honored), money(row.price), money(row.revenue), money(row.variableCosts), escapeHtml(blockerText(row.bottleneck))])) : `<p class="notice">${escapeHtml(L("Detailed service results were not recorded for this migrated year.", "Les résultats détaillés des services n’ont pas été enregistrés pour cette année migrée."))}</p>`;
-      const hours = hourRows.length ? reportTable([L("Service", "Service"), L("Role", "Fonction"), L("Assigned", "Affectées"), L("Needed", "Nécessaires"), L("Used", "Utilisées"), L("Shortage", "Manque")], hourRows.map((row) => [escapeHtml(serviceName(row.serviceId)), escapeHtml(row.role === "vet" ? L("Veterinarian", "Vétérinaire") : L("Support", "Soutien")), number(row.assignedHours), number(row.neededHours), number(row.usedHours), number(row.shortageHours)])) : "";
-      const actions = (report.actions || []).length ? `<ul>${report.actions.map((action) => `<li>${escapeHtml(actionLabel(action))}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No action", "Aucune action"))}</p>`;
+      const services = serviceRows.length ? reportTable([L("Service", "Service"), L("Requests", "Demandes"), L("Served", "Traités"), L("Return visits", "Retours"), L("Price", "Prix"), L("Accepted price", "Prix accepté"), L("Revenue", "Recettes"), L("Variable costs", "Coûts variables"), L("Blocker", "Blocage")], serviceRows.filter((row) => row.active).map((row) => [escapeHtml(serviceName(row.id)), number(row.demand), number(row.honored), number(row.returnVisits || 0), money(row.price), row.acceptedPrice ? acceptedText(acceptedKnown(SERVICE_BY_ID[row.id], { marketing: report.clinicSnapshot?.marketing || {} }, row.acceptedPrice)) : "—", money(row.revenue), money(row.variableCosts), escapeHtml(blockerText(row.bottleneck))])) : `<p class="notice">${escapeHtml(L("Detailed service results were not recorded for this migrated year.", "Les résultats détaillés des services n’ont pas été enregistrés pour cette année migrée."))}</p>`;
+      const hours = hourRows.length ? reportTable([L("Service", "Service"), L("Role", "Fonction"), L("Assigned", "Affectées"), L("Needed", "Nécessaires"), L("Worked", "Travaillées"), L("Shortage", "Manque")], hourRows.map((row) => [escapeHtml(serviceName(row.serviceId)), escapeHtml(row.role === "vet" ? L("Veterinarian", "Vétérinaire") : L("Support", "Soutien")), number(row.assignedHours), number(row.neededHours), number(row.usedHours), number(row.shortageHours)])) : "";
+      const records = report.actionRecords || [];
+      const actions = records.length
+        ? reportTable([L("Decision", "Décision"), L("First planned", "Première planification"), L("Last changed", "Dernière modification"), L("Changes", "Modifications")], records.map((record) => [escapeHtml(actionLabel(record)), escapeHtml(heure(record.queuedAt)), escapeHtml(heure(record.confirmedAt)), number(record.revisions || 0)]))
+        : (report.actions || []).length ? `<ul>${report.actions.map((action) => `<li>${escapeHtml(actionLabel(action))}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No action", "Aucune action"))}</p>`;
+      const journal = (state.decisionLog || []).filter((entry) => entry.year === report.turn);
+      const chronologie = journal.length
+        ? reportTable([L("Time", "Heure"), L("What happened", "Ce qui s’est passé"), L("Decision", "Décision")], journal.map((entry) => [escapeHtml(heure(entry.at)), escapeHtml(evenementLabel(entry.event)), escapeHtml(detailEvenement(entry))]))
+        : `<p class="notice">${escapeHtml(L("No timeline was recorded for this year.", "Aucune chronologie enregistrée pour cette année."))}</p>`;
       const carbon = report.carbon ? `<div class="summary-grid"><p><span>${escapeHtml(L("Carbon footprint", "Empreinte carbone"))}</span><strong>${tonnes(report.carbon.total)}</strong></p><p><span>${escapeHtml(L("Per treated case", "Par cas traité"))}</span><strong>${kilograms(report.carbon.perCase)}</strong></p>${Object.entries(report.carbon.bySource).map(([id, value]) => `<p><span>${escapeHtml(sourceLabel(id))}</span><strong>${tonnes(value)}</strong></p>`).join("")}</div>` : `<p>${escapeHtml(L("Carbon detail unavailable for this migrated year.", "Détail carbone indisponible pour cette année migrée."))}</p>`;
+      const relations = (() => {
+        const so = report.social || {};
+        const parts = (obj, labels) => Object.entries(obj || {}).filter(([, v]) => Math.abs(v) >= .1).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).map(([id, v]) => `${labels[id] || id} ${v > 0 ? "+" : "−"}${decimal(Math.abs(v), 1)}`).join(" · ") || "—";
+        const trustL = { served: L("requests served", "demandes servies"), communication: L("communication", "communication"), access: L("access plan", "plan d’accès"), pace: L("pace", "rythme"), price: L("prices too high", "prix trop élevés"), refused: L("refusals piling up", "refus accumulés"), carbon: L("footprint per case", "empreinte par cas"), dropoff: L("drop-off", "dépôt"), stockouts: L("stock-outs", "ruptures") };
+        const climateL = { hr: L("HR strategy", "stratégie RH"), openingHours: L("opening hours", "horaires"), pay: L("pay", "salaires"), overtime: L("overtime", "heures sup."), workload: L("workload", "charge"), pace: L("rushed pace", "rythme pressé"), departure: L("departure", "départ") };
+        const snap = report.clinicSnapshot || {};
+        const rows = [
+          [L("Client trust", "Confiance des clients"), `${number(so.before?.clientTrust)} → ${number(so.after?.clientTrust)}`, parts(so.trustParts, trustL)],
+          [L("Staff climate", "Climat de l’équipe"), `${number(so.before?.staffClimate)} → ${number(so.after?.staffClimate)}`, parts(so.climateParts, climateL)],
+          [itemLabel(D.socialIndicators.referralSupport), `${number(so.before?.referralSupport)} → ${number(so.after?.referralSupport)}`, L("advanced requests: +1 % per point above 50", "demandes avancées : +1 % par point au-dessus de 50")],
+          [itemLabel(D.socialIndicators.communityPressure), `${number(so.before?.communityPressure)} → ${number(so.after?.communityPressure)}`, L("refusals piling up; above 50 it costs trust", "refus accumulés ; au-dessus de 50, coûte de la confiance")],
+          [L("Clients", "Clients"), `${number(snap.clients ?? 0)} → ${number(report.next?.clients ?? 0)}`, (so.clientMovement || 0) < 0 ? L("trust below the line: clients leaving", "confiance sous la ligne : des clients partent") : (so.clientMovement || 0) > 0 ? L("word of mouth", "bouche-à-oreille") : "—"],
+          [L("Client type", "Type de clients"), escapeHtml(snap.marketFocus ? itemLabel(D.segments[snap.marketFocus]?.name || { en: snap.marketFocus, fr: snap.marketFocus }) : "—"), ""]
+        ];
+        const signaux = signalLines(report);
+        return `<h3>${escapeHtml(L(`Signals from year ${report.turn}`, `Signaux de l’année ${report.turn}`))}</h3>${signaux.length ? reportTable([L("What moved", "Ce qui a bougé"), L("What it does next year", "Ce que cela fait l’an prochain")], signaux.map((l) => [escapeHtml(l.cause), escapeHtml(l.effect)])) : `<p>${escapeHtml(L("Nothing moved enough to matter.", "Rien n’a assez bougé pour compter."))}</p>`}<h3>${escapeHtml(L("Relations around the clinic", "Relations autour de la clinique"))}</h3>${reportTable([L("Indicator", "Indicateur"), L("Start → end of year", "Début → fin d’année"), L("Why it moved", "Pourquoi il a bougé")], rows.map(([a, b, c]) => [escapeHtml(a), b, escapeHtml(c)]))}`;
+      })();
       const hasHourTotals = Number.isFinite(report.operational.startVetHours) && Number.isFinite(report.operational.startSupportHours);
       const previousCarbon = reportIndex ? state.history[reportIndex - 1].carbon?.total : state.carbonBaseline?.total;
       const carbonChange = report.carbon && Number.isFinite(previousCarbon) ? report.carbon.total - previousCarbon : null;
-      return `<section class="year"><h2>${escapeHtml(L("Year", "Année"))} ${report.turn}</h2><div class="summary-grid"><p><span>${escapeHtml(L("Revenue", "Recettes"))}</span><strong>${money(report.financial.revenue)}</strong></p><p><span>${escapeHtml(L("Variable costs", "Coûts variables"))}</span><strong>${money(report.financial.variableCosts)}</strong></p><p><span>${escapeHtml(L("Payroll and charges", "Salaires et charges"))}</span><strong>${money((report.financial.payroll || 0) + (report.financial.socialCharges || 0))}</strong></p><p><span>${escapeHtml(L("Overtime", "Heures supplémentaires"))}</span><strong>${money(report.financial.overtimeCost || 0)}</strong></p><p><span>${escapeHtml(L("Facilities", "Installations"))}</span><strong>${money(report.financial.facilityCosts)}</strong></p><p><span>${escapeHtml(L("Operating costs", "Coûts d’exploitation"))}</span><strong>${money((report.financial.openingCosts || 0) + (report.financial.dropoffCost || 0) + (report.financial.stockCost || 0) + (report.financial.hrCost || 0) + (report.financial.marketingCost || 0) + (report.financial.sustainabilityCost || 0) + (report.financial.admin || 0))}</strong></p>${report.financial.loanInterest > 0 ? `<p><span>${escapeHtml(L("Loan interest", "Intérêts d’emprunt"))}</span><strong>${money(report.financial.loanInterest)}</strong></p>` : ""}<p><span>${escapeHtml(L("One-time costs", "Coûts ponctuels"))}</span><strong>${money(report.financial.oneTimeCosts)}</strong></p><p><span>${escapeHtml(L("Tax", "Impôt"))}</span><strong>${money(report.financial.tax)}</strong></p><p><span>${escapeHtml(L("Net result", "Résultat net"))}</span><strong>${money(report.financial.netResult)}</strong></p><p><span>${escapeHtml(L("End treasury", "Trésorerie finale"))}</span><strong>${money(report.financial.treasury)}</strong></p></div><h3>${escapeHtml(L("Actions and recruitment", "Actions et recrutement"))}</h3>${actions}${(report.recruitment || []).map((row) => `<p>${escapeHtml(candidateById(row.candidateId)?.name || row.candidateId)} — ${escapeHtml(row.accepted ? L("accepted", "accepté") : L("refused", "refusé"))}</p>`).join("")}<h3>${escapeHtml(L("Services", "Services"))}</h3>${services}<h3>${escapeHtml(L("Staff hours", "Heures du personnel"))}</h3>${hasHourTotals ? `<p>${escapeHtml(L("Veterinary hours available / used", "Heures vétérinaires disponibles / utilisées"))}: ${number(report.operational.startVetHours)} / ${number(report.operational.startVetHours - report.operational.remainingVetHours)} · ${escapeHtml(L("Support hours available / used", "Heures de soutien disponibles / utilisées"))}: ${number(report.operational.startSupportHours)} / ${number(report.operational.startSupportHours - report.operational.remainingSupportHours)}</p>` : `<p class="notice">${escapeHtml(L("Detailed hour totals were not recorded for this migrated year.", "Les totaux d’heures détaillés n’ont pas été enregistrés pour cette année migrée."))}</p>`}${staffTable}${hours}<h3>${escapeHtml(L("People and clients", "Équipe et clients"))}</h3><p>${escapeHtml(L("Staff climate", "Climat de l’équipe"))}: ${number(report.social?.after?.staffClimate || 0)} · ${escapeHtml(L("Client trust", "Confiance des clients"))}: ${number(report.social?.after?.clientTrust || 0)}</p><h3>${escapeHtml(L("Carbon footprint", "Empreinte carbone"))}</h3>${carbon}${carbonChange === null ? "" : `<p><strong>${escapeHtml(L("Annual change", "Évolution annuelle"))}:</strong> ${carbonChange > 0 ? "+" : ""}${tonnes(carbonChange)}</p>`}<h3>${escapeHtml(L("Team reflections", "Réflexions de l’équipe"))}</h3>${reflectionFields.map((field) => `<div class="reflection"><strong>${escapeHtml(t(`results.${field}`))}</strong><p>${escapeHtml(reflection[field] || L("No response", "Aucune réponse"))}</p></div>`).join("")}</section>`;
+      return `<section class="year"><h2>${escapeHtml(L("Year", "Année"))} ${report.turn}</h2><div class="summary-grid"><p><span>${escapeHtml(L("Revenue", "Recettes"))}</span><strong>${money(report.financial.revenue)}</strong></p><p><span>${escapeHtml(L("Variable costs", "Coûts variables"))}</span><strong>${money(report.financial.variableCosts)}</strong></p><p><span>${escapeHtml(L("Payroll and charges", "Salaires et charges"))}</span><strong>${money((report.financial.payroll || 0) + (report.financial.socialCharges || 0))}</strong></p><p><span>${escapeHtml(L("Overtime", "Heures supplémentaires"))}</span><strong>${money(report.financial.overtimeCost || 0)}</strong></p><p><span>${escapeHtml(L("Facilities", "Installations"))}</span><strong>${money(report.financial.facilityCosts)}</strong></p><p><span>${escapeHtml(L("Operating costs", "Coûts d’exploitation"))}</span><strong>${money((report.financial.openingCosts || 0) + (report.financial.dropoffCost || 0) + (report.financial.stockCost || 0) + (report.financial.hrCost || 0) + (report.financial.marketingCost || 0) + (report.financial.sustainabilityCost || 0) + (report.financial.admin || 0))}</strong></p>${report.financial.loanInterest > 0 ? `<p><span>${escapeHtml(L("Loan interest", "Intérêts d’emprunt"))}</span><strong>${money(report.financial.loanInterest)}</strong></p>` : ""}<p><span>${escapeHtml(L("One-time costs", "Coûts ponctuels"))}</span><strong>${money(report.financial.oneTimeCosts)}</strong></p><p><span>${escapeHtml(L("Tax", "Impôt"))}</span><strong>${money(report.financial.tax)}</strong></p><p><span>${escapeHtml(L("Net result", "Résultat net"))}</span><strong>${money(report.financial.netResult)}</strong></p><p><span>${escapeHtml(L("End treasury", "Trésorerie finale"))}</span><strong>${money(report.financial.treasury)}</strong></p></div>${relations}${(report.commitments || []).length ? `<h3>${escapeHtml(L("Promises", "Engagements"))}</h3>${reportTable([L("Who", "Qui"), L("Kept", "Tenu"), L("What follows next year", "Ce qui suit l’an prochain")], report.commitments.map((c) => [escapeHtml(stakeholderLabel(c.id)), c.ok ? "✓" : "✗", escapeHtml(commitmentConsequence(c.id, c.ok, { ...state, history: state.history.filter((r) => r.turn < report.turn) }, report))]))}` : ""}<h3>${escapeHtml(L("Actions and recruitment", "Actions et recrutement"))}</h3>${actions}<h3>${escapeHtml(L("How the year was decided", "Comment l’année a été décidée"))}</h3><p>${escapeHtml(L("Year passed", "Année passée"))} : ${escapeHtml(heure(report.passedAt))}</p>${chronologie}${(report.recruitment || []).map((row) => `<p>${escapeHtml(candidateById(row.candidateId)?.name || row.candidateId)} — ${escapeHtml(row.accepted ? L("accepted", "accepté") : L("refused", "refusé"))}</p>`).join("")}<h3>${escapeHtml(L("Services", "Services"))}</h3>${services}<h3>${escapeHtml(L("Staff hours", "Heures du personnel"))}</h3>${hasHourTotals ? `<p>${escapeHtml(L("Veterinary hours available / used", "Heures vétérinaires disponibles / utilisées"))}: ${number(report.operational.startVetHours)} / ${number(report.operational.startVetHours - report.operational.remainingVetHours)} · ${escapeHtml(L("Support hours available / used", "Heures de soutien disponibles / utilisées"))}: ${number(report.operational.startSupportHours)} / ${number(report.operational.startSupportHours - report.operational.remainingSupportHours)}</p>` : `<p class="notice">${escapeHtml(L("Detailed hour totals were not recorded for this migrated year.", "Les totaux d’heures détaillés n’ont pas été enregistrés pour cette année migrée."))}</p>`}${staffTable}${hours}<h3>${escapeHtml(L("People and clients", "Équipe et clients"))}</h3><p>${escapeHtml(L("Staff climate", "Climat de l’équipe"))}: ${number(report.social?.after?.staffClimate || 0)} · ${escapeHtml(L("Client trust", "Confiance des clients"))}: ${number(report.social?.after?.clientTrust || 0)}</p><h3>${escapeHtml(L("Carbon footprint", "Empreinte carbone"))}</h3>${carbon}${carbonChange === null ? "" : `<p><strong>${escapeHtml(L("Annual change", "Évolution annuelle"))}:</strong> ${carbonChange > 0 ? "+" : ""}${tonnes(carbonChange)}</p>`}</section>`;
     }).join("");
-    return `<!doctype html><html lang="${state.language}"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{font-family:Arial,sans-serif;color:#17201d;margin:32px;line-height:1.4}header{border-bottom:3px solid #146c5a;margin-bottom:24px}.print{position:fixed;right:24px;top:18px;padding:10px 16px}.summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.summary-grid p{border:1px solid #ccd8d4;padding:10px;margin:0}.summary-grid span{display:block;font-size:12px}.summary-grid strong{font-size:16px}table{width:100%;border-collapse:collapse;margin:10px 0 20px;font-size:12px}th,td{text-align:left;border:1px solid #ccd8d4;padding:7px;vertical-align:top}th{background:#eef5f2}.year{break-before:page}.reflection{border-left:3px solid #7c9f96;padding-left:12px}.notice{font-style:italic}@media(max-width:700px){.summary-grid{grid-template-columns:1fr}table{font-size:10px}}@media print{body{margin:10mm}.print{display:none}.year:first-of-type{break-before:auto}}</style></head><body><button class="print" onclick="window.print()">${escapeHtml(L("Print / Save as PDF", "Imprimer / Enregistrer en PDF"))}</button><header><h1>${escapeHtml(title)}</h1><p><strong>${escapeHtml(L("Scenario", "Scénario"))}:</strong> ${escapeHtml(itemLabel(D.scenarios[state.scenarioId].name))}<br><strong>${escapeHtml(L("Team code", "Code d’équipe"))}:</strong> ${escapeHtml(teamCode)}<br><strong>${escapeHtml(L("Exported", "Exporté"))}:</strong> ${escapeHtml(new Intl.DateTimeFormat(locale(), { dateStyle: "long", timeStyle: "short" }).format(new Date()))}</p></header><section><h2>${escapeHtml(L("Rules and goals", "Règles et objectifs"))}</h2><p>${escapeHtml(L("Action limit", "Limite d’actions"))}: ${escapeHtml(state.rules.unlimited ? L("Unlimited", "Illimitée") : state.rules.actionLimit)} · ${escapeHtml(L("Target year", "Année cible"))}: ${state.rules.targetYear} · ${escapeHtml(L("Bankruptcy threshold", "Seuil de faillite"))}: ${money(state.rules.bankruptcyThreshold)}</p><ul>${goals.map((goal) => `<li>${goal.ok ? "✓" : "○"} ${escapeHtml(itemLabel(goal.label))}: ${escapeHtml(goal.display)}</li>`).join("")}</ul><h2>${escapeHtml(L("Game setup", "Paramétrage de la partie"))}</h2>${reportTable([L("Setting", "Paramètre"), L("Value", "Valeur")], setupSummaryRows().map(([label, value]) => [escapeHtml(label), escapeHtml(value)]))}${setupLines.length ? `<ul>${setupLines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No setting changes or cash adjustments.", "Aucun changement de paramètre ni ajustement de trésorerie."))}</p>`}<h2>${escapeHtml(L("Starting versus current clinic", "Clinique de départ et actuelle"))}</h2>${reportTable([L("Measure", "Mesure"), L("Starting", "Départ"), L("Current", "Actuel")], [[escapeHtml(L("Treasury", "Trésorerie")), money(start.treasury), money(state.treasury)], [escapeHtml(L("Clients", "Clients")), number(start.clients), number(state.clients)], [escapeHtml(L("Reputation", "Réputation")), number(start.reputation), number(state.reputation)], [escapeHtml(L("Staff", "Personnel")), number(start.staff.length), number(state.staff.length)], [escapeHtml(L("Active services", "Services actifs")), number(Object.values(start.services).filter((service) => service.active).length), number(Object.values(state.services).filter((service) => service.active).length)], [escapeHtml(L("Carbon footprint", "Empreinte carbone")), state.carbonBaseline ? tonnes(state.carbonBaseline.total) : "—", state.history.at(-1)?.carbon ? tonnes(state.history.at(-1).carbon.total) : "—"]])}</section>${yearSections || `<p>${escapeHtml(L("No completed year yet.", "Aucune année terminée."))}</p>`}<footer><p>${escapeHtml(L("Carbon method", "Méthode carbone"))}: ${escapeHtml(D.carbonModel.version)}. ${escapeHtml(L("Boundary: building electricity and heating, anaesthetic gases, waste treatment, and client car travel. Service activity values are simulation assumptions.", "Périmètre : électricité et chauffage du bâtiment, gaz anesthésiques, traitement des déchets et déplacements automobiles des clients. Les valeurs d’activité des services sont des hypothèses de simulation."))}</p></footer></body></html>`;
+    const archiveSection = (state.runArchive || []).length ? `<section class="year"><h2>${escapeHtml(L("Reloaded runs", "Essais rechargés"))}</h2><p>${escapeHtml(L("Each run below was replaced when a saved clinic was loaded. They are kept so that a run without a decision can be compared with the run that took it.", "Chaque essai ci-dessous a été remplacé au chargement d’une clinique enregistrée. Ils sont gardés pour comparer un essai sans une décision à l’essai qui l’a prise."))}</p>${state.runArchive.map((essai, index) => `<h3>${escapeHtml(L("Run", "Essai"))} ${index + 1} · ${escapeHtml(L("replaced at year", "remplacé à l’année"))} ${essai.yearReached}</h3>${reportTable([L("Year", "Année"), L("Net result", "Résultat net"), L("Treasury", "Trésorerie"), L("Cases served", "Cas traités"), L("Main constraint", "Contrainte principale"), L("Actions", "Actions")], essai.years.map((row) => [String(row.year), money(row.netResult), money(row.treasury), number(row.served), escapeHtml(blockerText(row.constraintId)), escapeHtml((row.actionLabels || []).join(" · ") || L("No action", "Aucune action"))]))}`).join("")}</section>` : "";
+    return `<!doctype html><html lang="${state.language}"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{font-family:Arial,sans-serif;color:#17201d;margin:32px;line-height:1.4}header{border-bottom:3px solid #146c5a;margin-bottom:24px}.print{position:fixed;right:24px;top:18px;padding:10px 16px}.summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.summary-grid p{border:1px solid #ccd8d4;padding:10px;margin:0}.summary-grid span{display:block;font-size:12px}.summary-grid strong{font-size:16px}table{width:100%;border-collapse:collapse;margin:10px 0 20px;font-size:12px}th,td{text-align:left;border:1px solid #ccd8d4;padding:7px;vertical-align:top}th{background:#eef5f2}.year{break-before:page}.notice{font-style:italic}@media(max-width:700px){.summary-grid{grid-template-columns:1fr}table{font-size:10px}}@media print{body{margin:10mm}.print{display:none}.year:first-of-type{break-before:auto}}</style></head><body><button class="print" onclick="window.print()">${escapeHtml(L("Print / Save as PDF", "Imprimer / Enregistrer en PDF"))}</button><header><h1>${escapeHtml(title)}</h1><p><strong>${escapeHtml(L("Scenario", "Scénario"))}:</strong> ${escapeHtml(itemLabel(D.scenarios[state.scenarioId].name))}<br><strong>${escapeHtml(L("Team code", "Code d’équipe"))}:</strong> ${escapeHtml(teamCode)}<br><strong>${escapeHtml(L("Exported", "Exporté"))}:</strong> ${escapeHtml(new Intl.DateTimeFormat(locale(), { dateStyle: "long", timeStyle: "short" }).format(new Date()))}</p></header>${(() => { const r = rulesSummary(state.modelRules); return `<section><h2>${escapeHtml(L("Rules of the model", "Règles du modèle"))}</h2>${r.length ? `<p>${escapeHtml(L(`Played with changed rules: « ${state.modelRules.nom || "untitled"} ».`, `Partie jouée avec des règles modifiées : « ${state.modelRules.nom || "sans nom"} ».`))}</p>${reportTable([L("Section", "Section"), L("Setting", "Réglage"), L("Original", "Origine"), L("Used", "Utilisé")], r.map((x) => [escapeHtml(itemLabel((ATELIER_SECTIONS.find(([id]) => id === x.section) || [, { en: x.section, fr: x.section }])[1])), escapeHtml(x.nom), escapeHtml(x.texteOrigine), escapeHtml(x.texteValeur)]))}` : `<p>${escapeHtml(L("Played with the original rules.", "Partie jouée avec les règles d’origine."))}</p>`}</section>`; })()}<section><h2>${escapeHtml(L("Rules and goals", "Règles et objectifs"))}</h2><p>${escapeHtml(L("Action limit", "Limite d’actions"))}: ${escapeHtml(state.rules.unlimited ? L("Unlimited", "Illimitée") : state.rules.actionLimit)} · ${escapeHtml(L("Target year", "Année cible"))}: ${state.rules.targetYear} · ${escapeHtml(L("Bankruptcy threshold", "Seuil de faillite"))}: ${money(state.rules.bankruptcyThreshold)}</p><ul>${goals.map((goal) => `<li>${goal.ok ? "✓" : "○"} ${escapeHtml(itemLabel(goal.label))}: ${escapeHtml(goal.display)}</li>`).join("")}</ul><h2>${escapeHtml(L("Game setup", "Paramétrage de la partie"))}</h2>${reportTable([L("Setting", "Paramètre"), L("Value", "Valeur")], setupSummaryRows().map(([label, value]) => [escapeHtml(label), escapeHtml(value)]))}${setupLines.length ? `<ul>${setupLines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>` : `<p>${escapeHtml(L("No setting changes or cash adjustments.", "Aucun changement de paramètre ni ajustement de trésorerie."))}</p>`}<h2>${escapeHtml(L("Starting versus current clinic", "Clinique de départ et actuelle"))}</h2>${reportTable([L("Measure", "Mesure"), L("Starting", "Départ"), L("Current", "Actuel")], [[escapeHtml(L("Treasury", "Trésorerie")), money(start.treasury), money(state.treasury)], [escapeHtml(L("Clients", "Clients")), number(start.clients), number(state.clients)], [escapeHtml(L("Staff", "Personnel")), number(start.staff.length), number(state.staff.length)], [escapeHtml(L("Active services", "Services actifs")), number(Object.values(start.services).filter((service) => service.active).length), number(Object.values(state.services).filter((service) => service.active).length)], [escapeHtml(L("Carbon footprint", "Empreinte carbone")), state.carbonBaseline ? tonnes(state.carbonBaseline.total) : "—", state.history.at(-1)?.carbon ? tonnes(state.history.at(-1).carbon.total) : "—"]])}</section>${yearSections || `<p>${escapeHtml(L("No completed year yet.", "Aucune année terminée."))}</p>`}${archiveSection}<footer><p>${escapeHtml(L("Carbon method", "Méthode carbone"))}: ${escapeHtml(D.carbonModel.version)}. ${escapeHtml(L("Boundary: building electricity and heating, anaesthetic gases, waste treatment, and client car travel. Service activity values are simulation assumptions.", "Périmètre : électricité et chauffage du bâtiment, gaz anesthésiques, traitement des déchets et déplacements automobiles des clients. Les valeurs d’activité des services sont des hypothèses de simulation."))}</p></footer></body></html>`;
   }
 
   function printReport() {
@@ -3201,6 +4155,37 @@
     }
     const button = event.target.closest("button");
     if (!button) return;
+    if (button.dataset.atelierOpen !== undefined) {
+      const champ = document.querySelector("[data-atelier-code]");
+      if (atelierFingerprint(champ?.value) !== D.atelierCodeHash) { toast(L("That code does not open the workshop.", "Ce code n’ouvre pas l’atelier."), "warn"); return; }
+      ui.atelierUnlocked = true; ui.rulesDraft = null; ui.atelierView = true; ui.atelierSection = "regles"; ui.drawer = null;
+      render();
+      return;
+    }
+    if (button.dataset.atelierShow !== undefined && ui.atelierUnlocked) { ui.rulesDraft = null; ui.atelierView = true; ui.drawer = null; render(); return; }
+    if (button.dataset.atelierClose !== undefined) { ui.atelierView = false; render(); return; }
+    if (button.dataset.atelierSection !== undefined) { ui.atelierSection = button.dataset.atelierSection; ui.atelierSearch = ""; render(); return; }
+    if (button.dataset.ruleReset !== undefined && ui.rulesDraft) { delete ui.rulesDraft.valeurs[button.dataset.ruleReset]; keepAtelierScroll(); render(); return; }
+    if (button.dataset.rulesResetAll !== undefined && ui.rulesDraft) { ui.rulesDraft = { nom: ui.rulesDraft.nom, valeurs: {}, noms: {}, delies: {}, monnaie: null }; keepAtelierScroll(); render(); return; }
+    if (button.dataset.rulesDownload !== undefined) { telechargerRegles(); return; }
+    if (button.dataset.ruleConvert !== undefined && ui.rulesDraft) {
+      const facteur = ui.rulesDraft.monnaie?.facteur ?? 1;
+      Object.values(RULE_SETTINGS).filter((def) => def.money).forEach((def) => {
+        const v = RULE_DEFAULTS[def.chemin] * facteur;
+        const arrondi = Math.abs(v) >= 1000 ? Math.round(v / 10) * 10 : Math.round(v);
+        if (Math.abs(arrondi - RULE_DEFAULTS[def.chemin]) > 1e-9) ui.rulesDraft.valeurs[def.chemin] = Math.min(def.max, Math.max(def.min, arrondi)); else delete ui.rulesDraft.valeurs[def.chemin];
+      });
+      keepAtelierScroll(); render();
+      toast(L(`Every amount converted (×${decimal(facteur, 2)}).`, `Tous les montants convertis (×${decimal(facteur, 2)}).`), "good");
+      return;
+    }
+    if (button.dataset.rulesApply !== undefined && ui.rulesDraft) {
+      const clean = appliquerRegles(ui.rulesDraft, "apply");
+      keepAtelierScroll();
+      render();
+      toast(clean ? L(`Rules applied to your game: ${rulesSummary(clean).length} changes.`, `Règles appliquées à votre partie : ${rulesSummary(clean).length} changements.`) : L("Back to the original rules.", "Retour aux règles d’origine."), "good");
+      return;
+    }
     if (button.dataset.domain) { saveState(); state.domain = button.dataset.domain; ui.drawer = null; ui.drawerContext = null; ui.selectedServiceId = null; ui.confirm = null; ui.originStack = []; saveState(); render(); return; }
     if (button.dataset.openDrawer) {
       // On a drawer-to-drawer jump the breadcrumb IS the close button, so it must name where
@@ -3332,8 +4317,8 @@
       const studyGroup = String(draft.studyGroup ?? state.setup.studyGroup ?? "").trim().slice(0, 24);
       if (!unlimited && limit < pendingActions().length) ui.settingsError = L(`The limit cannot be below the ${pendingActions().length} actions already planned.`, `La limite ne peut pas être inférieure aux ${pendingActions().length} actions déjà planifiées.`);
       else if (!Number.isInteger(targetYear) || targetYear < state.year || targetYear > 12) ui.settingsError = L(`Choose a target year from Year ${state.year} to Year 12.`, `Choisissez une année cible entre l’année ${state.year} et l’année 12.`);
-      else if (!Number.isFinite(threshold) || threshold < -1000000 || threshold > 0) ui.settingsError = L("Choose a bankruptcy threshold between −€1,000,000 and €0.", "Choisissez un seuil de faillite entre −1 000 000 € et 0 €.");
-      else if (!state.history.length && (!Number.isFinite(startingTreasury) || startingTreasury < 0 || startingTreasury > 2000000)) ui.settingsError = L("Choose a starting treasury between €0 and €2,000,000.", "Choisissez une trésorerie de départ entre 0 € et 2 000 000 €.");
+      else if (!Number.isFinite(threshold) || threshold < -1000000 || threshold > 0) ui.settingsError = L(`Choose a bankruptcy threshold between ${money(-1000000)} and ${money(0)}.`, `Choisissez un seuil de faillite entre ${money(-1000000)} et ${money(0)}.`);
+      else if (!state.history.length && (!Number.isFinite(startingTreasury) || startingTreasury < 0 || startingTreasury > 2000000)) ui.settingsError = L(`Choose a starting treasury between ${money(0)} and ${money(2000000)}.`, `Choisissez une trésorerie de départ entre ${money(0)} et ${money(2000000)}.`);
       else {
         const snapshot = () => ({ actionLimit: state.rules.unlimited ? "unlimited" : state.rules.actionLimit, targetYear: state.rules.targetYear, bankruptcyThreshold: state.rules.bankruptcyThreshold, startingTreasury: state.setup.startingTreasury, forecastPrecision: state.setup.forecastPrecision, classCode: state.setup.classCode || "", studyGroup: state.setup.studyGroup || "" });
         const previous = snapshot();
@@ -3407,7 +4392,7 @@
     if (button.dataset.undoYear !== undefined) { const year = state.undo?.year; if (year && window.confirm(t("toast.undoConfirm", { year }))) { if (undoYear()) toast(t("toast.yearUndone", { year }), "good"); } return; }
     if (button.dataset.reset !== undefined) { if (window.confirm(t("toast.resetConfirm"))) resetScenario(); return; }
     if (button.dataset.scenario) { const id = button.dataset.scenario; if (window.confirm(t("toast.scenarioConfirm", { scenario: itemLabel(D.scenarios[id].name) }))) resetScenario(id); return; }
-    if (button.dataset.continue !== undefined) { state.endState = null; state.sandboxMode = true; saveState(); render(); return; }
+    if (button.dataset.continue !== undefined) { state.endState = null; state.sandboxMode = true; logDecision("sandbox", `year:${state.year}`); saveState(); render(); return; }
     if (button.dataset.toggleService) { const id = button.dataset.toggleService; const active = plannedState().services[id].active; queueAction(`service:${id}:active`, { kind: "toggle-service", targetId: id, value: !active }); return; }
     if (button.dataset.loan) { if (plannedState().finance.loan) toast(t("toast.loanExists"), "warn"); else queueAction("finance:loan", { kind: "loan", value: Number(button.dataset.loan) }); return; }
     if (button.dataset.repayLoan !== undefined) { if (!plannedState().finance.loan) toast(t("toast.noLoan"), "warn"); else queueAction("finance:loan", { kind: "repay-loan" }); return; }
@@ -3438,6 +4423,33 @@
 
   document.addEventListener("change", (event) => {
     const input = event.target;
+    if (input.dataset.ruleCell !== undefined && ui.rulesDraft) {
+      const def = RULE_SETTINGS[input.dataset.ruleCell];
+      const v = def ? ruleTaken(def, input.value) : null;
+      if (v == null) { toast(L("Type a number.", "Tapez un nombre."), "warn"); render(); return; }
+      if (Math.abs(v - RULE_DEFAULTS[def.chemin]) < 1e-9) delete ui.rulesDraft.valeurs[def.chemin]; else ui.rulesDraft.valeurs[def.chemin] = Math.min(def.max, Math.max(def.min, v));
+      keepAtelierScroll(); render(); return;
+    }
+    if (input.dataset.ruleLink !== undefined && ui.rulesDraft) { if (input.checked) delete ui.rulesDraft.delies[input.dataset.ruleLink]; else ui.rulesDraft.delies[input.dataset.ruleLink] = true; keepAtelierScroll(); render(); return; }
+    if (input.dataset.ruleCurrency !== undefined && ui.rulesDraft) { ui.rulesDraft.monnaie = { code: input.value, facteur: ui.rulesDraft.monnaie?.facteur ?? 1 }; keepAtelierScroll(); render(); return; }
+    if (input.dataset.ruleFactor !== undefined && ui.rulesDraft) { const f = Number(String(input.value).replace(",", ".")); ui.rulesDraft.monnaie = { code: ui.rulesDraft.monnaie?.code || "EUR", facteur: Number.isFinite(f) && f > 0 ? Math.min(5, Math.max(.2, f)) : 1 }; keepAtelierScroll(); render(); return; }
+    if ((input.dataset.nameFr !== undefined || input.dataset.nameEn !== undefined || input.dataset.nameSingle !== undefined) && ui.rulesDraft) {
+      const chemin = input.dataset.nameFr ?? input.dataset.nameEn ?? input.dataset.nameSingle;
+      const origine = NAME_DEFAULTS[chemin];
+      if (input.dataset.nameSingle !== undefined) ui.rulesDraft.noms[chemin] = input.value;
+      else { const cur = ui.rulesDraft.noms[chemin] || { ...origine }; ui.rulesDraft.noms[chemin] = { ...cur, [input.dataset.nameFr !== undefined ? "fr" : "en"]: input.value }; }
+      keepAtelierScroll(); render(); return;
+    }
+    if (input.dataset.chargerRegles !== undefined) {
+      const fichier = input.files && input.files[0];
+      if (!fichier) return;
+      const lecteur = new FileReader();
+      lecteur.onload = () => { chargerRegles(String(lecteur.result)); };
+      lecteur.onerror = () => { toast(L("That file could not be read.", "Ce fichier n’a pas pu être lu."), "warn"); };
+      lecteur.readAsText(fichier);
+      input.value = "";
+      return;
+    }
     if (input.dataset.chargerClinique !== undefined) {
       const fichier = input.files && input.files[0];
       if (!fichier) return;
@@ -3492,6 +4504,9 @@
       return;
     }
     if (input.dataset.settingsField) { ui.settingsDraft = { ...(ui.settingsDraft || {}), [input.dataset.settingsField]: input.value }; return; }
+    if (input.dataset.rule !== undefined && ui.rulesDraft) { ui.rulesDraft.valeurs[input.dataset.rule] = Number(input.value); keepAtelierScroll(`[data-rule="${input.dataset.rule}"]`); render(); return; }
+    if (input.dataset.atelierSearch !== undefined) { ui.atelierSearch = input.value; keepAtelierScroll("[data-atelier-search]", input.value.length); render(); return; }
+    if (input.dataset.ruleName !== undefined && ui.rulesDraft) { ui.rulesDraft.nom = input.value; return; }
     if (input.dataset.draftKey) { ui.decisionDrafts[input.dataset.draftKey] = input.value; return; }
     if (input.dataset.vacancyBudget !== undefined) { ui.vacancy.budget = Number(input.value || 0); return; }
     if (input.dataset.reflection && input.dataset.year) {
@@ -3535,7 +4550,7 @@
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   });
 
-  globalThis.ClinicTest = { initialState, hydrate, sauvegarderClinique, chargerClinique, casesCarried, countedActions, isFreeAction, predictionOptions, constraintKey, constraintBreakdown, planFrames, adjustCash, parseRoute, routeFor, applyRoute, openDrawer, closeDrawer, planRowLabel, planRows, applyAction, simulateYear, simulatePlan, queueAction, removeAction, resolveTurn, undoYear, resetScenario, pendingActions, forecastRecord, calculateCarbon, missingRequirements, requirementList, projectedDemand, actionLabel, goalChecks, getBeginnerSignals, emptyEffects, combineEffects, clone, validAllocations, allocationRemainder, allocationCeiling, snapShareToHours, stepShare, shareFromHours, availableHoursFor, assignedTone, workloadTone, stockServices: STOCK_SERVICES, buildExportPayload, buildPrintableReportHtml, data: D, getState: () => clone(state), renderState: (next) => { state = hydrate(next); ui.selectedServiceId = null; ui.settingsDraft = null; render(); return document.querySelector("#app").innerHTML; }, renderUiForTest: (changes) => { ui = { ...ui, ...changes }; render(); return document.querySelector("#app").innerHTML; } };
+  globalThis.ClinicTest = { atelierPaths: () => ({ valeurs: Object.keys(RULE_SETTINGS), noms: Object.keys(RULE_NAMES) }), ruleSettings: () => RULE_SETTINGS, chargerRegles, cleanRules, atelierFingerprint, rulesSummary, refusalSplit, initialState, hydrate, sauvegarderClinique, chargerClinique, casesCarried, countedActions, isFreeAction, predictionOptions, constraintKey, constraintBreakdown, planFrames, adjustCash, parseRoute, routeFor, applyRoute, openDrawer, closeDrawer, planRowLabel, planRows, applyAction, simulateYear, simulatePlan, queueAction, removeAction, resolveTurn, undoYear, resetScenario, pendingActions, forecastRecord, calculateCarbon, missingRequirements, requirementList, projectedDemand, actionLabel, goalChecks, getBeginnerSignals, emptyEffects, combineEffects, clone, validAllocations, allocationRemainder, allocationCeiling, snapShareToHours, stepShare, shareFromHours, availableHoursFor, assignedTone, workloadTone, stockServices: STOCK_SERVICES, buildExportPayload, buildPrintableReportHtml, data: D, getState: () => clone(state), renderState: (next) => { state = hydrate(next); ui.selectedServiceId = null; ui.settingsDraft = null; render(); return document.querySelector("#app").innerHTML; }, renderUiForTest: (changes) => { ui = { ...ui, ...changes }; render(); return document.querySelector("#app").innerHTML; } };
   if (typeof location !== "undefined" && location.hash) applyRoute(parseRoute(location.hash));
   render();
 })();

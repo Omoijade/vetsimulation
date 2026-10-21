@@ -65,7 +65,8 @@ const careState = ClinicTest.getState();
 careState.domain = "care";
 if (!ClinicTest.renderState(careState).includes("Rooms &amp; equipment use")) throw new Error("Care page does not show room and equipment use");
 const roomsHtml = ClinicTest.renderUiForTest({ drawer: "rooms", drawerContext: null, confirm: null });
-if (!roomsHtml.includes("No effect on cases yet") || !roomsHtml.includes("still needs")) throw new Error("Room previews do not explain why a purchase has no effect yet");
+if (!/<div class="needs"[\s\S]*?<span class="need-tag">✗ /.test(roomsHtml)) throw new Error("Room previews must mark what a purchase still needs before it serves cases");
+if (/No effect on cases yet|still needs|longer-term indicators rather than/.test(roomsHtml)) throw new Error("Room previews mark what is missing; they do not explain it in a sentence");
 const fullState = ClinicTest.getState();
 fullState.domain = "care";
 fullState.rooms.consult = 1;
@@ -73,16 +74,17 @@ fullState.services.vaccination.active = true;
 fullState.services.preventive.active = true;
 fullState.pending = {};
 const fullCare = ClinicTest.renderState(fullState);
-if (!fullCare.includes(">Full<") || !fullCare.includes("requests turned away")) throw new Error("Care page does not flag a full room with the requests turned away");
+if (!/<article class="full"><div class="facility-head"><strong>Consult room<\/strong><span>[\d,]+ \/ [\d,]+ h · (9[5-9]|100)%/.test(fullCare)) throw new Error("Care page must show a nearly full room by its measured use");
+if (/refused here|>Full</.test(fullCare)) throw new Error("Before the year is passed, the care page measures the room; it does not say what it refuses");
 const serviceFamilies = ClinicTest.renderUiForTest({ drawer: "services", drawerContext: null, selectedServiceId: null, confirm: null });
 if (!serviceFamilies.includes("1 service")) throw new Error("English service singular/plural is incorrect");
 const serviceRows = ClinicTest.renderUiForTest({ drawer: "services", drawerContext: "core", selectedServiceId: null, confirm: null });
-if (!serviceRows.includes("Select one service") || serviceRows.includes("Expected consequences")) throw new Error("Service family expands more than compact rows");
+if (!serviceRows.includes("Select one service") || serviceRows.includes("What this choice changes")) throw new Error("Service family expands more than compact rows");
 const selectedService = ClinicTest.renderUiForTest({ drawer: "services", drawerContext: "core", selectedServiceId: "consult", confirm: null });
-if ((selectedService.match(/Expected consequences/g) || []).length !== 1) throw new Error("Selected service must show exactly one consequence panel");
+if ((selectedService.match(/What this choice changes/g) || []).length !== 1) throw new Error("Selected service must show exactly one consequence panel");
 if (/elasticity|contribution\/case|geomarketing|kWh\/case/i.test(selectedService)) throw new Error("Selected service exposes beginner-facing technical jargon");
 const carbonDrawer = ClinicTest.renderUiForTest({ drawer: "sustainability", drawerContext: "building", confirm: null });
-if (!carbonDrawer.includes("Expected consequences")) throw new Error("Sustainability choices lack consequence previews");
+if (!carbonDrawer.includes("What this choice changes")) throw new Error("Sustainability choices lack consequence previews");
 const pricingState = ClinicTest.getState();
 pricingState.domain = "business";
 const businessHtml = ClinicTest.renderState(pricingState) + ClinicTest.renderUiForTest({ drawer: "pricing", drawerContext: null, confirm: null });
@@ -90,7 +92,7 @@ if (/elasticity|contribution\/case|geomarketing|kWh\/case/i.test(businessHtml)) 
 const teamState = ClinicTest.getState();
 teamState.domain = "team";
 const teamHtml = ClinicTest.renderState(teamState);
-if (!teamHtml.includes("Change time allocation") || !teamHtml.includes("Unused team hours")) throw new Error("Team page does not expose readable staffing-hour choices");
+if (!teamHtml.includes("Change time allocation") || !teamHtml.includes("Paid hours not worked")) throw new Error("Team page does not expose readable staffing-hour choices");
 if (teamHtml.includes("Secondary allocation")) throw new Error("Obsolete primary/secondary allocation UI is still visible");
 if (!teamHtml.includes("Let go")) throw new Error("Staff cards do not offer letting someone go");
 const exitHtml = ClinicTest.renderUiForTest({ drawer: "staffExit", drawerContext: "support-maya", confirm: null });
@@ -102,7 +104,7 @@ if (!teamHtml.includes("Who can do what") || !teamHtml.includes("General practic
 const capabilityHtml = ClinicTest.renderUiForTest({ drawer: "capabilities", drawerContext: null, confirm: null });
 if (!capabilityHtml.includes("capability-table") || !capabilityHtml.includes("Can do") || !capabilityHtml.includes("Train") || !capabilityHtml.includes("Not this role")) throw new Error("Capability matrix does not explain who can do what");
 const trainingPeople = ClinicTest.renderUiForTest({ drawer: "training", drawerContext: null, confirm: null });
-if (!trainingPeople.includes("Dr Amina Kone") || trainingPeople.includes("Expected consequences")) throw new Error("Training must start by choosing a person");
+if (!trainingPeople.includes("Dr Amina Kone") || trainingPeople.includes("What this choice changes")) throw new Error("Training must start by choosing a person");
 const trainingOptions = ClinicTest.renderUiForTest({ drawer: "training", drawerContext: "vet-founder", confirm: null });
 if (!trainingOptions.includes("Ultrasound") || trainingOptions.includes("Animal care") || !trainingOptions.includes("Unlocks")) throw new Error("Per-person training shows the wrong role's skills");
 const paceService = ClinicTest.renderUiForTest({ drawer: "services", drawerContext: "core", selectedServiceId: "consult", confirm: null });
@@ -236,7 +238,12 @@ if (!/Asks most for:/.test(mkt) || !/Price sensitivity:/.test(mkt)) throw new Er
 
 const equip = ClinicTest.renderUiForTest({ drawer: "equipment", drawerContext: null, confirm: null });
 if (!/One-time costs/.test(equip)) throw new Error("A purchase must show its one-time cost in the preview");
-if (!/year upkeep if owned/.test(equip)) throw new Error("Owned equipment must show its annual upkeep");
+{
+  const anaes = ClinicTest.data.equipment.anesthesia;
+  const upkeep = Math.round(anaes.purchase * anaes.maintenanceRate).toLocaleString("en-GB");
+  const recurring = equip.match(/<th>Recurring costs<\/th><td[^>]*>([^<]*)<\/td><td[^>]*>([^<]*)<\/td>/);
+  if (!recurring || !recurring[1].includes(upkeep) || !recurring[2].includes(Math.round(anaes.lease).toLocaleString("en-GB"))) throw new Error(`Buying must show the annual upkeep (${upkeep}) and leasing the annual lease, side by side: ${recurring ? recurring.slice(1).join(" | ") : "no row"}`);
+}
 if (!/Net result/.test(equip) || /Net cash this year/.test(equip)) throw new Error("The preview outcome row must use the app-wide name Net result");
 
 const openDrawer = ClinicTest.renderUiForTest({ drawer: "opening", drawerContext: null, confirm: null });
@@ -249,7 +256,7 @@ if (!/once to move/.test(loc)) throw new Error("Relocation must show its one-tim
 if (!/Add parking[\s\S]{0,400}?once/.test(loc)) throw new Error("The parking card must show a price");
 
 // Inspect the preview grids only: the Overview behind the drawer also names staff climate.
-const previewGrids = (html) => html.split('class="consequence-grid"').slice(1);
+const previewGrids = (html) => html.split('class="consequence-grid').slice(1);
 const stockGrids = previewGrids(ClinicTest.renderUiForTest({ drawer: "stock", drawerContext: null, confirm: null }));
 if (!stockGrids.length) throw new Error("The stock drawer should preview each strategy");
 if (stockGrids.some((grid) => /Staff climate/.test(grid))) throw new Error("Climate rows must appear only when the decision moves climate");
@@ -273,69 +280,59 @@ function hoursGridCells(share, mutate, who = "support-maya", service = "vaccinat
   if (mutate) mutate(setup);
   ClinicTest.renderState(setup);
   const html = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: who, confirm: null, allocationDrafts: { [who]: [{ serviceId: service, share }] } });
-  const grid = html.match(/<div class="mini-hours">([\s\S]*?)<\/div><div class="allocation-total/);
-  if (!grid) throw new Error("The allocation drawer must render an hours grid");
-  const cells = {};
-  for (const match of grid[1].matchAll(/<span>([^<]*)<\/span><strong>([^<]*)<\/strong>/g)) cells[match[1]] = Number(match[2].replace(/[^\d]/g, ""));
-  return cells;
+  const bar = html.match(/<div class="allocation-total[\s\S]*?<div class="hour-bar"[\s\S]*?<\/ul><\/div>/)?.[0];
+  if (!bar) throw new Error("The allocation drawer must show where the hours go");
+  const num = (t) => Number(String(t).replace(/[^\d]/g, ""));
+  const legend = {};
+  for (const m of bar.matchAll(/<li><b class="([^" ]+)[^"]*"><\/b>(?:<button[^>]*>)?([^<]*)(?:<\/button>)? <strong>([^<]*)<\/strong><\/li>/g)) legend[m[2].trim()] = { cls: m[1], hours: num(m[3]) };
+  const sum = (cls) => Object.values(legend).filter((l) => l.cls === cls).reduce((t, l) => t + l.hours, 0);
+  const available = num(bar.match(/class="hb-mark[^"]*"[^>]*><em>([^<]*)<\/em>/)[1]);
+  const assigned = num(bar.match(/([\d,]+) h assigned of/)[1]);
+  const meter = bar.match(/<strong>([^<]*)</)?.[1] || "";
+  return { legend, available, assigned, worked: sum("hb-worked") + sum("hb-covered"), overtime: sum("hb-over"), lost: sum("hb-lost"), free: sum("hb-free"), meter };
 }
 const lightDraft = hoursGridCells(.2);
 const heavyDraft = hoursGridCells(1);
-if (lightDraft["Hours used"] === heavyDraft["Hours used"]) throw new Error("The hours grid must follow the draft, not the saved allocation");
-// Every paid hour is either worked or unused: used + unused = available + overtime, at every share
-// and whether or not hours are blocked. Blocked hours are a reason some went unworked, never a
-// second deduction — subtracting them twice reported 0 unused hours for a vet with 569 h assigned
-// to a service she is not trained for, while the clinic paid for all 569.
+if (lightDraft.worked === heavyDraft.worked) throw new Error("The hours bar must follow the draft, not the saved allocation");
+// The bar is one ruler: what was worked, the overtime, each share not worked by its cause, and what
+// was not assigned, add up to the larger of available and assigned — exactly, as a student reads it.
 const petite = (s) => { s.staff.find((p) => p.id === "support-maya").capacity = 300; };
 [[.2, null, "support-maya", "vaccination"], [.65, null, "support-maya", "vaccination"], [1, null, "support-maya", "vaccination"],
  [1.3, null, "support-maya", "vaccination"], [.65, petite, "support-maya", "vaccination"], [1.3, petite, "support-maya", "vaccination"],
  [.4, null, "vet-founder", "dentistry"], [1, null, "vet-founder", "dentistry"]].forEach(([share, mutate, who, service]) => {
   const c = hoursGridCells(share, mutate, who, service);
-  const left = c["Available hours"] + (c["Overtime hours"] || 0);
-  const right = c["Hours used"] + c["Unused hours"];
-  // Exactly, not within an hour: these are the figures on screen, and a student adds them up.
-  if (left !== right) throw new Error(`${who}'s hours must reconcile at ${Math.round(share * 100)}% on ${service}: available+overtime ${left} against used+unused ${right}`);
-  if ((c["Overtime hours"] || 0) >= 1 && c["Unused hours"] >= 1) throw new Error(`${who} cannot be paid for idle hours and overtime at once at ${Math.round(share * 100)}%`);
+  const total = c.worked + c.overtime + c.lost + c.free;
+  if (Math.abs(total - Math.max(c.available, c.assigned)) > 2) throw new Error(`${who}'s hours bar must add up at ${Math.round(share * 100)}% on ${service}: ${total} against ${Math.max(c.available, c.assigned)}`);
+  if (c.worked > c.available) throw new Error(`${who}: worked hours beyond the hours available are overtime, not worked hours`);
+  if (c.overtime >= 1 && c.free >= 1) throw new Error(`${who} cannot have overtime and unassigned hours at once`);
+  if (c.overtime >= 1 && !c.meter.includes(`overtime forecast: ${c.overtime.toLocaleString("en-GB")} h`)) throw new Error(`The headline must name the overtime the bar shows (${c.overtime} h): "${c.meter}"`);
+  if (c.overtime < 1 && /overtime forecast: [1-9]/.test(c.meter)) throw new Error(`No overtime on the bar, yet the headline announces some: "${c.meter}"`);
 });
-// The blocked case, stated on its own so it cannot be lost in the loop above: hours assigned to a
-// service someone is not trained for are paid, unworked, and must be counted as unused.
 {
   const bloque = hoursGridCells(1, null, "vet-founder", "dentistry");
-  if (!(bloque["Blocked by a missing skill"] > 1)) throw new Error("This check needs a person assigned to a service they cannot deliver");
-  if (bloque["Unused hours"] < bloque["Blocked by a missing skill"] - 1) throw new Error(`${bloque["Blocked by a missing skill"]} h are blocked and paid, yet only ${bloque["Unused hours"]} h are reported unused`);
+  if (!(bloque.legend["missing skill"]?.hours > 1)) throw new Error("Hours assigned to a service someone cannot deliver must show as lost to a missing skill");
 }
-// The sentence above the grid and the grid itself must never describe different clinics. The
-// meter used to talk about the assignment ("35% unassigned", "fully booked") while the hours told
-// a different story underneath it — three-quarters idle, or every hour blocked.
-function meterAndGrid(share, mutate, service = "vaccination") {
-  const setup = ClinicTest.initialState("balanced", "en");
-  setup.services[service].active = true;
-  if (mutate) mutate(setup);
-  ClinicTest.renderState(setup);
-  const html = ClinicTest.renderUiForTest({ drawer: "staffAllocation", drawerContext: "support-maya", confirm: null, allocationDrafts: { "support-maya": [{ serviceId: service, share }] } });
-  const meter = html.match(/<div class="allocation-total[^"]*"><strong>([^<]*)</)?.[1] || "";
-  const grid = html.match(/<div class="mini-hours">([\s\S]*?)<\/div><div class="allocation-total/)?.[1] || "";
-  const cells = {};
-  for (const cell of grid.matchAll(/<span>([^<]*)<\/span><strong>([^<]*)<\/strong>/g)) cells[cell[1]] = Number(cell[2].replace(/[^\d]/g, ""));
-  return { meter, cells };
-}
-const shrink = (setup) => { setup.staff.find((person) => person.id === "support-maya").capacity = 300; };
-[[.65, null], [1, null], [1, shrink]].forEach(([share, mutate]) => {
-  const { meter, cells } = meterAndGrid(share, mutate);
-  if (cells["Unused hours"] >= 1 && !meter.includes(`${cells["Unused hours"].toLocaleString("en-GB").replace(/,/g, ",")} h paid and unused`)) {
-    throw new Error(`The meter must report the hours the grid calls unused (${cells["Unused hours"]}), not a share of the assignment: "${meter}"`);
-  }
-});
-// Overtime the model will actually work has to reach the sentence, not only the allowance.
+// Worked overtime shows on the bar; none when none is worked.
+if (!(hoursGridCells(1.3, petite).overtime > 0)) throw new Error("Overtime hours must appear on the bar when they are worked");
+if (hoursGridCells(.65).overtime !== 0) throw new Error("No overtime segment when no overtime is worked");
+// The case that started this (owner, 2026-10-19): assigned above 100 % behind a full room is not
+// overtime. The card must not announce it, and the bar must name the room as where the hours went.
 {
-  const { meter, cells } = meterAndGrid(1.3, shrink);
-  if (!meter.includes(`overtime forecast: ${cells["Overtime hours"]} h`)) throw new Error(`The meter must name the overtime actually worked (${cells["Overtime hours"]} h): "${meter}"`);
+  const c0 = ClinicTest.initialState("balanced", "en"); c0.rules.actionLimit = 12; c0.rules.targetYear = 12; ClinicTest.renderState(c0);
+  ClinicTest.queueAction("service:vaccination:active", { kind: "toggle-service", targetId: "vaccination", value: true }); ClinicTest.resolveTurn();
+  ClinicTest.queueAction("service:preventive:active", { kind: "toggle-service", targetId: "preventive", value: true }); ClinicTest.resolveTurn(); ClinicTest.resolveTurn();
+  const maya = ClinicTest.getState().staff.find((p) => p.role === "support");
+  ClinicTest.queueAction(`staff-allocation:${maya.id}`, { kind: "staff-allocation", targetId: maya.id, value: { allocations: maya.allocations.map((a) => ({ ...a, share: a.share * 1.17 })) } });
+  const f = ClinicTest.simulatePlan();
+  const row = f.operational.staffRows.find((r) => r.id === maya.id);
+  if (!(row.assignedShare > 1.05) || row.overtimeHours >= 1) throw new Error("This check needs a person assigned above 100 % who works no overtime");
+  const team = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "team" });
+  if (/overtime/.test((team.match(/<p class="staff-zone[^"]*">[^<]*<\/p>/g) || []).join(""))) throw new Error("A card must not announce overtime the model does not pay");
+  // Before the year: the hours not worked are shown, not why (that is the diagnosis, given in Résultats).
+  if (/room full/.test(team) || !/not worked <strong>[\d,]+<\/strong>/.test(team)) throw new Error("Before the year, the team screen shows hours not worked without naming their cause");
+  // The year's constraint is the students' to diagnose: no screen announces it before the year is passed.
+  if (/class="constraint-badge"|class="forecast-row constraint"/.test(team)) throw new Error("No screen may announce the main constraint before the year is passed");
 }
-
-// Worked overtime belongs where the hours are, not only inside a sentence.
-const overtimeCells = hoursGridCells(1.3, (s) => { s.staff.find((p) => p.id === "support-maya").capacity = 300; });
-if (!(overtimeCells["Overtime hours"] > 0)) throw new Error("Overtime hours must appear in the grid when they are worked");
-if (hoursGridCells(.65)["Overtime hours"] !== undefined) throw new Error("The overtime cell must stay hidden when no overtime is worked");
 
 const stateBeforePlanRowTests = ClinicTest.getState();
 // The mobile plan drawer built its own rows with raw money()/number()/pct(), so a game set to
@@ -628,7 +625,7 @@ if (undone.history.length !== 0) throw new Error("Undo must drop the year's repo
 if (!Object.keys(undone.pending).length) throw new Error("Undo must hand the team back the plan they had queued");
 ClinicTest.resolveTurn();
 const afterSecondPass = JSON.stringify(ClinicTest.getState());
-const scrub = (json) => JSON.parse(json, (key, value) => (key === "at" || key === "updatedAt" || key === "queuedAt" || key === "confirmedAt" ? null : value));
+const scrub = (json) => JSON.parse(json, (key, value) => (key === "at" || key === "updatedAt" || key === "queuedAt" || key === "confirmedAt" || key === "passedAt" ? null : value));
 if (JSON.stringify(scrub(afterFirstPass).history) !== JSON.stringify(scrub(afterSecondPass).history)) throw new Error("Passing the same year twice must produce the same result — the model is no longer deterministic");
 // The snapshot must stay flat. Letting `history` or a nested `undo` in makes the save grow by a
 // full year's report every year, which is what excluding them prevents.
@@ -760,6 +757,7 @@ const stripAccents = (text) => text.normalize("NFD").replace(/[\u0300-\u036f]/g,
 // Labels that live in the same slots but do not name a model quantity. Anything not here and not
 // canonical fails, which is the whole point: adding a new label has to be a deliberate act.
 const NOT_A_QUANTITY = new Set([
+  "Promise to the municipality", "Promesse à la commune", "Volume kept", "Volume gardé", "A sustainability measure", "Une mesure de durabilité", "Requests", "Demandes", "Carbon per case", "Carbone par cas", "Client households", "Foyers clients", "Requests refused", "Demandes refusées", "Households next year", "Foyers l’an prochain",
   "Salaries", "Salaires", "Employer charges", "Charges sociales", "Facilities", "Installations",
   "Administration", "Frais d’administration", "Payroll and charges", "Salaires et charges",
   "Payroll, charges and overtime", "Salaires, charges et heures supplémentaires",
@@ -778,7 +776,7 @@ const NOT_A_QUANTITY = new Set([
   "Active services", "Services actifs", "Rooms", "Salles",
   "Veterinary hours available", "Heures vétérinaires disponibles",
   "Support hours available", "Heures de soutien disponibles",
-  "Unused team hours", "Heures d’équipe inutilisées",
+  "Paid hours not worked", "Heures payées non travaillées",
   "Largest source", "Source principale",
   // the carbon sources, which name where the footprint comes from rather than a quantity
   "Clinical care", "Soins cliniques", "Clinical equipment", "Équipement clinique",
@@ -788,8 +786,8 @@ const NOT_A_QUANTITY = new Set([
 
 const LABEL_SLOTS = [
   /<article class="metric-card[^"]*"><span>([^<]*)<\/span>/g,
-  /<div class="consequence-grid"[^>]*>(?:<div><span>([^<]*)<\/span>)/g,
-  /<div class="consequence-grid"[^>]*>[\s\S]*?<\/div><\/div>/g,
+  /<div class="consequence-grid[^"]*"[^>]*>(?:<div><span>([^<]*)<\/span>)/g,
+  /<div class="consequence-grid[^"]*"[^>]*>[\s\S]*?<\/div><\/div>/g,
   /<div class="forecast-row[^"]*"><strong>([^<]*)<\/strong>/g,
   /<div class="comparison-list"[^>]*>[\s\S]*?<\/div><\/div>/g,
   /<div class="summary-grid"><p><span>([^<]*)<\/span>/g
@@ -799,7 +797,7 @@ function extractLabels(html) {
   const labels = [];
   for (const match of html.matchAll(/<article class="metric-card[^"]*"><span>([^<]*)<\/span>/g)) labels.push(match[1]);
   for (const match of html.matchAll(/<div class="forecast-row[^"]*"><strong>([^<]*)<\/strong>/g)) labels.push(match[1]);
-  for (const block of html.matchAll(/<div class="consequence-grid"[^>]*>([\s\S]*?)<\/div>(?=<\/div>|<p|$)/g)) {
+  for (const block of html.matchAll(/<div class="consequence-grid[^"]*"[^>]*>([\s\S]*?)<\/div>(?=<\/div>|<p|$)/g)) {
     for (const cell of block[1].matchAll(/<span>([^<]*)<\/span>/g)) labels.push(cell[1]);
   }
   for (const block of html.matchAll(/<div class="comparison-list"[^>]*>([\s\S]*?)<\/div>(?=<\/div>|<p|$)/g)) {
@@ -874,12 +872,14 @@ const overviewHtml = ClinicTest.renderState(balancedStart);
 // Assert on the Cases-served card itself: the scenario-goal text also contains "of open requests",
 // so a page-wide regex stays green even when the caption is deleted.
 const servedCaption = (html) => (html.match(/Cases served<\/span><strong>[^<]*<\/strong><em>([^<]*)</) || [])[1] || "";
-const overviewCaption = servedCaption(overviewHtml);
-if (!/of open requests/.test(overviewCaption)) throw new Error("The Cases-served card must say the rate is of OPEN requests");
-if (!/not offered/.test(overviewCaption)) throw new Error("The Cases-served card must show how many requests are not offered");
+// On the overview the card became one flow — households → requests → cases served (owner,
+// 2026-10-19). The same two facts must be read there, inside the strip itself.
+const overviewCaption = ((overviewHtml.match(/<section class="flow-strip"[\s\S]*?<\/section>/) || [""])[0]).replace(/<[^>]+>/g, " ");
+if (!/of open requests/.test(overviewCaption)) throw new Error("The overview's flow must say the rate is of OPEN requests");
+if (!/for services you could open now/.test(overviewCaption) || /not offered/.test(overviewCaption)) throw new Error("The overview's flow must show only the requests the clinic could take on now");
 const careStart = ClinicTest.clone(balancedStart); careStart.domain = "care";
 const careCaption = servedCaption(ClinicTest.renderState(careStart));
-if (!/of open requests/.test(careCaption) || !/not offered/.test(careCaption)) throw new Error("The Care page Cases-served card must show the unmet market too");
+if (!/of open requests/.test(careCaption) || !/for services you could open now/.test(careCaption)) throw new Error("The Care page Cases-served card must show the requests it could take on now");
 
 const ramping = ClinicTest.initialState("balanced", "en");
 ramping.services.vaccination.active = true;
@@ -1026,7 +1026,7 @@ const DURATION_SURFACES = [
   ClinicTest.renderState(ClinicTest.initialState("balanced", language));
   DURATION_SURFACES.forEach(([drawer, drawerContext, selectedServiceId]) => {
     const html = ClinicTest.renderUiForTest({ drawer, drawerContext, selectedServiceId, confirm: null });
-    const previews = (html.match(/class="consequence-grid"/g) || []).length;
+    const previews = (html.match(/class="consequence-grid[^"]*"/g) || []).length;
     const markers = (html.match(/class="lasts"/g) || []).length;
     if (previews && markers < previews) throw new Error(`Every previewed decision must say how long it lasts; ${drawer} has ${markers} of ${previews} (${language})`);
   });
@@ -1196,7 +1196,11 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
   if (!ClinicTest.chargerClinique(JSON.stringify(file))) throw new Error("A valid save file must load");
   const after = ClinicTest.getState();
   const scrub = (o) => JSON.parse(JSON.stringify(o), (k, v) => (k === "at" || k === "updatedAt" || k === "savedAt" ? null : v));
-  if (JSON.stringify(scrub(before)) !== JSON.stringify(scrub(after))) throw new Error("A saved clinic must come back identical, or a team loses a week of play");
+  // A load adds two things by design: an entry in the decision log, and the replaced run in the
+  // archive. Everything else must come back identical.
+  const sansChargement = (o) => ({ ...o, runArchive: [], decisionLog: (o.decisionLog || []).filter((e) => e.event !== "load") });
+  if (JSON.stringify(scrub(sansChargement(before))) !== JSON.stringify(scrub(sansChargement(after)))) throw new Error("A saved clinic must come back identical, or a team loses a week of play");
+  if (!after.decisionLog.some((e) => e.event === "load")) throw new Error("A load must leave a trace in the decision log");
   if (after.history.length !== 2 || after.scenarioId !== "growth") throw new Error("Loading must restore the scenario and the history, not only the current year");
   // Nothing that is not a save file may replace a clinic, and a refusal must change nothing.
   const sentinel = JSON.stringify(scrub(ClinicTest.getState()));
@@ -1273,8 +1277,9 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
   });
 }
 
-// The results page loses the questionnaire teams never filled in, and keeps every word already
-// written: the exports are where that work survives.
+// The team reflections no longer exist (owner, 2026-10-16): the students' writing lives in their
+// shared document. Neither export may carry them, not even text left in an older clinic's state —
+// an empty "Réflexions de l’équipe" made every team look as if it had not answered.
 {
   const kept = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("balanced", "en")));
   ClinicTest.renderState(kept);
@@ -1284,8 +1289,10 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
   ClinicTest.renderState(withText);
   const page = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "results" });
   if (/data-reflection=/.test(page)) throw new Error("The results page still asks the five reflection questions");
-  if (ClinicTest.buildExportPayload().years[0].reflection.rationale !== "We used spare time") throw new Error("Removing the questionnaire lost the reflections already written");
-  if (!ClinicTest.buildPrintableReportHtml().includes("We used spare time")) throw new Error("The printable report lost the reflections already written");
+  const json = ClinicTest.buildExportPayload();
+  if ("reflection" in json.years[0]) throw new Error("The analysis file still carries a reflection field");
+  const printed = ClinicTest.buildPrintableReportHtml();
+  if (/Réflexions de l’équipe|Team reflections|We used spare time|Aucune réponse|No response/.test(printed)) throw new Error("The printable report still prints team reflections");
 }
 
 // Where a number is read is where its control belongs.
@@ -1396,12 +1403,14 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
   // The two bars draw different quantities, so they must not both claim a state the other denies.
   {
     const equipe = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "team" });
-    const cartes = [...equipe.matchAll(/<div class="meter" aria-hidden="true"><i class="([a-z]*)" style="width:([\d.]+)%/g)].map((m) => ({ tone: m[1], width: Number(m[2]) }));
-    if (!cartes.length) throw new Error("The team page drew no workload bars");
     const maya = ClinicTest.getState().staff.find((person) => person.role === "support");
     const ligne = ClinicTest.simulatePlan([]).operational.staffRows.find((row) => row.id === maya.id);
     if (!(ligne.workload < .01)) throw new Error("This guard assumes the support worker starts on closed services");
-    if (cartes.some((carte) => carte.width < 1 && carte.tone === "good")) throw new Error("An empty bar is painted as a good outcome");
+    const cartes = equipe.match(/<article class="staff-card">[\s\S]*?<\/article>/g) || [];
+    const carteMaya = cartes.find((c) => c.includes(maya.name)) || "";
+    if (!/class="hour-bar"/.test(carteMaya)) throw new Error("The team page drew no hours bar");
+    // Nothing worked is never drawn as worked: the bar shows the hours lost to the closed services.
+    if (/class="hb-seg hb-worked"/.test(carteMaya) || !/service closed/.test(carteMaya)) throw new Error("A person who works none of their paid hours must show them lost, to closed services");
   }
 
   // A field you can type into and then cannot validate is worse than no field. validAllocations
@@ -1480,7 +1489,7 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
   const forecast = ClinicTest.simulatePlan(ClinicTest.pendingActions());
   if (!(forecast.operational.staffRows.some((row) => row.blockedHours > 1))) throw new Error("This check needs blocked hours to tell the two readings apart");
   const page = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "team" });
-  const carte = page.match(/Unused team hours<\/span><strong>([^<]*)</);
+  const carte = page.match(/Paid hours not worked<\/span><strong>([^<]*)</);
   if (!carte) throw new Error("The team page no longer shows unused team hours");
   const affiche = Number(carte[1].replace(/[^\d-]/g, ""));
   const somme = Math.round(forecast.operational.staffRows.reduce((sum, row) => sum + row.unusedHours, 0));
@@ -1508,7 +1517,6 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
   const paires = [
     ["Net result", ["overview", "business"]],
     ["Team workload", ["overview", "team"]],
-    ["Carbon footprint", ["overview", "sustainability"]],
     ["Cases served", ["overview", "care"]]
   ];
   const valeur = (html, label) => {
@@ -1554,7 +1562,7 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
 {
   const combinaisons = [
     ["coordinated stock", (clinic) => { clinic.operations.stockStrategy = "coordinated"; }],
-    ["optimized stock and internal monitoring", (clinic) => { clinic.operations.stockStrategy = "optimized"; clinic.marketing.monitoring = "internal"; }],
+    ["optimized stock and internal monitoring", (clinic) => { clinic.operations.stockStrategy = "optimized"; clinic.marketing.geomarketing = "internal"; }],
     ["two support workers", (clinic) => { clinic.operations.stockStrategy = "coordinated"; const un = clinic.staff.find((p) => p.role === "support"); clinic.staff.push({ ...ClinicTest.clone(un), id: "support-two", name: "Second", hiredYear: 0 }); }],
     ["two support workers, four reservations", (clinic) => { clinic.operations.stockStrategy = "optimized"; clinic.marketing.geomarketing = "internal"; clinic.sustainability.accessPlan = true; const un = clinic.staff.find((p) => p.role === "support"); clinic.staff.push({ ...ClinicTest.clone(un), id: "support-two", name: "Second", hiredYear: 0 }); }]
   ];
@@ -1589,6 +1597,703 @@ if (riderFor("equipment", { kind: "equipment-acquire", targetId: "ultrasound", m
     if (Math.abs(somme - apres.nonClinicalHours) > .01) throw new Error(`Hours reserved by the plan are missing from the breakdown: ${Math.round(somme)} named against ${Math.round(apres.nonClinicalHours)} taken`);
   }
   ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// Friday is played twice from one saved clinic: three years without the project, reload, three
+// years with it. Without an archive the load erased the first run, and with it the comparison the
+// whole week builds towards.
+{
+  const depart = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("balanced", "fr")));
+  ClinicTest.renderState(depart);
+  ClinicTest.resolveTurn();
+  const sauvegarde = { kind: "clinique-sauvegarde", schemaVersion: 8, savedAt: new Date().toISOString(), state: ClinicTest.clone(ClinicTest.getState()) };
+  ClinicTest.resolveTurn(); ClinicTest.resolveTurn(); ClinicTest.resolveTurn();
+  const sansProjet = ClinicTest.getState().history.map((r) => Math.round(r.financial.netResult));
+  if (!ClinicTest.chargerClinique(JSON.stringify(sauvegarde))) throw new Error("The saved clinic must load");
+  const charge = ClinicTest.getState();
+  if (charge.year !== 2) throw new Error("Loading must return to the saved year");
+  if (charge.runArchive.length !== 1) throw new Error(`The replaced run must be archived once, found ${charge.runArchive.length}`);
+  const essai = charge.runArchive[0];
+  if (JSON.stringify(essai.years.map((r) => Math.round(r.netResult))) !== JSON.stringify(sansProjet)) throw new Error("The archived run must keep every year it played");
+  const payload = ClinicTest.buildExportPayload();
+  if (!payload.runArchive || payload.runArchive.length !== 1) throw new Error("The analysis file must carry the archived run");
+  if (!payload.decisionLog.some((e) => e.event === "load")) throw new Error("The analysis file must show that a clinic was loaded");
+  if (!ClinicTest.buildPrintableReportHtml().includes("Essais rechargés")) throw new Error("The printable report must show the archived run");
+  // A team that saves again after a reload carries the archive inside its file. Loading that file
+  // brings the same run from both sides: it must be kept once.
+  const sauvegarde2 = { kind: "clinique-sauvegarde", schemaVersion: 8, savedAt: new Date().toISOString(), state: ClinicTest.clone(ClinicTest.getState()) };
+  ClinicTest.resolveTurn();
+  ClinicTest.chargerClinique(JSON.stringify(sauvegarde2));
+  const ids = ClinicTest.getState().runArchive.map((e) => e.id);
+  if (ids.length !== 2 || new Set(ids).size !== 2) throw new Error(`Two replaced runs must give two archive entries, found ${ids.length}`);
+}
+
+// The viewpoints panel ("Mieux ou moins bien — vu d’où ?") carries Tuesday and Thursday. Its
+// verdicts are frozen with the year, and the requests the clinic does not offer with them, so the
+// access-to-care view can be read back from the export.
+{
+  const c = ClinicTest.hydrate(ClinicTest.clone(ClinicTest.initialState("balanced", "fr")));
+  ClinicTest.renderState(c);
+  ClinicTest.queueAction("price:consult", { kind: "price", targetId: "consult", value: 58 });
+  ClinicTest.resolveTurn();
+  const shown = ClinicTest.getState().history[0].forecastShown;
+  if (!Array.isArray(shown.frames) || shown.frames.length !== 4) throw new Error("A passed year must freeze the four viewpoints");
+  const parId = Object.fromEntries(shown.frames.map((f) => [f.id, f.verdict]));
+  if (parId.money !== "better" || parId.access !== "worse") throw new Error(`A 20 % price rise must read better for the accounts and worse for access, got ${JSON.stringify(parId)}`);
+  if (!(shown.shown.opportunity > 0)) throw new Error("The forecast snapshot must keep the requests the clinic does not offer");
+}
+
+
+// What a team reads when it passes a year must be what the export says, figure for figure: the
+// results page, the Référence / Planifié pair shown before passing, and the printable report. With
+// exact forecasts the realised year equals the plan; with demand variation it does not, and the
+// screen and the export must still agree.
+{
+  const norm = (t) => String(t).replace(/\s+/g, " ");
+  const texte = (h) => norm(h.replace(/<[^>]+>/g, " "));
+  ["exact", "ranges"].forEach((precision) => {
+    const c = ClinicTest.initialState("balanced", "en", { classCode: "CONCORDANCE", forecastPrecision: precision });
+    c.rules.actionLimit = 4;
+    ClinicTest.renderState(c);
+    const eur = (v) => norm(new Intl.NumberFormat("en-GB", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(Math.round(v)));
+    const nb = (v) => norm(new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(Math.round(v)));
+    const plans = [
+      [["price:consult", { kind: "price", targetId: "consult", value: 58 }]],
+      [["service:vaccination:active", { kind: "toggle-service", targetId: "vaccination", value: true }], ["service:preventive:active", { kind: "toggle-service", targetId: "preventive", value: true }]],
+      [],
+      [["service:lab:active", { kind: "toggle-service", targetId: "lab", value: true }]]
+    ];
+    plans.forEach((plan) => {
+      plan.forEach(([key, payload]) => ClinicTest.queueAction(key, payload));
+      const avant = texte(ClinicTest.renderState({ ...ClinicTest.getState(), domain: "overview" }));
+      ClinicTest.resolveTurn();
+      const year = ClinicTest.buildExportPayload().years.at(-1);
+      const page = texte(ClinicTest.renderState({ ...ClinicTest.getState(), domain: "results" }));
+      const rapport = texte(ClinicTest.buildPrintableReportHtml());
+      const attendus = [[eur(year.netResult), page, "the net result on the results page"], [nb(year.served), page, "the cases served on the results page"], [eur(year.treasury), page, "the treasury on the results page"], [eur(year.netResult), rapport, "the net result in the printable report"]];
+      if (precision === "exact") {
+        // The plan panel row reads "Net result <Référence> <Planifié> <gap>": all three, in order, and
+        // the gap must be the difference of the two printed figures.
+        const base = Math.round(year.forecastShown.noActionBaseline.netResult), plan = Math.round(year.forecastShown.shown.netResult);
+        const ecart = norm(new Intl.NumberFormat("en-GB", { style: "currency", currency: "EUR", maximumFractionDigits: 0, signDisplay: "exceptZero" }).format(plan - base));
+        const ligne = `Net result ${eur(base)} ${eur(plan)} ${plan === base ? "" : ecart}`.trim();
+        attendus.push([ligne, avant, "the Référence / Planifié / gap row before passing"]);
+      }
+      attendus.forEach(([valeur, ecran, quoi]) => { if (!ecran.includes(valeur)) throw new Error(`Year ${year.year} (${precision}): the export says ${valeur} for ${quoi}, the screen does not`); });
+      if (Math.round(year.forecastShown.realised.netResult) !== Math.round(year.netResult)) throw new Error(`Year ${year.year}: the frozen realised result differs from the year's result`);
+    });
+  });
+}
+
+// How a team decided must be readable, not only what it decided: every planned, changed and removed
+// decision with its time, and the moment the year was passed — in the analysis file and in the PDF.
+{
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "fr"));
+  ClinicTest.queueAction("price:consult", { kind: "price", targetId: "consult", value: 55 });
+  ClinicTest.queueAction("price:consult", { kind: "price", targetId: "consult", value: 58 });
+  ClinicTest.queueAction("service:vaccination:active", { kind: "toggle-service", targetId: "vaccination", value: true });
+  ClinicTest.removeAction("service:vaccination:active");
+  ClinicTest.resolveTurn();
+  const json = ClinicTest.buildExportPayload();
+  const events = json.decisionLog.filter((e) => e.year === 1).map((e) => e.event);
+  ["add", "revise", "remove", "pass"].forEach((ev) => { if (!events.includes(ev)) throw new Error(`The decision log must record "${ev}"`); });
+  const retiree = json.decisionLog.find((e) => e.event === "remove");
+  if (!retiree.label || !/Vaccination/.test(retiree.label)) throw new Error("A removed decision must keep the label the team read on screen");
+  if (!json.years[0].passedAt || Number.isNaN(Date.parse(json.years[0].passedAt))) throw new Error("Each year must record when it was passed");
+  if (json.years[0].actionRecords[0].revisions !== 1) throw new Error("The price decision was changed once");
+  const pdf = ClinicTest.buildPrintableReportHtml();
+  ["Comment l’année a été décidée", "Année passée", "Retirée", "Modifiée", "Première planification", "Dernière modification"].forEach((mot) => {
+    if (!pdf.includes(mot)) throw new Error(`The PDF must show « ${mot} »`);
+  });
+  if (!/Retirée<\/td><td>[^<]*Vaccination/.test(pdf)) throw new Error("The PDF timeline must name the removed decision");
+}
+
+// Wednesday ranks the services that share a full room by margin per hour of room. That hour is
+// the case's own duration times its pace — not vet time plus support time, which overlap — and it
+// must be readable on the service sheet, or the ranking cannot be done from the screen.
+{
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+  const fiche = (id) => ClinicTest.renderUiForTest({ drawer: "services", drawerContext: "core", selectedServiceId: id, confirm: null }).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const consult = fiche("consult");
+  if (!/Room time per case 0\.55 h · Consult room/.test(consult)) throw new Error("The consultation sheet must show 0.55 h of consult room per case");
+  if (!/Room time per case 0\.72 h/.test(fiche("preventive"))) throw new Error("Preventive care occupies the room 0.72 h per case: its full duration, not vet + support");
+  ClinicTest.queueAction("service-pace:consult", { kind: "service-pace", targetId: "consult", value: "fast" });
+  if (!/Room time per case 0\.44 h/.test(fiche("consult"))) throw new Error("A fast pace must shorten the room time shown on the sheet");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// Trust, rushed visits and price must be things a team can watch over the years and act on
+// (owner, 2026-10-19). Each mechanism below is something the screen shows before and after a year.
+{
+  const lundi = () => {
+    ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+    ClinicTest.queueAction("service:vaccination:active", { kind: "toggle-service", targetId: "vaccination", value: true }); ClinicTest.resolveTurn();
+    ClinicTest.queueAction("service:preventive:active", { kind: "toggle-service", targetId: "preventive", value: true }); ClinicTest.resolveTurn();
+    return ClinicTest.getState();
+  };
+  const base = lundi();
+  const passe = (f) => { ClinicTest.renderState(ClinicTest.clone(base)); f(); ClinicTest.resolveTurn(); return ClinicTest.getState().history.at(-1); };
+  const ref = passe(() => {});
+  const rapide = passe(() => ClinicTest.queueAction("service-pace:consult", { kind: "service-pace", targetId: "consult", value: "fast" }));
+  const consultR = rapide.serviceResults.find((r) => r.id === "consult");
+  // Rushed care comes back: return visits use time and supplies and earn nothing.
+  if (!(consultR.returnVisits > 0)) throw new Error("A rushed consultation must produce return visits");
+  if (Math.abs(consultR.revenue - consultR.honored * consultR.price) > 1) throw new Error("Return visits must earn nothing");
+  if (!(consultR.variableCosts > consultR.revenue * ClinicTest.data.services.find((s) => s.id === "consult").variableCost + 1)) throw new Error("Return visits must use supplies");
+  // Its trust line stands on its own, and the team pays for rushing.
+  if (!(rapide.social.trustParts.pace <= -2)) throw new Error(`Rushing must cost trust on its own line, got ${rapide.social.trustParts.pace}`);
+  if (!(rapide.social.after.clientTrust < ref.social.after.clientTrust)) throw new Error("Rushing must leave trust lower than not rushing, even while serving more");
+  if (rapide.social.climateParts.pace !== -1) throw new Error("A rushed service must cost the team one point of climate a year");
+  // The accepted price is the client type's, moved by trust, and the price screen shows exactly it.
+  // The accepted price is the client type's, moved by trust: read on the price screen at trust 50 and
+  // 60, it must rise — and at 50 it must be the client type's own figure.
+  const euros = (v) => new Intl.NumberFormat("en-GB", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(Math.round(v)).replace(/\s+/g, " ");
+  const prixLu = (trust) => {
+    const c = ClinicTest.clone(base); c.social.clientTrust = trust; c.marketing.geomarketing = "external"; ClinicTest.renderState(c);
+    const texte = ClinicTest.renderUiForTest({ drawer: "pricing", drawerContext: null, confirm: null }).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+    const m = texte.match(/consultation[^€]*?Price your clients accept: €([\d,.]+)/i);
+    return { texte, valeur: m ? Number(m[1].replace(/,/g, "")) : NaN };
+  };
+  const a50 = prixLu(50), a60 = prixLu(60);
+  const ecran = a60.texte;
+  if (a50.valeur !== Math.round(ClinicTest.data.segments.community.willingness.consult)) throw new Error(`At trust 50 the screen must show the client type's own accepted price, got ${a50.valeur}`);
+  if (!(a60.valeur > a50.valeur)) throw new Error(`Trust must raise the accepted price: ${a50.valeur} at 50, ${a60.valeur} at 60`);
+  if (!/Your clients: Community mix/.test(ecran)) throw new Error("The price screen must name the client type");
+  // Without a market study the same price is known only as a range around it, not centred on it;
+  // the team's study narrows the range, a consultancy's gives the figure (owner, 2026-10-19).
+  [["none", true], ["internal", true], ["external", false]].forEach(([level, isRange]) => {
+    const c = ClinicTest.clone(base); c.marketing.geomarketing = level; ClinicTest.renderState(c);
+    const t = ClinicTest.renderUiForTest({ drawer: "pricing", drawerContext: null, confirm: null }).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+    const m = t.match(/consultation[^€]*?Price your clients accept: €([\d,]+)(?:–€([\d,]+))?/i);
+    const truth = Math.round(ClinicTest.data.segments.community.willingness.consult);
+    if (!m || Boolean(m[2]) !== isRange) throw new Error(`With study « ${level} » the accepted price must be ${isRange ? "a range" : "exact"}: ${m ? m[0] : "not found"}`);
+    if (isRange) { const lo = Number(m[1].replace(/,/g, "")), hi = Number(m[2].replace(/,/g, "")); if (!(lo <= truth && truth <= hi) || (lo + hi) / 2 === truth) throw new Error(`The range ${lo}–${hi} must contain ${truth} without being centred on it`); }
+  });
+  // A price above what clients accept costs trust — more for price-sensitive families.
+  const prixAvec = (seg) => { const c = ClinicTest.clone(base); c.marketFocus = seg; ClinicTest.renderState(c); ClinicTest.queueAction("price:consult", { kind: "price", targetId: "consult", value: 58 }); ClinicTest.resolveTurn(); return ClinicTest.getState().history.at(-1).social.trustParts.price || 0; };
+  const pCommunity = prixAvec("community"), pBudget = prixAvec("budget");
+  if (!(pCommunity < 0)) throw new Error("A 58 € consultation must cost the local mix some trust");
+  if (!(pBudget < pCommunity)) throw new Error("Price-sensitive families must lose more trust than the local mix at the same price");
+  // The price screen points: the price sits in the marked zone above the accepted price.
+  if (!/<b class="ps-price over"/.test(ClinicTest.renderUiForTest({ drawer: "pricing", drawerContext: null, confirm: null }))) throw new Error("A price above the accepted one must sit, marked, in the zone above it on the price screen");
+  // Past a line, trust moves clients.
+  const clientsApres = (trust) => { const c = ClinicTest.clone(base); c.social.clientTrust = trust; ClinicTest.renderState(c); ClinicTest.resolveTurn(); const r = ClinicTest.getState(); return r.clients / c.clients; };
+  const g50 = clientsApres(50), g40 = clientsApres(40), g30 = clientsApres(30);
+  if (!(g40 < g50 - .02)) throw new Error("Below 45, clients must leave");
+  if (!(g30 < g40 - .03)) throw new Error("Below 35, clients must leave faster");
+  // The plan panel shows trust and climate before the year is passed.
+  ClinicTest.renderState(ClinicTest.clone(base));
+  const panneau = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "overview" });
+  if (!/class="forecast-row"><strong>Client trust</.test(panneau) || !/class="forecast-row"><strong>Staff climate</.test(panneau)) throw new Error("Trust and climate must be rows of the plan panel, read before passing a year");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// Every relation shown on screen has a role, and both exports carry it (owner, 2026-10-19).
+{
+  const base = (() => { const c = ClinicTest.initialState("balanced", "en"); c.rules.actionLimit = 4; ClinicTest.renderState(c);
+    ClinicTest.queueAction("service:vaccination:active", { kind: "toggle-service", targetId: "vaccination", value: true }); ClinicTest.resolveTurn();
+    ClinicTest.queueAction("service:preventive:active", { kind: "toggle-service", targetId: "preventive", value: true }); ClinicTest.resolveTurn();
+    return ClinicTest.getState(); })();
+  const plan = (f) => { const c = ClinicTest.clone(base); f(c); ClinicTest.renderState(c); return ClinicTest.simulatePlan(); };
+  // Referring vets move advanced requests, and only those.
+  const avecEcho = (c) => { c.services.ultrasound.active = true; };
+  const echo = (ref) => plan((c) => { avecEcho(c); c.social.referralSupport = ref; }).serviceResults.find((r) => r.id === "ultrasound").demand;
+  const consult = (ref) => plan((c) => { c.social.referralSupport = ref; }).serviceResults.find((r) => r.id === "consult").demand;
+  if (!(echo(70) > echo(50) * 1.15)) throw new Error("Referral support at 70 must bring clearly more ultrasound requests than at 50");
+  if (consult(70) !== consult(50)) throw new Error("Referral support must not move routine requests");
+  // Refused clients pile up and cost trust; they no longer create requests.
+  const refus = (p) => plan((c) => { c.social.communityPressure = p; });
+  if (!((refus(80).social.trustParts.refused || 0) < -2)) throw new Error("Access pressure at 80 must cost trust");
+  if (refus(80).operational.totalDemand !== refus(50).operational.totalDemand) throw new Error("Access pressure must no longer create requests");
+  // Reputation no longer grows clients on its own.
+  const clientsRep = (rep) => { const c = ClinicTest.clone(base); c.reputation = rep; ClinicTest.renderState(c); ClinicTest.resolveTurn(); return ClinicTest.getState().clients; };
+  if (clientsRep(40) !== clientsRep(80)) throw new Error("Reputation is folded into trust: it must not move clients by itself");
+  // Screens: the clients card and the relations guide.
+  ClinicTest.renderState(ClinicTest.clone(base));
+  const vue = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "overview" }).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  if (!/Client households [\d,]+ /.test(vue) || !/Next year .*?Client households [\d,]+ → [\d,]+/.test(vue)) throw new Error("The overview must show client households now, and under « Next year » the count they become");
+  // Exports: the JSON carries the accepted price and the client movement; the PDF explains each year.
+  ClinicTest.resolveTurn();
+  const json = ClinicTest.buildExportPayload();
+  const y = json.years.at(-1);
+  if (!(y.serviceResults.find((r) => r.id === "consult").acceptedPrice > 0)) throw new Error("The analysis file must carry each service's accepted price");
+  if (!("clientMovement" in y.social)) throw new Error("The analysis file must carry the client movement");
+  const pdf = ClinicTest.buildPrintableReportHtml();
+  ["Relations around the clinic", "Why it moved", "Accepted price", "Return visits", "Client type"].forEach((m) => { if (!pdf.includes(m)) throw new Error(`The PDF must show « ${m} »`); });
+  if (/<td>Reputation<\/td>/.test(pdf)) throw new Error("Reputation no longer acts on anything: it must leave the PDF");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// Goals are promises to someone who reacts the following year; relations are read at a glance; and
+// the game does not settle — its promises trade against each other over time (owner, 2026-10-19).
+{
+  const debut = () => { const c = ClinicTest.initialState("balanced", "en"); c.rules.actionLimit = 12; c.rules.targetYear = 12; ClinicTest.renderState(c);
+    ClinicTest.queueAction("service:vaccination:active", { kind: "toggle-service", targetId: "vaccination", value: true }); ClinicTest.resolveTurn();
+    ClinicTest.queueAction("service:preventive:active", { kind: "toggle-service", targetId: "preventive", value: true }); ClinicTest.resolveTurn(); };
+  // The bank: year 1 loses money, so a loan asked in year 2 costs 9 %; after two broken years, none.
+  debut();
+  const premier = ClinicTest.getState().history[0].commitments.find((c) => c.id === "bank");
+  if (!premier || premier.ok) throw new Error("Year 1 loses money: the bank promise must be broken");
+  const s1 = ClinicTest.clone(ClinicTest.getState()); s1.history = s1.history.slice(0, 1); s1.year = 2; ClinicTest.renderState(s1);
+  ClinicTest.queueAction("loan:x", { kind: "loan", value: 30000 });
+  if (ClinicTest.simulatePlan().next.loan?.rate !== .09) throw new Error("One broken bank promise must make the next loan 9 %");
+  const s2 = ClinicTest.clone(s1); s2.history = [s1.history[0], { ...s1.history[0], turn: 2 }]; s2.year = 3; ClinicTest.renderState(s2);
+  ClinicTest.queueAction("loan:x", { kind: "loan", value: 30000 });
+  if (ClinicTest.simulatePlan().next.loan) throw new Error("Two broken bank promises in a row must refuse the loan");
+  if (!/no new loan/.test(ClinicTest.renderUiForTest({ drawer: "finance", drawerContext: null, confirm: null }))) throw new Error("Financement must say the bank refuses");
+  // Referring vets react to the services promise; the municipality pays only a clinic that invests.
+  debut(); ClinicTest.resolveTurn();
+  const avecPairs = ClinicTest.getState().history.at(-1);
+  if (!(avecPairs.social.after.referralSupport - avecPairs.social.before.referralSupport > 1)) throw new Error("A kept services promise must raise referral support the next year");
+  if ((avecPairs.financial.grant || 0) !== 0) throw new Error("No sustainability measure: no grant");
+  ClinicTest.queueAction("sustainability:accessPlan", { kind: "sustainability", targetId: "accessPlan", value: true }); ClinicTest.resolveTurn(); ClinicTest.resolveTurn();
+  const prime = ClinicTest.getState().history.at(-1).financial.grant;
+  if (!(prime > 0) || prime !== ClinicTest.data.commitmentModel.grant) throw new Error("Investing and cutting carbon per case must earn the grant the year after");
+  // Screens: the flow and the promises, as plain rows; no gauges, no two-year forecast (owner, 2026-10-19:
+  // they added things to decode without helping anyone understand).
+  const vue = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "overview" });
+  if (!/class="flow-strip"/.test(vue) || !/per household a year/.test(vue)) throw new Error("The overview must show households → requests → cases with the ratio");
+  if (/class="gauge|chip-cause|gauge-info|in 2 years/.test(vue)) throw new Error("The overview must not carry gauges, cause chips or two-year rows");
+  if (!/Staff climate/.test(vue) || !/Client trust/.test(vue)) throw new Error("The overview must show climate and trust as plain cards");
+  if (!/Next year<\/h2>[\s\S]*class="card-section engagements"/.test(vue) || !/class="engagement-next">→ /.test(vue)) throw new Error("The overview must show the promises, under « Next year », with what follows");
+  // Exports.
+  const json = ClinicTest.buildExportPayload();
+  if (!Array.isArray(json.years.at(-1).commitments) || !json.years.at(-1).commitments.length) throw new Error("The analysis file must carry each year's promises");
+  if (!/Promises<\/h3>/.test(ClinicTest.buildPrintableReportHtml())) throw new Error("The PDF must show each year's promises");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// The game must not settle: the loop measurement's three properties hold (reduced to the policies
+// that show them), so a later change that makes every promise easy fails here.
+{
+  const out = require("child_process").spawnSync(process.execPath, [require("path").join(__dirname, "outils", "boucles.js")], { encoding: "utf8" });
+  if (out.status !== 0) throw new Error("The loops have settled: " + (out.stderr || out.stdout).split("\n").filter((l) => /ÉCHEC/.test(l)).join(" "));
+}
+
+// Signals carry the lesson: a refused family goes elsewhere, a tired team works slower, and the results
+// say so in plain lines that point to where to act. And a worse state is never rewarded.
+{
+  const c0 = ClinicTest.initialState("balanced", "en"); c0.rules.actionLimit = 12; c0.rules.targetYear = 12; ClinicTest.renderState(c0);
+  ClinicTest.queueAction("service:vaccination:active", { kind: "toggle-service", targetId: "vaccination", value: true }); ClinicTest.resolveTurn();
+  ClinicTest.queueAction("service:preventive:active", { kind: "toggle-service", targetId: "preventive", value: true }); ClinicTest.resolveTurn();
+  const base = ClinicTest.clone(ClinicTest.getState());
+  const plan = (f) => { const c = ClinicTest.clone(base); f(c); ClinicTest.renderState(c); return ClinicTest.simulatePlan([]); };
+  const ref = plan(() => {});
+  const refused = ref.operational.totalDemand - ref.operational.totalHonored;
+  if (!(refused > 0) || ref.social.refusedLeft !== Math.round(refused * ClinicTest.data.socialModel.refusedLeave) || !(ref.social.refusedLeft > 0)) throw new Error("Refused requests must cost households, counted on their own");
+  // A clinic that refuses more than the promised share must lose households, not gain them.
+  ClinicTest.renderState(ClinicTest.clone(base)); for (let i = 0; i < 6; i++) ClinicTest.resolveTurn();
+  const h = ClinicTest.getState().history;
+  h.forEach((r, i) => { if (i && r.operational.honoredRate < .8 && r.next.clients > ClinicTest.getState().history[i - 1].next.clients) throw new Error(`Year ${r.turn}: ${Math.round(r.operational.honoredRate * 100)} % served, yet households grew`); });
+  const tired = plan((c) => { c.social.staffClimate = 35; });
+  if (!(tired.operational.totalHonored < ref.operational.totalHonored)) throw new Error("A tired team must serve fewer cases even when the room is the constraint");
+  // No worse state pays: lower trust, lower climate, more pressure, fewer households.
+  [["trust −15", (c) => { c.social.clientTrust -= 15; }], ["climate −15", (c) => { c.social.staffClimate -= 15; }], ["climate −25", (c) => { c.social.staffClimate -= 25; }], ["households −10 %", (c) => { c.clients = Math.round(c.clients * .9); }]].forEach(([name, f]) => {
+    const r = plan(f);
+    if (r.financial.netResult > ref.financial.netResult + .5 || r.operational.totalHonored > ref.operational.totalHonored) throw new Error(`${name} must not improve the year (net ${Math.round(ref.financial.netResult)} → ${Math.round(r.financial.netResult)}, cases ${ref.operational.totalHonored} → ${r.operational.totalHonored})`);
+  });
+  // The results: plain cause → effect lines, each with where to act.
+  const c = ClinicTest.clone(base); c.social.staffClimate = 40; ClinicTest.renderState(c); ClinicTest.resolveTurn();
+  const res = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "results" });
+  const sig = (res.match(/<section class="card-section signals">[\s\S]*?<\/section>/) || [""])[0];
+  if (!sig) throw new Error("The results must show the year's signals");
+  if (!/requests refused[\s\S]*households went elsewhere/.test(sig)) throw new Error("The signals must say how many households the refusals cost");
+  if (!/Staff climate[\s\S]*every case takes/.test(sig)) throw new Error("The signals must say what a low climate does next year");
+  if (!/data-open-drawer="rooms"/.test(sig)) throw new Error("A refusal signal must open the rooms");
+  // The same lines, figure for figure, in the PDF and the analysis file.
+  const shown = [...sig.matchAll(/<span class="signal-effect">([^<]*)<\/span>/g)].map((m) => m[1]);
+  const pdf = ClinicTest.buildPrintableReportHtml();
+  shown.forEach((t) => { if (!pdf.includes(t)) throw new Error(`The PDF must carry the signal « ${t} »`); });
+  const js = ClinicTest.buildExportPayload().years.at(-1).signals || [];
+  if (js.map((l) => l.effect).join("|") !== shown.map((t) => t.replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&quot;/g, '"')).join("|")) throw new Error("The analysis file must carry the same signals as the screen");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// Refused requests have one count, split by cause, and the parts add up — per service and in
+// total — on every path (owner, 2026-10-19: 727, 415 and "full at 97 %" on three screens).
+{
+  const paths = [() => {}, (c) => { c.operations.stockStrategy = "basic"; }, (c) => { c.services.vaccination.active = true; c.services.preventive.active = true; }, (c) => { c.services.dentistry.active = true; }];
+  paths.forEach((f, k) => {
+    const c = ClinicTest.initialState(k === 3 ? "growth" : "balanced", "en"); f(c); ClinicTest.renderState(c);
+    for (let y = 0; y < 4; y++) {
+      const r = ClinicTest.simulatePlan();
+      r.serviceResults.filter((x) => x.active).forEach((x) => {
+        const sum = (x.lostBy || []).reduce((t, l) => t + l.count, 0);
+        if (sum !== Math.max(0, x.demand - x.honored)) throw new Error(`Path ${k}, year ${y + 1}, ${x.id}: refusals by cause add to ${sum}, demand − honored is ${x.demand - x.honored}`);
+      });
+      const total = ClinicTest.refusalSplit(r).reduce((t, p) => t + p.count, 0);
+      if (total !== r.operational.totalDemand - r.operational.totalHonored) throw new Error(`Path ${k}: the refusal split adds to ${total}, not ${r.operational.totalDemand - r.operational.totalHonored}`);
+      ClinicTest.resolveTurn();
+    }
+  });
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// Refusals before and after the year (owner, 2026-10-19): before, the screens give the count and the
+// measurements (room hours, stock-outs by name); the split by cause — the diagnosis — is in Résultats,
+// once the year is passed, and adds up to the year's refusals.
+{
+  const c0 = ClinicTest.initialState("balanced", "en"); c0.rules.actionLimit = 12; c0.rules.targetYear = 12; ClinicTest.renderState(c0);
+  ClinicTest.queueAction("service:vaccination:active", { kind: "toggle-service", targetId: "vaccination", value: true }); ClinicTest.resolveTurn();
+  ClinicTest.queueAction("service:preventive:active", { kind: "toggle-service", targetId: "preventive", value: true }); ClinicTest.resolveTurn();
+  const num = (t) => Number(String(t).replace(/[^\d]/g, ""));
+  const f = ClinicTest.simulatePlan();
+  const vue = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "overview" });
+  const total = num(vue.match(/<em>([\d,]+) refused/)[1]);
+  if (total !== f.operational.totalDemand - f.operational.totalHonored) throw new Error("The overview must give the year's refusals");
+  const attention = (vue.match(/<div class="priority-list">[\s\S]*?<\/section>/) || [""])[0];
+  if (/refusal-bar/.test(vue) || /room full|Support hours|Vet hours/.test(attention + (vue.match(/<section class="flow-strip"[\s\S]*?<\/section>/) || [""])[0])) throw new Error("Before the year, the overview must not split refusals by cause");
+  const stock = ClinicTest.refusalSplit(f).find((p) => p.key === "stock");
+  if (stock && !new RegExp(`incl\\. ${stock.count.toLocaleString("en-GB")} stock-outs`).test(vue)) throw new Error("Stock-outs are named before the year: they belong to the stock strategy");
+  const room = f.operational.facilityRows.find((r) => r.id === "consult");
+  if (!new RegExp(`Consult room</span><strong>${Math.round(room.used).toLocaleString("en-GB")} / ${Math.round(room.capacity).toLocaleString("en-GB")} h`).test(vue)) throw new Error("« Points d'attention » must measure the busiest room");
+  const care = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "care" });
+  if (/refused here|constraint-badge/.test(care)) throw new Error("Before the year, the care page measures; it does not attribute");
+  ClinicTest.resolveTurn();
+  const latest = ClinicTest.getState().history.at(-1);
+  const res = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "results" });
+  const bar = res.match(/<div class="hour-bar refusal-bar"[\s\S]*?<\/ul><\/div>/)?.[0] || "";
+  const parts = [...bar.matchAll(/<strong>([^<]*)<\/strong>/g)].map((m) => num(m[1]));
+  if (!parts.length || parts.reduce((a, b) => a + b, 0) !== latest.operational.totalDemand - latest.operational.totalHonored) throw new Error("After the year, Résultats must split the refusals by cause, adding up");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// Durabilité says where the clinic stands against the municipality's promise: a title that states
+// it, and one line per condition with its figure — never a lone ✗ (owner, 2026-10-19).
+{
+  const c0 = ClinicTest.initialState("balanced", "en"); c0.rules.actionLimit = 12; ClinicTest.renderState(c0);
+  ClinicTest.queueAction("service:vaccination:active", { kind: "toggle-service", targetId: "vaccination", value: true }); ClinicTest.resolveTurn();
+  ClinicTest.queueAction("service:preventive:active", { kind: "toggle-service", targetId: "preventive", value: true }); ClinicTest.resolveTurn();
+  const page = () => (ClinicTest.renderState({ ...ClinicTest.getState(), domain: "sustainability" }).match(/<section class="card-section promise-check">[\s\S]*?<\/section>/) || [""])[0];
+  const before = page();
+  const text = before.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  if (!/Promise to the municipality: not kept/.test(text)) throw new Error("The promise must be stated in words: " + text.slice(0, 120));
+  if (!/Carbon per case [\d.]+ ?kgCO₂e · [−+]\d+% vs start · target −15%/.test(text) || !/Volume kept [\d,]+ cases · minimum [\d,]+ \(80% of the start\)/.test(text)) throw new Error("Each condition must carry its own figure and what it is measured against: " + text);
+  if (!/<li class="ko"><span aria-hidden="true">✗<\/span><strong>A sustainability measure<\/strong><span>none · <a href="#sources-empreinte">/.test(before)) throw new Error("A missing measure must say so and point to the sources below");
+  const vue = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "overview" });
+  if (!/engagement-row ko"><span class="engagement-mark"[^>]*>✗<\/span><strong>The municipality/.test(vue)) throw new Error("The overview must show the same broken promise");
+  ClinicTest.queueAction("sustainability:accessPlan", { kind: "sustainability", targetId: "accessPlan", value: true });
+  if (!/<li class="ok"><span aria-hidden="true">✓<\/span><strong>A sustainability measure<\/strong><span>in the plan/.test(page())) throw new Error("With a measure planned, that condition must turn ✓");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// One word per idea, and the phone bar names the treasury, not a difference (owner, 2026-10-19).
+{
+  const c0 = ClinicTest.initialState("balanced", "en"); ClinicTest.renderState(c0);
+  const html = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "team" });
+  const f = ClinicTest.simulatePlan();
+  const bar = (html.match(/<button class="mobile-plan-toggle"[\s\S]*?<\/button>/) || [""])[0].replace(/<[^>]+>/g, "");
+  if (!bar.replace(/[^\d]/g, "").includes(String(Math.round(f.financial.treasury)))) throw new Error("The phone plan bar must show the treasury itself: " + bar);
+  if (!/<small>workload<\/small>/.test(html)) throw new Error("A person's percentage must say it is their workload");
+  if (/staff use/i.test(html + ClinicTest.renderState({ ...ClinicTest.getState(), domain: "overview" }))) throw new Error("« Staff use » is the team workload: one name for one quantity");
+  const care = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "care" });
+  if (/<span>Rooms<\/span><strong>|<span>Clinical equipment<\/span>/.test(care)) throw new Error("The care page no longer counts rooms and equipment in cards");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// Trust and climate cannot be bought back every year at full strength: the same action taken in
+// consecutive years works half as well each time, and recovers after a year off (owner, 2026-10-19).
+{
+  const c0 = ClinicTest.initialState("balanced", "en"); c0.rules.actionLimit = 12; c0.rules.targetYear = 12; ClinicTest.renderState(c0);
+  const gain = () => { const base = ClinicTest.simulatePlan([]); ClinicTest.queueAction("social:staffMeeting", { kind: "social-action", targetId: "staffMeeting" }); const f = ClinicTest.simulatePlan(); return f.social.after.staffClimate - base.social.after.staffClimate; };
+  const full = gain(); ClinicTest.resolveTurn();
+  const second = gain(); ClinicTest.resolveTurn();
+  const third = gain(); ClinicTest.resolveTurn();
+  ClinicTest.resolveTurn();
+  const rested = gain();
+  const d = ClinicTest.data.socialModel.repeatDecay;
+  if (!(d < 1)) throw new Error("A repeated trust or climate action must wear out");
+  if (Math.abs(second - full * d) > .3 || Math.abs(third - full * d * d) > .3) throw new Error(`A repeated staff meeting must give ${full.toFixed(1)}, then ×${d}, then ×${d * d}: got ${full.toFixed(1)}, ${second.toFixed(1)}, ${third.toFixed(1)}`);
+  if (Math.abs(rested - full) > .3) throw new Error(`After a year off it must work in full again: ${rested.toFixed(1)} against ${full.toFixed(1)}`);
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// The choice already in force is shown as current, without a button; and "moving" to where the
+// clinic already is costs nothing (it cost 20 000 € and 5 % of demand — owner, 2026-10-19).
+{
+  const c0 = ClinicTest.initialState("balanced", "en"); ClinicTest.renderState(c0);
+  const st = ClinicTest.getState();
+  [["location", st.location.sectorId, "location:sector"], ["market", st.marketFocus, "market:focus"], ["stock", st.operations.stockStrategy, null], ["hr", st.hr.strategy, null]].forEach(([drawer]) => {
+    const html = ClinicTest.renderUiForTest({ drawer, drawerContext: null, confirm: null });
+    const current = html.match(/<article class="choice-card current">[\s\S]*?<\/article>/g) || [];
+    if (current.length !== 1) throw new Error(`The ${drawer} drawer must show exactly one current choice, found ${current.length}`);
+    if (/data-add-key/.test(current[0])) throw new Error(`The current ${drawer} choice must not be addable to the plan`);
+  });
+  const base = ClinicTest.simulatePlan([]);
+  const same = ClinicTest.simulatePlan([{ key: "location:sector", payload: { kind: "location", targetId: st.location.sectorId } }]);
+  if (Math.round(same.financial.netResult) !== Math.round(base.financial.netResult)) throw new Error("Choosing the current neighbourhood must cost nothing");
+  const rooms = ClinicTest.renderUiForTest({ drawer: "rooms", drawerContext: null, confirm: null });
+  if (/<h3>[^<]*· \d/.test(rooms)) throw new Error("A room's count must not run into its price");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// Gestion's money bar adds up to the revenue, profit or loss; equipment and loans compare their
+// versions on one table each; the price screen marks the price against what clients accept.
+{
+  const num = (t) => { const n = Number(String(t).replace(/[^\d]/g, "")); return /[−-]/.test(t) ? -n : n; };
+  [["balanced", () => {}], ["balanced", (c) => { c.services.vaccination.active = true; c.services.preventive.active = true; }]].forEach(([sc, f], k) => {
+    const c = ClinicTest.initialState(sc, "en"); f(c); ClinicTest.renderState(c);
+    const r = ClinicTest.simulatePlan();
+    const html = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "business" });
+    const bar = html.match(/<section class="card-section money-bar" role="img" aria-label="([^"]*)"/)?.[1];
+    if (!bar) throw new Error("The Business page must show where the money goes");
+    const item = (label) => num((bar.match(new RegExp(`${label} ([−-]?€[\\d,]+)`)) || [, "0"])[1]);
+    const result = r.financial.netResult >= 0 ? item("Net result") : item("Loss");
+    const tax = item("Tax");
+    const sum = item("Variable costs") + item("Fixed costs") + tax + result;
+    if (Math.abs(sum - Math.round(r.financial.revenue + (r.financial.grant || 0))) > 3) throw new Error(`Path ${k}: the money bar must add up to the revenue: ${sum} against ${Math.round(r.financial.revenue)}`);
+    if (Math.abs(item("Contribution margin") - Math.round(r.financial.revenue + (r.financial.grant || 0) - r.financial.variableCosts)) > 1) throw new Error("The contribution margin must be revenue minus variable costs");
+    if (!/class="mb-seg mb-rev/.test(html) || !/class="mb-bracket"/.test(html)) throw new Error("The money bar must set revenue above where it goes, with the margin marked");
+    if ((r.financial.netResult < 0) !== /class="mb-loss"/.test(html)) throw new Error("A loss must show as costs running past revenue, and only a loss");
+  });
+  const loans = ClinicTest.renderUiForTest({ drawer: "finance", drawerContext: null, confirm: null });
+  const table = loans.match(/<table class="compare-options">[\s\S]*?<\/table>/g) || [];
+  if (table.length !== 1 || (table[0].match(/data-add-key="finance:loan"/g) || []).length !== 3) throw new Error("The three loan amounts must be compared on one table, one button each");
+  const eq = ClinicTest.renderUiForTest({ drawer: "equipment", drawerContext: null, confirm: null });
+  const items = Object.keys(ClinicTest.data.equipment).length;
+  if ((eq.match(/<table class="compare-options">/g) || []).length !== items || (eq.match(/consequence-grid/g) || []).length) throw new Error(`Each of the ${items} equipment items must compare buying and leasing on one table, with no separate preview blocks`);
+  [["hr", "Staff climate changes absence"], ["capabilities", "Each service needs work from"]].forEach(([d, text]) => { const h = ClinicTest.renderUiForTest({ drawer: d, drawerContext: null, confirm: null }); if (!new RegExp(`<details class="note-repliee"><summary>[^<]*</summary><p>${text}`).test(h)) throw new Error(`The ${d} drawer's explanation must start collapsed`); });
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// Marketing (owner, 2026-10-19): one communication ladder whose trust gain wears in like any repeated
+// fix; no competitor monitoring; the market study buys information, not demand; a decision that
+// raises demand shows the refusals and households it costs before it is planned.
+{
+  if (ClinicTest.data.marketingStrategies.monitoring) throw new Error("Competitor monitoring acted on nothing a student can see; it is removed");
+  if (ClinicTest.data.socialActions.communication) throw new Error("Communication exists once, in the marketing ladder");
+  Object.values(ClinicTest.data.marketingStrategies.geomarketing).forEach((l) => { if (l.demand) throw new Error("A market study must not raise demand"); });
+  const c0 = ClinicTest.initialState("balanced", "en"); c0.rules.actionLimit = 12; c0.rules.targetYear = 12; ClinicTest.renderState(c0);
+  ClinicTest.queueAction("marketing:communication", { kind: "marketing-strategy", strategy: "communication", targetId: "targeted" }); ClinicTest.resolveTurn();
+  const parts = [ClinicTest.getState().history.at(-1).social.trustParts.communication];
+  ClinicTest.resolveTurn(); parts.push(ClinicTest.getState().history.at(-1).social.trustParts.communication);
+  ClinicTest.resolveTurn(); parts.push(ClinicTest.getState().history.at(-1).social.trustParts.communication);
+  const d = ClinicTest.data.socialModel.repeatDecay, t = ClinicTest.data.marketingStrategies.communication.targeted.trust;
+  if (Math.abs(parts[0] - t) > .01 || Math.abs(parts[1] - t * d) > .01 || Math.abs(parts[2] - t * d * d) > .01) throw new Error(`A kept communication programme must wear in: ${parts.join(", ")}`);
+  // Demand raised on a full room: the preview shows the refusals and households it costs.
+  const s0 = ClinicTest.initialState("balanced", "en"); s0.rules.actionLimit = 12; ClinicTest.renderState(s0);
+  ClinicTest.queueAction("a", { kind: "toggle-service", targetId: "vaccination", value: true }); ClinicTest.resolveTurn();
+  ClinicTest.queueAction("b", { kind: "toggle-service", targetId: "preventive", value: true }); ClinicTest.resolveTurn(); ClinicTest.resolveTurn();
+  const html = ClinicTest.renderUiForTest({ drawer: "marketing", drawerContext: null, confirm: null });
+  const card = (html.match(/<article class="choice-card"><h3>Targeted communication[\s\S]*?<\/article>/) || [""])[0];
+  if (!/<span>Requests refused<\/span><strong>\+[\d,]+<\/strong>/.test(card) || /<span>Requests refused<\/span><strong>[^<]*<\/strong><em>(?!Stock-outs)/.test(card)) throw new Error("Raising demand on a full room must show the refusals it adds — without naming the constraint — in the preview");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// What the clinic knew of accepted prices is what the exports say: the same range on the price
+// screen, in the PDF and in the analysis file, for the year it was known.
+{
+  const c0 = ClinicTest.initialState("balanced", "en"); ClinicTest.renderState(c0);
+  const screen = ClinicTest.renderUiForTest({ drawer: "pricing", drawerContext: null, confirm: null }).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const shown = screen.match(/General consultation[^€]*?Price your clients accept: (€[\d,]+–€[\d,]+)/i)?.[1];
+  if (!shown) throw new Error("Without a study the price screen must show a range");
+  ClinicTest.resolveTurn();
+  const pdf = ClinicTest.buildPrintableReportHtml();
+  if (!pdf.includes(shown)) throw new Error(`The PDF must show the range the clinic knew (${shown})`);
+  const row = ClinicTest.buildExportPayload().years.at(-1).serviceResults.find((r) => r.id === "consult");
+  if (row.acceptedPriceShown !== shown) throw new Error(`The analysis file must carry the shown range (${shown}), got ${row.acceptedPriceShown}`);
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// A decision's preview lists only what it moves, signed — no unchanged rows, no before → after list
+// (the plan panel has the whole picture). Refusals it adds carry their cause: opening vaccination on
+// the starting clinic adds refusals from stock-outs, not from capacity (owner, 2026-10-19).
+{
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+  const html = ClinicTest.renderUiForTest({ drawer: "services", drawerContext: "core", selectedServiceId: "vaccination", confirm: null });
+  const grid = (html.match(/<div class="consequence-grid delta-list"[\s\S]*?<\/div><\/div>/) || [""])[0];
+  if (!grid) throw new Error("Opening vaccination must preview what it changes");
+  if (/<strong>[+−-]?(€0|0 €|0|\+0 pts)<\/strong>/.test(grid)) throw new Error("A preview must not list what it does not change");
+  if (!/<span>Requests refused<\/span><strong>\+[\d,]+<\/strong><em>Stock-outs<\/em>/.test(grid)) throw new Error("Opening vaccination must show its added refusals with their cause, stock-outs: " + grid.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "));
+  if (/Without this decision|What this decision costs/.test(html)) throw new Error("The old before → after preview is gone");
+}
+
+// The overview tells the truth about next year: a kept clients promise does not mean refusals stop
+// costing trust — the access pressure says what they cost. No filler signal, no instructions.
+{
+  const c0 = ClinicTest.initialState("balanced", "en"); c0.rules.actionLimit = 12; c0.rules.targetYear = 12; ClinicTest.renderState(c0);
+  ClinicTest.queueAction("a", { kind: "toggle-service", targetId: "vaccination", value: true }); ClinicTest.resolveTurn();
+  ClinicTest.queueAction("b", { kind: "toggle-service", targetId: "preventive", value: true }); ClinicTest.resolveTurn();
+  const f = ClinicTest.simulatePlan();
+  const vue = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "overview" }).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const p = f.social.after.communityPressure;
+  if (!(p > 50) || !(f.operational.honoredRate >= .82)) throw new Error("This check needs a kept clients promise with pressure above 50");
+  if (/refusals settle/.test(vue) || !new RegExp(`access pressure ${Math.round(p)}: −[\\d.]+ trust`).test(vue)) throw new Error("The clients promise must say what the remaining pressure costs");
+  if (/carbon opportunity is visible|check the consequences before acting|explains what is happening/.test(vue)) throw new Error("The overview carries no filler signal and no instructions");
+  if (!/Next year/.test(vue)) throw new Error("Next year's consequences must be grouped under « Next year »");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// A choice's card shows what that choice changes directly: its costs, line by line, and what it does
+// to activity. Totals (net result, treasury), workload and indicators it does not act on directly
+// are in « Impact du plan » — not repeated on every card (owner, 2026-10-19).
+{
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+  const grids = (html) => (html.match(/<div class="consequence-grid delta-list"[\s\S]*?<\/div><\/div>/g) || []).join(" ");
+  const market = grids(ClinicTest.renderUiForTest({ drawer: "market", drawerContext: null, confirm: null }));
+  if (!market) throw new Error("Market focus must preview its effects");
+  ["Net result", "End treasury", "Team workload", "Staff climate", "Client trust", "Carbon footprint"].forEach((l) => { if (market.includes(`<span>${l}</span>`)) throw new Error(`A market focus card must not repeat « ${l} »: it is in the plan panel`); });
+  if (!/<span>Cases served<\/span>/.test(market)) throw new Error("A market focus card must show what it does to cases");
+  const meeting = grids(ClinicTest.renderUiForTest({ drawer: "relations", drawerContext: null, confirm: null }));
+  if (!/<span>Staff climate<\/span>/.test(meeting)) throw new Error("A staff meeting acts on climate directly: its card must show it");
+  const opening = grids(ClinicTest.renderUiForTest({ drawer: "opening", drawerContext: null, confirm: null }));
+  if (/<span>(Net result|End treasury)<\/span>/.test(opening)) throw new Error("No option card repeats the net result or the treasury");
+}
+
+// Where a person's hours go, by real cause (owner, 2026-10-19): Maya assigned 65 % to vaccination
+// works 592 h because the requests need no more — « not enough demand », not « stock-outs ». The
+// « short of » warning counts only hours that would add cases. A vet's hours spent on support work
+// show as « support tasks covered », and a service sheet shows one case split by role.
+{
+  const c0 = ClinicTest.initialState("balanced", "en"); ClinicTest.renderState(c0);
+  ClinicTest.queueAction("a", { kind: "toggle-service", targetId: "vaccination", value: true });
+  ClinicTest.queueAction("b", { kind: "toggle-service", targetId: "preventive", value: true });
+  const team = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "team" });
+  const maya = (team.match(/<h3>Maya Chen<\/h3>[\s\S]*?<ul class="hb-legend">([\s\S]*?)<\/ul>/) || [, ""])[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const demand = Number((maya.match(/not enough demand ([\d,]+)/) || [, "0"])[1].replace(/,/g, ""));
+  const stock = Number((maya.match(/Stock-outs ([\d,]+)/) || [, "0"])[1].replace(/,/g, ""));
+  if (!(demand > 500) || !(stock < 50)) throw new Error(`Maya's idle hours are mostly a lack of demand, not stock-outs: ${maya}`);
+  if (/is short of/.test(team)) throw new Error("No service here loses requests for lack of hours: no « short of » warning");
+  // Moving the vet's hours to preventive care: preventive is not short of vet hours, so the move only
+  // takes cases from the consultation — the warning must not have invited it.
+  const f = ClinicTest.simulatePlan();
+  f.operational.serviceHourRows.forEach((r) => { if (r.shortageHours > .5) { const res = f.serviceResults.find((x) => x.id === r.serviceId); if (!(res.lostBy || []).some((l) => l.reason.type === (r.role === "vet" ? "vetHours" : "supportHours"))) throw new Error(`${r.serviceId}: ${Math.round(r.shortageHours)} h « short » although no request was lost for that role's hours`); } });
+  // Support work done by the vet: Maya off preventive care, the vet does those cases alone.
+  const m = ClinicTest.getState().staff.find((p) => p.role === "support");
+  ClinicTest.queueAction(`staff-allocation:${m.id}`, { kind: "staff-allocation", targetId: m.id, value: { allocations: [{ serviceId: "vaccination", share: 1 }] } });
+  const team2 = ClinicTest.renderState({ ...ClinicTest.getState(), domain: "team" });
+  const amina = (team2.match(/<h3>Dr Amina Kone<\/h3>[\s\S]*?<ul class="hb-legend">([\s\S]*?)<\/ul>/) || [, ""])[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  if (!/support tasks covered [\d,]+/.test(amina)) throw new Error("A vet doing support work must show it on their hours bar: " + amina);
+  const sheet = ClinicTest.renderUiForTest({ drawer: "services", drawerContext: "core", selectedServiceId: "preventive", confirm: null });
+  if (!/<div class="case-split">/.test(sheet) || !/a vet can do the whole case: 0\.72 h/.test(sheet)) throw new Error("The preventive sheet must show one case split by role, and that a vet can do it all");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// A « short of » warning must be one the student can act on: on a clinic whose shared room is full,
+// adding the « missing » support hours to preventive care lowers the year — so no warning is shown.
+{
+  const c0 = ClinicTest.initialState("balanced", "en"); c0.rules.actionLimit = 12; c0.rules.targetYear = 12; ClinicTest.renderState(c0);
+  ClinicTest.queueAction("a", { kind: "toggle-service", targetId: "vaccination", value: true }); ClinicTest.resolveTurn();
+  ClinicTest.queueAction("b", { kind: "toggle-service", targetId: "preventive", value: true }); ClinicTest.resolveTurn(); ClinicTest.resolveTurn(); ClinicTest.resolveTurn();
+  const f = ClinicTest.simulatePlan();
+  f.operational.serviceHourRows.filter((r) => r.shortageHours > 5).forEach((r) => {
+    const st = ClinicTest.getState();
+    const who = st.staff.filter((p) => p.role === r.role);
+    // Give that role's first person the missing hours on that service, taken from their other work.
+    const p0 = who[0]; const extra = Math.min(.3, r.shortageHours / Math.max(1, f.operational.staffRows.find((x) => x.id === p0.id).availableHours));
+    const allocations = p0.allocations.map((a) => ({ ...a, share: a.serviceId === r.serviceId ? a.share + extra : Math.max(0, a.share - extra / Math.max(1, p0.allocations.length - 1)) }));
+    const g = ClinicTest.simulatePlan([{ key: "x", payload: { kind: "staff-allocation", targetId: p0.id, value: { allocations } } }]);
+    if (g.operational.totalHonored < f.operational.totalHonored) throw new Error(`${r.serviceId} is announced short of ${Math.round(r.shortageHours)} h, but giving them lowers the cases served (${f.operational.totalHonored} → ${g.operational.totalHonored})`);
+  });
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// Requests = cases + refusals: a card shows cases, and refusals only when demand itself moves.
+{
+  const c0 = ClinicTest.initialState("balanced", "en"); c0.rules.actionLimit = 12; c0.rules.targetYear = 12; ClinicTest.renderState(c0);
+  ClinicTest.queueAction("a", { kind: "toggle-service", targetId: "vaccination", value: true }); ClinicTest.resolveTurn();
+  ClinicTest.queueAction("b", { kind: "toggle-service", targetId: "preventive", value: true }); ClinicTest.resolveTurn(); ClinicTest.resolveTurn();
+  const grids = (html) => html.match(/<article[^>]*>[\s\S]*?<\/article>/g).filter((a) => /delta-list/.test(a));
+  grids(ClinicTest.renderUiForTest({ drawer: "opening", drawerContext: null, confirm: null })).forEach((card) => {
+    if (/<span>Requests<\/span>/.test(card)) throw new Error("The requests line is the sum of the other two: not shown");
+    if (/<span>Cases served<\/span>/.test(card) && /<span>Requests refused<\/span>/.test(card) && !/opening-period/.test("")) {
+      const cases = Number(card.match(/<span>Cases served<\/span><strong>([^<]*)/)[1].replace(/[^\d-−]/g, "").replace("−", "-"));
+      const refused = Number(card.match(/<span>Requests refused<\/span><strong>([^<]*)/)[1].replace(/[^\d-−]/g, "").replace("−", "-"));
+      if (cases === -refused) throw new Error("When demand does not move, refusals only mirror the cases: they must not be shown");
+    }
+  });
+  const mkt = grids(ClinicTest.renderUiForTest({ drawer: "marketing", drawerContext: null, confirm: null })).find((a) => /Targeted communication/.test(a)) || "";
+  if (!/<span>Cases served<\/span>/.test(mkt) || !/<span>Requests refused<\/span>/.test(mkt)) throw new Error("When demand moves on a full clinic, the card must show both the cases and the refusals");
+  ClinicTest.renderState(ClinicTest.initialState("balanced", "en"));
+}
+
+// The model map (carte-du-modele.html) is built from the code: if the code changed and the map was not
+// rebuilt, the guide would lie to whoever follows it (owner, 2026-10-21).
+{
+  const out = require("child_process").spawnSync(process.execPath, [require("path").join(__dirname, "outils", "carte-modele.js"), "--verifier"], { encoding: "utf8" });
+  if (out.status !== 0) throw new Error("The model map is out of date or no longer matches the code: " + ((out.stderr || "") + (out.stdout || "")).trim().split("\n").slice(0, 3).join(" "));
+}
+
+// The teacher's workshop (owner, 2026-10-21): a code opens a full-screen editor for the whole game —
+// rules, prices and accepted prices, salaries, rooms and equipment, operations, the starting clinic,
+// the currency and the names, in French and English. A teacher sees what a change does, applies it or
+// downloads it; students load the file before Year 1; every export says which rules were used.
+{
+  const T = ClinicTest, D = T.data;
+  const read = (chemin) => chemin.split(".").reduce((v, k) => (v == null ? undefined : Array.isArray(v) ? (v.find((x) => x && x.id === k) ?? v[Number(k)]) : v[k]), D);
+  // Every offered rule exists and starts inside its bounds; the catalogue reaches every table.
+  D.atelierSettings.forEach((def) => {
+    const v = read(def.chemin);
+    if (typeof v !== "number" || v < def.min || v > def.max) throw new Error(`Workshop setting ${def.chemin}: ${v} is missing or outside ${def.min}–${def.max}`);
+    if (!def.nomEn || !def.texteEn) throw new Error(`Workshop setting ${def.chemin} needs an English name`);
+  });
+  const paths = T.atelierPaths();
+  ["services.consult.price", "segments.community.willingness.consult", "scenarios.balanced.staff.vet-founder.salary", "rooms.consult.annualRent", "equipment.ultrasound.purchase", "openingPeriods.extended.cost", "scenarios.balanced.treasury", "scenarios.balanced.clients"].forEach((c) => {
+    if (!paths.valeurs.includes(c)) throw new Error(`The workshop must offer ${c}`);
+    if (typeof read(c) !== "number") throw new Error(`${c} does not exist in data.js`);
+  });
+  if (!paths.noms.includes("services.consult.name") || !paths.noms.includes("scenarios.balanced.description")) throw new Error("The workshop must offer the names of services and scenarios");
+  // The code is checked by its fingerprint; the default code opens it, others do not.
+  if (T.atelierFingerprint("atelier-clinique ") !== D.atelierCodeHash || T.atelierFingerprint("autre") === D.atelierCodeHash) throw new Error("The workshop code must open it, and only it");
+  // Rules are cleaned: unknown paths dropped, values bounded, unchanged values dropped.
+  const clean = T.cleanRules({ nom: "Test", valeurs: { "socialModel.refusedLeave": 5, "socialModel.inexistant": 3, "financeModel.taxRate": D.financeModel.taxRate }, monnaie: { code: "ZZZ", facteur: 99 } });
+  if (!clean || clean.valeurs["socialModel.refusedLeave"] !== .2 || "socialModel.inexistant" in clean.valeurs || "financeModel.taxRate" in clean.valeurs || clean.monnaie.code !== "EUR" || clean.monnaie.facteur !== 5) throw new Error("Rules must be cleaned: bounded, known, and only what changes: " + JSON.stringify(clean));
+  // A game carrying rules plays by them; a game without plays the original rules, even right after.
+  const base = T.initialState("balanced", "en"); base.rules.actionLimit = 12; T.renderState(base);
+  T.queueAction("a", { kind: "toggle-service", targetId: "vaccination", value: true }); T.resolveTurn();
+  T.queueAction("b", { kind: "toggle-service", targetId: "preventive", value: true }); T.resolveTurn();
+  const clinique = T.clone(T.getState());
+  const original = T.simulatePlan([]);
+  T.renderState({ ...T.clone(clinique), modelRules: { nom: "Plus dur", valeurs: { "socialModel.refusedLeave": .15 } } });
+  const dure = T.simulatePlan([]);
+  if (!(dure.next.clients < original.next.clients)) throw new Error("A game with harsher rules must lose more households");
+  T.renderState(T.clone(clinique));
+  if (T.simulatePlan([]).next.clients !== original.next.clients || D.socialModel.refusedLeave !== .06) throw new Error("A game without rules must play the original rules again");
+  // A base price moves the accepted price with it, unless unlinked.
+  const accepte = () => D.segments.community.willingness.consult;
+  const origineAccepte = accepte();
+  T.renderState({ ...T.clone(clinique), modelRules: { nom: "Prix", valeurs: { "services.consult.price": 60 } } }); T.simulatePlan([]);
+  if (Math.abs(accepte() - origineAccepte * 60 / 48) > .01) throw new Error(`A base price of 60 must move the accepted price to ${origineAccepte * 60 / 48}, got ${accepte()}`);
+  T.renderState({ ...T.clone(clinique), modelRules: { nom: "Prix", valeurs: { "services.consult.price": 60 }, delies: { consult: true } } }); T.simulatePlan([]);
+  if (accepte() !== origineAccepte) throw new Error("An unlinked base price must leave the accepted price as it was");
+  // The currency: amounts are shown in it; conversion is explicit, one value per amount.
+  T.renderState({ ...T.initialState("balanced", "fr"), modelRules: { nom: "Genève", monnaie: { code: "CHF", facteur: 1.1 } } });
+  if (!/CHF/.test(T.renderState({ ...T.getState(), domain: "business" }))) throw new Error("Amounts must be shown in the chosen currency");
+  // Starting values: a game not yet started takes them; a started one keeps what it played.
+  T.renderState(T.initialState("balanced", "en"));
+  const fichier = JSON.stringify({ kind: "clinique-regles", version: 2, nom: "Ville", valeurs: { "socialModel.refusedLeave": .15, "scenarios.balanced.treasury": 200000, "scenarios.balanced.clients": 1500, "services.consult.price": 55 }, noms: { "services.consult.name": { fr: "Consultation de base", en: "Basic consult" } } });
+  if (!T.chargerRegles(fichier)) throw new Error("A student must be able to load the teacher's rules before Year 1");
+  const st = T.getState();
+  if (st.treasury !== 200000 || st.clients !== 1500 || st.services.consult.price !== 55) throw new Error(`A game not yet started must take the new starting values: treasury ${st.treasury}, households ${st.clients}, price ${st.services.consult.price}`);
+  if (!/Basic consult/.test(T.renderState({ ...st, domain: "care" }))) throw new Error("A renamed service must show its new name");
+  if (T.chargerRegles(JSON.stringify({ kind: "autre" }))) throw new Error("Only a workshop rules file can be loaded");
+  T.resolveTurn();
+  if (T.chargerRegles(fichier)) throw new Error("Rules cannot be swapped once a year has been played");
+  // A version-1 file (values only) still loads.
+  T.renderState(T.initialState("balanced", "en"));
+  if (!T.chargerRegles(JSON.stringify({ kind: "clinique-regles", version: 1, nom: "Ancien", valeurs: { "staffModel.overtimePremium": 1.5 } })) || T.getState().modelRules.valeurs["staffModel.overtimePremium"] !== 1.5) throw new Error("A version-1 rules file must still load");
+  // The exports say which rules were used, section by section.
+  T.renderState(T.initialState("balanced", "en")); T.chargerRegles(fichier);
+  const json = T.buildExportPayload();
+  if (json.modelRules.nom !== "Ville" || json.modelRules.reglages.length !== 5) throw new Error("The analysis file must list every change: " + json.modelRules.reglages.length);
+  const pdf = T.buildPrintableReportHtml();
+  T.renderState(T.initialState("balanced", "en")); T.chargerRegles(JSON.stringify({ kind: "clinique-regles", version: 2, nom: "Genève", valeurs: { "services.consult.price": 53 }, monnaie: { code: "CHF", facteur: 1.1 } }));
+  if (!/€48\s*<\/td>\s*<td>\s*CHF\s*53/.test(T.buildPrintableReportHtml().replace(/\u00a0/g, " "))) throw new Error("The PDF must give originals in euros and the values used in the chosen currency");
+  T.renderState(T.initialState("balanced", "en")); T.chargerRegles(fichier);
+  if (!/Played with changed rules: « Ville »/.test(pdf) || !/Starting treasury/.test(pdf) || !/Basic consult/.test(pdf)) throw new Error("The PDF must list the changed rules, section by section");
+  // The full-screen workshop: closed without the code; with it, the effect shows before applying.
+  T.renderState(T.clone(clinique));
+  const ferme = T.renderUiForTest({ drawer: null, atelierView: true, atelierUnlocked: false, rulesDraft: null });
+  if (/class="atelier-page"/.test(ferme)) throw new Error("Without the code, the workshop must not open");
+  const page = T.renderUiForTest({ drawer: null, atelierView: true, atelierUnlocked: true, atelierSection: "regles", rulesDraft: { nom: "Plus dur", valeurs: { "socialModel.refusedLeave": .15 }, noms: {}, delies: {}, monnaie: null } });
+  const texte = page.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  if (!/class="atelier-page"/.test(page) || !/Next year Client households [−-][\d,]+/.test(texte)) throw new Error("The workshop must show what a draft changes next year: " + (texte.match(/What these rules change[^]{0,200}/) || [""])[0]);
+  if (T.getState().modelRules) throw new Error("A draft must not change the game until it is applied");
+  const prix = T.renderUiForTest({ drawer: null, atelierView: true, atelierUnlocked: true, atelierSection: "services", rulesDraft: { nom: "", valeurs: {}, noms: {}, delies: {}, monnaie: null } });
+  if (!/data-rule-cell="services\.consult\.price"/.test(prix) || !/data-rule-link="consult"/.test(prix)) throw new Error("The services section must offer the base prices and the accepted-price link");
+  T.renderUiForTest({ atelierView: false, atelierUnlocked: false, rulesDraft: null });
+  T.renderState(T.initialState("balanced", "en"));
+  if (!/Played with the original rules/.test(T.buildPrintableReportHtml())) throw new Error("The PDF must say when the original rules were used");
 }
 
 require("./tests.js");

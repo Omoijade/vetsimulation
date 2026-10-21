@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes d’animation</title>
+<style>
+  :root{--papier:#FEFDFB;--carte:#FFFFFF;--encre:#16243B;--douce:#4B5B73;--pale:#7C8AA0;--trait:#C8D3E0;--bleu:#2B5CA8;--bleu-pale:#E8EFF9;--rouge:#B4322A;--vert:#2F6B4F;--jaune:#F6E7A8}
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--papier:#182029;--carte:#1F2833;--encre:#E6ECF4;--douce:#AFBDD0;--pale:#7F8EA4;--trait:#2E3B4C;--bleu:#7FA9E8;--bleu-pale:#1B2A44;--rouge:#E4857C;--vert:#7FC29B;--jaune:#4A4021}}
+  :root[data-theme="dark"]{--papier:#182029;--carte:#1F2833;--encre:#E6ECF4;--douce:#AFBDD0;--pale:#7F8EA4;--trait:#2E3B4C;--bleu:#7FA9E8;--bleu-pale:#1B2A44;--rouge:#E4857C;--vert:#7FC29B;--jaune:#4A4021}
+  *{box-sizing:border-box}
+  html{background:var(--papier)}
+  body{margin:0;background:var(--papier);color:var(--encre);font:16px/1.55 "Source Sans 3",-apple-system,Segoe UI,Helvetica,Arial,sans-serif}
+  main{max-width:860px;margin:0 auto;padding:28px 16px 80px}
+  h1{font-family:Georgia,serif;font-size:32px;margin:0 0 4px}
+  h2{font-family:Georgia,serif;font-size:24px;margin:40px 0 8px;border-bottom:2px solid var(--encre);padding-bottom:4px}
+  h3{font-size:17px;margin:22px 0 6px}
+  p,li{max-width:70ch}
+  .chapeau{color:var(--douce);font-size:18px}
+  table{border-collapse:collapse;width:100%;margin:8px 0 16px;font-size:15px}
+  th,td{border:1px solid var(--trait);padding:6px 8px;text-align:left;vertical-align:top}
+  th{background:var(--bleu-pale)}
+  td:first-child{white-space:nowrap;font-family:ui-monospace,Menlo,monospace;font-size:13px}
+  .defile{overflow-x:auto}
+  .encadre{background:var(--carte);border:1.5px solid var(--trait);border-left:5px solid var(--bleu);padding:10px 14px;margin:10px 0 16px}
+  .attention{border-left-color:var(--rouge)}
+  .dire{font-style:italic;color:var(--douce)}
+  svg{display:block;width:100%;height:auto;max-width:960px;margin:12px 0}
+  svg .n rect{fill:var(--carte);stroke:var(--encre);stroke-width:1.5}
+  svg .n text{fill:var(--encre);font:600 14px Georgia,serif;text-anchor:middle;dominant-baseline:central}
+  svg .f{stroke:var(--douce);stroke-width:1.6;fill:none;marker-end:url(#p)}
+  svg #p path{fill:var(--douce)}
+  svg .l{font:700 13px ui-monospace,Menlo,monospace;text-anchor:middle;dominant-baseline:central}
+  svg .s{fill:var(--vert)} svg .o{fill:var(--rouge)}
+  svg .pa{fill:var(--papier);stroke:var(--trait)}
+  svg .note{fill:var(--rouge);font:600 12px ui-monospace,Menlo,monospace}
+  svg .delai{stroke:var(--rouge);stroke-width:2.2}
+  svg .contrainte{fill:none;stroke:var(--rouge);stroke-width:2;stroke-dasharray:6 4}
+  @media print{.noprint{display:none}}
+</style>
+</head>
+<body>
+<main>
+<h1>Notes d’animation</h1>
+<p class="chapeau">Pour l’enseignant seulement. Ce fichier n’est pas lié depuis le carnet : ne le distribuez pas.</p>
+
+<h2>Avant la semaine</h2>
+<ul>
+<li><strong>Game setup</strong>, sur chaque poste : la même <strong>class code</strong> pour les trois équipes ; précision des prévisions <strong>exacte</strong> (la demande ne varie alors pas d’une année à l’autre : le réalisé est égal au planifié, et les trois cliniques restent comparables) ; <strong>année cible = 10</strong> ; <strong>limite d’actions = 4</strong>. Le projet de la Dre Neri demande quatre actions la même année (salle, échographe, compétence, ouverture du service) : avec la limite par défaut de 3, il est impossible à tester vendredi.</li>
+<li><strong>Budget des années</strong> : deux par jour — lundi 1–2 · mardi 3–4 · mercredi 5–6 · jeudi aucune · vendredi 7–9, deux fois, à partir d’une clinique enregistrée. Tout reste sous l’année cible.</li>
+<li>Prévoir des feuilles A3 et des feutres de deux couleurs par équipe, pour lundi et mardi.</li>
+<li><strong>Un code d’équipe par équipe</strong> (par exemple G-01, G-02, G-03), annoncé lundi. C’est le seul identifiant du fichier d’analyse : pas de noms.</li>
+<li>Code des réponses : dans <code>carnet.html</code>, <code>const CODES</code>. À changer avant chaque promotion.</li>
+</ul>
+
+<h2>Changer les règles du jeu (atelier de l’enseignant)</h2>
+<p>Dans le jeu : <strong>Paramétrage › Atelier de l’enseignant</strong>, avec le code de l’atelier (par défaut <code>ATELIER-CLINIQUE</code> ; pour le changer : <code>node outils/code-atelier.js NOUVEAU-CODE</code>). L’atelier s’ouvre en plein écran, en français ou en anglais selon la langue du jeu : les sections à gauche, le tableau de la section au centre (valeur d’origine sous chaque case, cases modifiées en orange, « rétablir » à côté), et à droite ce que ces règles changent sur votre clinique, cette année et la suivante, avant d’appliquer.</p>
+<ul>
+<li><strong>Règles :</strong> vingt-huit réglages en curseurs, chacun nommé par son effet (« Familles qui partent après un refus », « Une équipe fatiguée ralentit »…).</li>
+<li><strong>Services et prix :</strong> prix de base, fournitures, temps par cas, part du vétérinaire, demande, sensibilité au prix ; et les prix acceptés par type de client. Un prix accepté suit le prix de base de son service (même proportion), sauf si vous décochez « lié ».</li>
+<li><strong>Équipe et salaires, Salles et équipement, Fonctionnement :</strong> salaires et heures de l’équipe de départ et des candidats, loyers, aménagements, achats, locations, formations, horaires, stock, RH, communication, implantations, mesures de durabilité.</li>
+<li><strong>Départ de la clinique :</strong> trésorerie, foyers, confiance et climat de chaque scénario, avec son nom et sa description.</li>
+<li><strong>Monnaie :</strong> la devise affichée partout (CHF, $, £, FCFA…). « Convertir tous les montants » multiplie chaque montant d’origine par un facteur, une seule fois ; chaque montant reste ajustable ensuite.</li>
+<li><strong>Noms :</strong> chaque nom en français et en anglais, côte à côte. Le carnet et la carte du modèle gardent les noms d’origine.</li>
+</ul>
+<ul>
+<li><strong>Pour essayer :</strong> « Appliquer à ma partie ». « Revenir aux règles d’origine » défait tout. Les valeurs de départ (prix, salaires, trésorerie, foyers) ne s’appliquent qu’à une partie pas encore commencée ; après l’année 1, seules les règles du modèle changent.</li>
+<li><strong>Pour une classe :</strong> « Télécharger les règles pour les étudiants » donne un fichier ; chaque étudiant le charge dans Paramétrage › « Charger des règles de l’enseignant », <em>avant l’année 1</em>. Les étudiants n’ont pas besoin du code. Les anciens fichiers de règles se chargent toujours.</li>
+<li><strong>Dans les exports :</strong> le PDF et le fichier d’analyse disent si la partie a été jouée avec les règles d’origine ou modifiées, section par section, montants dans la devise choisie.</li>
+<li><strong>Attention :</strong> les chiffres du carnet sont calculés avec les règles d’origine, en euros. Avec des règles modifiées, les étudiants trouveront d’autres chiffres que les réponses.</li>
+</ul>
+<p>Le code est un verrou pour la classe, pas une protection : quelqu’un qui lit le code du jeu pourrait le contourner.</p>
+
+<h2>Les règles de la semaine</h2>
+<p>La banque refuse tout agrandissement avant vendredi. Le carnet le dit aux étudiants (page « Pourquoi », bloc 05, et une boîte « Permis » chaque jour). Le jeu ne bloque rien : c’est à vous de le faire respecter.</p>
+<div class="defile"><table><thead><tr><th>Jour</th><th>Devient possible</th><th>Toujours interdit</th></tr></thead><tbody>
+<tr><td>Lundi</td><td>prix · ouvrir ou fermer un service que l’équipe sait déjà assurer · heures jusqu’à 100 %</td><td>tout le reste</td></tr>
+<tr><td>Mardi</td><td>+ horaires · heures supplémentaires · salaires · stratégie RH · réunion d’équipe · communication · rythme · durabilité · marché cible</td><td>embauche, salle, équipement, formation, emprunt, déménagement</td></tr>
+<tr><td>Mercredi</td><td>+ formation</td><td>embauche, salle, équipement, emprunt, déménagement</td></tr>
+<tr><td>Vendredi</td><td>tout, pour le projet de la Dre Neri seulement</td><td>—</td></tr>
+</tbody></table></div>
+<p><strong>Le scénario « Redressement sous contrainte »</strong> (non utilisé dans le cours) commence avec des familles sensibles aux prix et des prix au-dessus de ce qu’elles acceptent : sans baisse de prix, la confiance s’effondre et les clients partent. C’est voulu.</p>
+<p><strong>Pourquoi cet ordre.</strong> Tant que la contrainte ne peut pas s’élargir, les équipes doivent en tirer le maximum avec ce qu’elles ont — et ces leviers-là touchent l’équipe, les clients, le carbone. Vendredi est la première fois qu’on peut payer pour élargir : c’est ce qui fait de la proposition de la Dre Neri une vraie décision.</p>
+<p><strong>Les engagements.</strong> Les objectifs de la clinique sont des promesses à cinq parties, qui réagissent <em>l’année suivante</em> : la banque (taux du prochain emprunt, puis refus), les clients (pression d’accès, puis confiance), l’équipe (climat), les confrères (soutien des référents), la commune (une prime, seulement avec une mesure de durabilité). Le carnet en donne le tableau dans la Référence ; la vue d’ensemble montre, pour chacune, si elle est tenue et ce qui suit l’an prochain ; une promesse manquée revient dans les <code>Signaux de l’année</code>. Mesuré sur la clinique du cours (<code>node outils/boucles.js</code>, qui donne les chiffres année par année) : sans rien faire, la clinique se stabilise autour de la part servie promise, parce que les familles refusées partent aussi vite que d’autres arrivent ; les consultations raccourcies rapportent chaque année, mais la confiance glisse et les foyers finissent par baisser ; le projet de la D<sup>re</sup> Neri prend des heures de vétérinaire à la consultation, les refus montent et la clinique perd des foyers les années suivantes — c’est la promesse aux clients qu’il met en jeu. La banque, l’équipe et les confrères ne sont presque jamais en jeu sur cette clinique après l’année 3 : n’attendez pas de débat sur le taux d’emprunt vendredi, sauf chez une équipe qui a perdu de l’argent deux années de suite.</p>
+<p><strong>Vérifier.</strong> Dans le PDF de chaque équipe, « Comment l’année a été décidée » liste chaque décision avec son heure : une embauche ou une salle avant vendredi s’y voit tout de suite.</p>
+
+<h2>Lundi · 9 h – 11 h 30</h2>
+<div class="defile"><table><thead><tr><th>Heure</th><th>Bloc</th><th>Ce que vous faites</th></tr></thead><tbody>
+<tr><td>9 h 00</td><td>Ouverture</td><td>Lire la lettre de la Dre Neri à voix haute. Montrer les sept gestes. Vérifier que chaque équipe a créé son document.</td></tr>
+<tr><td>9 h 10</td><td>Premier regard</td><td>Circuler. Seule consigne à faire respecter : <strong>personne ne passe l’année</strong>.</td></tr>
+<tr><td>9 h 20</td><td>La carte de l’argent</td><td>Projeter la carte du carnet. Dire deux phrases S/O vous-même avant de lâcher les équipes. Les « ? » sur la carte sont normaux : aidez à trouver, ne donnez pas le chiffre.</td></tr>
+<tr><td>9 h 50</td><td>L’associé</td><td>Passer d’équipe en équipe geste par geste. Le piège le plus fréquent : lire le résultat Planifié au lieu de l’écart.</td></tr>
+<tr><td>10 h 30</td><td>Pause</td><td></td></tr>
+<tr><td>10 h 40</td><td>Deux années</td><td>Vérifier que la colonne Planifié est écrite <em>avant</em> de passer l’année. Une décision par année.</td></tr>
+<tr><td>11 h 15</td><td>Premier diagnostic</td><td>Relire une question par équipe : elle ouvre mardi.</td></tr>
+</tbody></table></div>
+<div class="encadre"><p><strong>Si le temps manque</strong> : réduire « Deux années » à une seule année. Le journal en aura une ligne ; la deuxième se fait mardi avant 9 h ou se rattrape avant mercredi.</p></div>
+
+<h2>Mardi · 9 h – 11 h 30</h2>
+<h3>Attribution des variables</h3>
+<div class="defile"><table><thead><tr><th>Équipe</th><th>Variable</th><th>Pourquoi elle tient seule une matinée</th></tr></thead><tbody>
+<tr><td>1</td><td>L’accès aux soins</td><td>Boucle qui se renforce (cas servis → confiance → demandes), puis un plafond (capacité, marché fini).</td></tr>
+<tr><td>2</td><td>Le climat de l’équipe</td><td>Seuils (50, 30) et délai (heures sup. → absences l’an suivant). La charge agit des deux côtés : trop haute comme trop basse, elle fait baisser le climat.</td></tr>
+<tr><td>3</td><td>L’empreinte carbone</td><td>Part fixe (le bâtiment) : moins de cas, c’est plus de carbone par cas. Les mesures coûtent : arbitrage avec le résultat net.</td></tr>
+</tbody></table></div>
+<p>Faites tourner l’attribution d’une promotion à l’autre si vous voulez comparer ce que chaque variable fait émerger.</p>
+
+<h3>Groupes de l’assemblage (9 h 40)</h3>
+<p>Numérotez les membres de chaque équipe 1, 2, 3… Les « 1 » des trois équipes forment un groupe, les « 2 » un autre, etc. Une équipe plus nombreuse que les autres : ses membres en trop rejoignent un groupe comme second porteur de la même boucle.</p>
+
+<h3>La synthèse (10 h 05) · à projeter</h3>
+<p>Montrez-la <strong>après</strong> l’assemblage, jamais avant : les équipes doivent avoir construit la leur. Comparez d’abord : « où votre carte ressemble-t-elle à celle-ci ? où est-elle différente — et laquelle a raison selon le jeu ? »</p>
+<svg viewBox="0 0 960 590" role="img" aria-labelledby="gb-t"><title id="gb-t">La grande boucle de la clinique : argent, accès aux soins, équipe, carbone</title>
+<defs><marker id="p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<path class="f" d="M170,60 L398,60"/>
+<path class="f" d="M90,82 L90,176"/>
+<path class="f" d="M595,60 L562,60"/>
+<path class="f" d="M480,82 L480,176"/>
+<path class="f" d="M560,190 L640,82"/>
+<path class="f" d="M400,200 L172,200"/>
+<path class="f" d="M560,200 L788,200"/>
+<path class="f" d="M870,82 L870,176"/>
+<path class="f" d="M560,212 L640,318"/>
+<path class="f" d="M480,318 L480,224"/>
+<path class="f" d="M90,222 L90,316"/>
+<path class="f" d="M90,458 L90,364"/>
+<path class="f" d="M170,340 L203,340"/>
+<path class="f" d="M367,340 L398,340"/>
+<path class="f" d="M740,362 L842,458"/>
+<path class="f" d="M790,480 L757,480"/>
+<path class="f" d="M595,480 L562,480"/>
+<path class="f" d="M480,458 L480,364"/>
+<path class="f" d="M870,502 L870,560 L90,560 L90,504"/>
+<line class="delai" x1="376" y1="330" x2="370" y2="350"/><line class="delai" x1="383" y1="330" x2="377" y2="350"/>
+<path class="f" d="M850,503 Q680,548 512,504"/><line class="delai" x1="676" y1="516" x2="670" y2="536"/><line class="delai" x1="684" y1="516" x2="678" y2="536"/>
+<g class="n"><rect x="10" y="38" width="160" height="44" rx="6"/><text x="90" y="60">Prix</text></g>
+<g class="n"><rect x="400" y="38" width="160" height="44" rx="6"/><text x="480" y="60">Demandes</text></g>
+<g class="n"><rect x="597" y="38" width="160" height="44" rx="6"/><text x="677" y="60">Confiance des clients</text></g>
+<g class="n"><rect x="790" y="38" width="160" height="44" rx="6"/><text x="870" y="60">Mesures carbone</text></g>
+<g class="n"><rect x="10" y="178" width="160" height="44" rx="6"/><text x="90" y="200">Recettes</text></g>
+<g class="n"><rect x="400" y="178" width="160" height="44" rx="6"/><text x="480" y="200">Cas traités</text></g>
+<g class="n"><rect x="790" y="178" width="160" height="44" rx="6"/><text x="870" y="200">Empreinte carbone</text></g>
+<g class="n"><rect x="10" y="318" width="160" height="44" rx="6"/><text x="90" y="340">Résultat net</text></g>
+<g class="n"><rect x="205" y="318" width="160" height="44" rx="6"/><text x="285" y="340">Trésorerie</text></g>
+<g class="n"><rect x="400" y="318" width="160" height="44" rx="6"/><text x="480" y="340">Capacité</text></g>
+<g class="n"><rect x="597" y="318" width="160" height="44" rx="6"/><text x="677" y="340">Charge de l’équipe</text></g>
+<g class="n"><rect x="10" y="458" width="160" height="44" rx="6"/><text x="90" y="480">Coûts</text></g>
+<g class="n"><rect x="400" y="458" width="160" height="44" rx="6"/><text x="480" y="480">Absences</text></g>
+<g class="n"><rect x="597" y="458" width="160" height="44" rx="6"/><text x="677" y="480">Climat de l’équipe</text></g>
+<g class="n"><rect x="792" y="458" width="160" height="44" rx="6"/><text x="872" y="480">Heures sup.</text></g>
+<rect class="contrainte" x="392" y="310" width="176" height="60" rx="10"/>
+<text class="note" x="400" y="392">contrainte</text>
+<text class="note" x="400" y="28">plafond : le marché est fini</text>
+<text class="note" x="600" y="452">⚠ 50 · 30</text>
+<text class="note" x="300" y="315">décision</text>
+<g><circle class="pa" cx="284" cy="48" r="11"/><text class="l o" x="284" y="48">O</text></g>
+<g><circle class="pa" cx="106" cy="129" r="11"/><text class="l s" x="106" y="129">S</text></g>
+<g><circle class="pa" cx="579" cy="48" r="11"/><text class="l s" x="579" y="48">S</text></g>
+<g><circle class="pa" cx="496" cy="129" r="11"/><text class="l s" x="496" y="129">S</text></g>
+<g><circle class="pa" cx="612" cy="130" r="11"/><text class="l s" x="612" y="130">S</text></g>
+<g><circle class="pa" cx="286" cy="188" r="11"/><text class="l s" x="286" y="188">S</text></g>
+<g><circle class="pa" cx="674" cy="188" r="11"/><text class="l s" x="674" y="188">S</text></g>
+<g><circle class="pa" cx="886" cy="129" r="11"/><text class="l o" x="886" y="129">O</text></g>
+<g><circle class="pa" cx="612" cy="270" r="11"/><text class="l s" x="612" y="270">S</text></g>
+<g><circle class="pa" cx="496" cy="271" r="11"/><text class="l s" x="496" y="271">S</text></g>
+<g><circle class="pa" cx="106" cy="269" r="11"/><text class="l s" x="106" y="269">S</text></g>
+<g><circle class="pa" cx="106" cy="411" r="11"/><text class="l o" x="106" y="411">O</text></g>
+<g><circle class="pa" cx="187" cy="328" r="11"/><text class="l s" x="187" y="328">S</text></g>
+<g><circle class="pa" cx="383" cy="366" r="11"/><text class="l s" x="383" y="366">S</text></g>
+<g><circle class="pa" cx="800" cy="398" r="11"/><text class="l s" x="800" y="398">S</text></g>
+<g><circle class="pa" cx="774" cy="468" r="11"/><text class="l o" x="774" y="468">O</text></g>
+<g><circle class="pa" cx="579" cy="468" r="11"/><text class="l o" x="579" y="468">O</text></g>
+<g><circle class="pa" cx="496" cy="411" r="11"/><text class="l o" x="496" y="411">O</text></g>
+<g><circle class="pa" cx="480" cy="560" r="11"/><text class="l s" x="480" y="560">S</text></g>
+<g><circle class="pa" cx="720" cy="531" r="11"/><text class="l s" x="720" y="531">S</text></g>
+</svg>
+<p class="dire">Lecture, flèche par flèche, dans l’ordre où vous la racontez :</p>
+<ol>
+<li><strong>La boucle de l’argent</strong> (lundi) : Prix → Demandes (O), Demandes → Cas traités → Recettes → Résultat net → Trésorerie.</li>
+<li><strong>Elle se referme</strong> : Trésorerie → Capacité (S), mais c’est une <em>décision</em> — embaucher, ouvrir une salle — et elle porte un <strong>délai</strong> (//) : un service ouvert ne reçoit que 60 % de sa demande la première année.</li>
+<li><strong>L’accès aux soins</strong> : Cas traités → Confiance des clients (S, par la part des demandes servies) → Demandes (S). Elle se renforce… jusqu’au <strong>plafond</strong> : le marché est fini, et la capacité aussi.</li>
+<li><strong>L’équipe</strong> : Cas traités → Charge (S) → Heures sup. (S) → Climat (O) → Absences (O) → Capacité (O). Heures sup. → Coûts (S), la même année. Heures sup. → Absences (S), avec un <strong>délai</strong> (//) : les heures sup. d’une année reviennent en absences l’année suivante. <strong>Seuils</strong> : sous 50, les absences montent ; sous 30, une démission en fin d’année.</li>
+<li><strong>Le carbone</strong> : Cas traités → Empreinte (S) ; Mesures carbone (onglet <code>Durabilité</code>) → Empreinte (O), mais elles coûtent.</li>
+<li><strong>La contrainte</strong> (pointillé) : là où la boucle est coupée aujourd’hui. Demandez : « qu’est-ce qui est au plus près de sa capacité chez vous ? Pousser ailleurs, est-ce que ça change quelque chose ? » Le jeu ne nomme la <code>Contrainte principale</code> qu’après l’année passée, dans <code>Résultats</code> : c’est aux équipes de la prévoir.</li>
+</ol>
+<div class="encadre attention"><p><strong>Simplifications à assumer devant les étudiants</strong> : la flèche Charge → Climat n’est pas un S ou un O simple (trop haute <em>comme</em> trop basse, la charge fait baisser le climat — la clinique de départ est à 37 %, sous les 45 %). Les mesures de durabilité ajoutent des coûts (flèche non dessinée). Si une équipe l’a vu, c’est un bon moment : le dessin aussi a un périmètre.</p></div>
+
+<h3>La démonstration : trois années qui forcent l’allure</h3>
+<p>Préparez avant la séance une clinique qui a ouvert la vaccination en année 1 et les soins préventifs en année 2, et enregistrez-la au début de l’année 3.</p>
+<ol>
+<li>Projetez-la. Planifiez : <code>Horaires d’ouverture</code> → semaine prolongée ; la vétérinaire à 120 % ; Maya à 125 %.</li>
+<li>Montrez la prévision d’un an : le climat ne perd que 2 points. « Est-ce grave ? »</li>
+<li>Passez trois années, sans rien changer. Faites lire à chaque fois le résultat net et le climat :
+<table><thead><tr><th>Année</th><th>Résultat net</th><th>Cas traités</th><th>Heures sup.</th><th>Climat</th></tr></thead><tbody>
+<tr><td>3</td><td>49 998 €</td><td>5 009</td><td>105 h</td><td>51</td></tr><tr><td>4</td><td>50 784 €</td><td>5 131</td><td>179 h</td><td>44</td></tr><tr><td>5</td><td>47 191 €</td><td>5 078</td><td>211 h</td><td>37</td></tr>
+</tbody></table>
+L’argent et l’accès aux soins montent deux ans pendant que le climat glisse ; la troisième année, une équipe sous 50 travaille plus lentement, et les cas et le résultat baissent. C’est le <strong>délai</strong>, et sous 50 un <strong>seuil de basculement</strong>. Faites lire, sur la page <code>Résultats</code>, les <code>Signaux de l’année</code> : ils l’annoncent un an avant.</li>
+<li><code>Charger une clinique</code> : rechargez votre point de départ.</li>
+</ol>
+<p>Chiffres produits par <code>node outils/semaine-type.js</code> ; ils dépendent de la clinique, pas de la méthode.</p>
+
+<h3>« La salle est pleine » (10 h 20)</h3>
+<ul>
+<li>Les équipes choisissent une réponse — deux au plus — et la <strong>prévoient sur la carte</strong> (↑↓) <em>avant</em> de la planifier. C’est le geste à surveiller : sans lui, la carte ne sert à rien.</li>
+<li>Ce que le jeu montre désormais, et que les cartes doivent prévoir : les visites pressées reviennent (retours non payés), coûtent de la confiance et un point de climat par an ; un prix au-dessus de ce que les clients acceptent coûte de la confiance chaque année — plus avec des familles sensibles aux prix ; sous 45 de confiance, des clients partent. Ces effets s’affichent avant de passer l’année (lignes <code>Confiance des clients</code> et <code>Climat de l’équipe</code> d’<code>Impact du plan</code>, écran des prix).</li>
+<li>L’équipe « accès aux soins » peut maintenant suivre une boucle complète : les refus s’accumulent dans la <code>Pression d’accès</code>, qui coûte de la confiance l’année suivante ; sous 45 de confiance, des clients partent. Chaque année passée, les <code>Signaux de l’année</code> (page <code>Résultats</code>) disent, en une ligne par signal, ce qui a bougé et ce que cela fait l’an prochain : combien de foyers les refus ont coûté, ce que coûte un climat sous 50. C’est de là que l’année suivante se diagnostique.</li>
+<li>Les ✗ restent précieux : une vétérinaire au-delà de 100 % cachée par la moyenne de l’équipe, le bien-être animal, ce qu’un client refusé raconte autour de lui (le jeu compte les familles refusées qui partent, pas celles qu’elles découragent). C’est là que le périmètre se découvre.</li>
+<li>Une équipe qui met l’équipe au-delà de 100 % sans rien d’autre obtient 0 heure supplémentaire : la salle est pleine. Laissez-la le découvrir, puis demandez-lui ce qui est au plus près de sa capacité, et vérifiez-le ensemble dans <code>Résultats</code> une fois l’année passée.</li>
+<li>La réponse détaillée, réponse par réponse, est dans la réponse de mardi (code du jour).</li>
+</ul>
+
+<div class="encadre"><p><strong>Si le temps manque</strong> : « Deux années avec votre réponse » peut se limiter à l’année 3 en séance ; l’année 4 se joue avant mercredi, à la maison. Ne raccourcissez pas « Votre variable » ni l’assemblage : c’est là que les équipes construisent.</p></div>
+
+<h2>Mercredi · seul, chez soi</h2>
+<ul>
+<li>Rien à animer. Rappelez mardi en fin de séance : la clinique a <strong>quatre années derrière elle</strong>, et l’équipe l’enregistre.</li>
+<li>Les cliniques ont divergé. Le bloc « Quels services méritent la ressource rare ? » marche quelle que soit la contrainte : salle, heures vétérinaires ou de soutien. Le geste naïf — donner tout le temps de Maya au service le mieux classé — échoue souvent, parce qu’un autre service avait besoin de ses heures : c’est une bonne question pour vendredi.</li>
+<li>La journée produit le <strong>premier jet</strong> pour la Dre Neri et <strong>une question par équipe</strong> pour jeudi. Vérifiez mercredi soir que chaque équipe en a retenu une : c’est ce qui ouvre la conversation jeudi.</li>
+<li>Repère pour lire les dossiers : une marge par heure divisée par la somme des heures vétérinaires et de soutien est l’erreur la plus fréquente.</li>
+</ul>
+
+<h2>Jeudi · 9 h – 11 h 30, avec le praticien</h2>
+<div class="defile"><table><thead><tr><th>Heure</th><th>Bloc</th><th>Ce que vous faites</th></tr></thead><tbody>
+<tr><td>9 h 00</td><td>Avant qu’il commence</td><td>Cinq minutes : page en deux colonnes, question de l’équipe prête.</td></tr>
+<tr><td>9 h 05</td><td>La rencontre</td><td>Le praticien a la parole. Vous veillez à ce que chaque équipe pose sa question.</td></tr>
+<tr><td>10 h 35</td><td>Pause</td><td>Le praticien peut partir ici.</td></tr>
+<tr><td>10 h 45</td><td>Hors du périmètre</td><td>Ses phrases vont dedans (avec leur écran) ou hors du trait tracé mardi.</td></tr>
+<tr><td>11 h 00</td><td>Cadrer le premier jet</td><td>Point de vue, coûts pertinents, coût d’opportunité.</td></tr>
+</tbody></table></div>
+<div class="encadre"><p><strong>À dire au praticien avant la séance.</strong> Il ne connaît pas la simulation et n’a pas à la connaître : il vient parler du métier et motiver. Les étudiants lui poseront des questions générales, qui demandent une histoire : comment il organisait son temps, comment il a décidé d’ouvrir un service, une décision d’argent qu’il referait autrement, comment il a tenu une équipe. Il peut répondre par une histoire plutôt que par un conseil — c’est ce qui sert le plus.</p></div>
+
+<h2>Vendredi · 9 h – 11 h 30, présentations</h2>
+<ul>
+<li><strong>9 h 00</strong> : annoncez l’ordre de passage des trois équipes.</li>
+<li><strong>9 h 05 – 10 h 30</strong> : les équipes enregistrent leur clinique au début de l’année 7 et testent le projet sur les années 7 à 9 (une fois sans, une fois avec), remplissent le tableau 100 / 80 / 60 par le calcul, et finissent leurs quatre parties. Si le jeu refuse la quatrième action, la limite d’actions est restée à 3 : passez-la à 4 dans Game setup. <strong>Vérifiez que chaque équipe donne des heures de la vétérinaire à l’échographie</strong> (fiche → onglet Temps) : sans cela, le service ouvert ne traite aucun cas.</li>
+<li><strong>10 h 40 – 11 h 25</strong> : trois présentations de dix minutes, cinq minutes de questions chacune. Questions utiles : « sur quelle flèche agit votre réponse ? », « comparée à quoi ? », « de quel point de vue est-elle bonne ? », « qu’est-ce qui la renverserait ? ».</li>
+<li><strong>11 h 25</strong> : chaque équipe exporte (<code>Exporter</code> → code d’équipe → <code>Télécharger le JSON analytique</code>) et vous remet le fichier. Il contient chaque année jouée, chaque décision, et les essais remplacés au rechargement — dont les trois années sans le projet. Puis donnez le code de la réponse du jour.</li>
+</ul>
+<div class="encadre"><p><strong>Le tableau 100 / 80 / 60</strong> ne se joue pas : le jeu n’a aucun réglage de demande. Il se calcule — écart à 80 % = écart − 20 % des cas d’échographie × marge par cas. Les coûts fixes du projet restent entiers, c’est tout l’intérêt du calcul.</p></div>
+</main>
+</body>
+</html>
